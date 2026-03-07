@@ -68,6 +68,10 @@ function switchView(viewName, pushUrl = true) {
     window.history.replaceState({}, "", url.toString());
   }
 
+  if (viewName === "reports") {
+    // Wait one frame so the reports canvases are visible before Chart.js measures them.
+    requestAnimationFrame(() => loadreports());
+  }
   if (viewName === "notifications") loadNotifications();
   if (viewName === "settings") loadProfile();
 }
@@ -408,9 +412,228 @@ function confirmDelete(typeId, typeName) {
     }
   );
 }
-// =====================
+
+let __lineChart = null;
+let __pieChart = null;
+
+const REPORT_PIE_COLORS = [
+  "#2563eb",
+  "#16a34a",
+  "#f59e0b",
+  "#ef4444",
+  "#8b5cf6",
+  "#06b6d4",
+  "#84cc16",
+  "#f97316",
+  "#0ea5e9",
+  "#14b8a6",
+];
+
+const pieValuePlugin = {
+  id: "pieValuePlugin",
+  afterDatasetsDraw(chart) {
+    if (chart.config.type !== "pie") return;
+
+    const dataset = chart.data.datasets?.[0];
+    const meta = chart.getDatasetMeta(0);
+    if (!dataset || !meta?.data?.length) return;
+
+    const ctx = chart.ctx;
+    ctx.save();
+
+    meta.data.forEach((arc, index) => {
+      const value = Number(dataset.data[index] || 0);
+      if (!Number.isFinite(value) || value <= 0) return;
+
+      const props = arc.getProps(
+        ["startAngle", "endAngle", "outerRadius", "innerRadius", "x", "y"],
+        true
+      );
+
+      const angle = (props.startAngle + props.endAngle) / 2;
+      const radius = (props.innerRadius + props.outerRadius) / 2;
+      const x = props.x + Math.cos(angle) * radius;
+      const y = props.y + Math.sin(angle) * radius;
+
+      ctx.font = "bold 12px Arial";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      // Stroke improves readability regardless of slice color.
+      const text = String(value);
+      ctx.strokeStyle = "rgba(0,0,0,0.45)";
+      ctx.lineWidth = 3;
+      ctx.strokeText(text, x, y);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(text, x, y);
+    });
+
+    ctx.restore();
+  },
+};
+
+async function loadreports() {
+  const lineCanvas = document.getElementById("monthlyLineChart");
+  const pieCanvas = document.getElementById("requestTypePieChart");
+
+  if (!lineCanvas || !pieCanvas) return;
+
+  if (typeof Chart === "undefined") {
+    console.error("Chart.js is not loaded.");
+    return;
+  }
+
+  try {
+    // cards data
+    const res = await fetch("/api/reports", { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      throw new Error(`Failed to load /api/reports (${res.status})`);
+    }
+
+    if (!data.success) {
+      throw new Error(data.message || "Failed loading reports");
+    }
+
+    const w = document.getElementById("weeklyRequests");
+    const m = document.getElementById("monthlyRequests");
+    const y = document.getElementById("yearlyRequests");
+    const t = document.getElementById("topRequestType");
+
+    if (w) w.innerText = data.weekly_requests ?? 0;
+    if (m) m.innerText = data.monthly_requests ?? 0;
+    if (y) y.innerText = data.yearly_requests ?? 0;
+    if (t) t.innerText = data.top_request_type ?? "None";
+
+    // charts data
+    const ress = await fetch("/api/reports/chartdata", { cache: "no-store" });
+    const dt = await ress.json().catch(() => ({}));
+
+    if (!ress.ok) {
+      throw new Error(`Failed to load /api/reports/chartdata (${ress.status})`);
+    }
+
+    if (dt.success === false) {
+      throw new Error(dt.message || "Failed loading chart data");
+    }
+
+    const months = Array.isArray(dt.months) ? dt.months : [];
+    const monthTotals = Array.isArray(dt.monthTotals)
+      ? dt.monthTotals.map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
+      : [];
+
+    const pieLabels = Array.isArray(dt.types) ? dt.types : [];
+    const pieTotals = Array.isArray(dt.typeTotals)
+      ? dt.typeTotals.map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
+      : [];
+    const pieColors = pieTotals.map((_, i) => REPORT_PIE_COLORS[i % REPORT_PIE_COLORS.length]);
+
+    // destroy old charts to avoid duplicates
+    if (__lineChart) __lineChart.destroy();
+    if (__pieChart) __pieChart.destroy();
+
+    // Line graph 
+    __lineChart = new Chart(lineCanvas, {
+      type: "line",
+      data: {
+        labels: months,
+        datasets: [
+          {
+            label: "Total Requests",
+            data: monthTotals,
+            borderWidth: 2,
+            tension: 0.3,
+            borderColor: "#2563eb",
+            backgroundColor: "rgba(37,99,235,0.12)",
+            fill: true,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          y: { beginAtZero: true },
+        },
+      },
+    });
+
+    // Pie graph-
+    __pieChart = new Chart(pieCanvas, {
+      type: "pie",
+      data: {
+        labels: pieLabels,
+        datasets: [
+          {
+            data: pieTotals,
+            backgroundColor: pieColors,
+            borderColor: "#ffffff",
+            borderWidth: 2,
+          },
+        ],
+      },
+      plugins: [pieValuePlugin],
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: "bottom",
+            labels: {
+              generateLabels(chart) {
+                const defaults = Chart.defaults.plugins.legend.labels.generateLabels(chart);
+                const values = chart.data.datasets?.[0]?.data || [];
+                return defaults.map((item) => {
+                  const value = Number(values[item.index] || 0);
+                  return {
+                    ...item,
+                    text: `${item.text} (${value})`,
+                  };
+                });
+              },
+            },
+          },
+          tooltip: {
+            callbacks: {
+              label(context) {
+                const label = context.label || "Type";
+                const value = Number(context.parsed || 0);
+                const total = (context.dataset.data || []).reduce(
+                  (sum, n) => sum + (Number.isFinite(Number(n)) ? Number(n) : 0),
+                  0
+                );
+                const pct = total > 0 ? ((value / total) * 100).toFixed(1) : "0.0";
+                return `${label}: ${value} (${pct}%)`;
+              },
+            },
+          },
+        },
+      },
+    });
+  } catch (err) {
+    console.error("Report load error:", err);
+
+    const w = document.getElementById("weeklyRequests");
+    const m = document.getElementById("monthlyRequests");
+    const y = document.getElementById("yearlyRequests");
+    const t = document.getElementById("topRequestType");
+    if (w) w.innerText = "Error";
+    if (m) m.innerText = "Error";
+    if (y) y.innerText = "Error";
+    if (t) t.innerText = "Error";
+  }
+}
+
 // Notifications (Admin)
-// =====================
+function cleanNotificationText(value) {
+  return String(value || "")
+    .replace(/\s*\(pos_id=\d+\)\s*/gi, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 async function loadNotifications() {
   const container =
     document.getElementById("notifList") ||
@@ -445,8 +668,8 @@ async function loadNotifications() {
           <div style="padding:14px;border:1px solid #e5e7eb;border-radius:12px;margin-bottom:10px;background:#fff;">
             <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
               <div>
-                <div style="font-weight:600;">${n.title || "Activity"}</div>
-                <div style="color:#6b7280;margin-top:4px;">${n.description || ""}</div>
+                <div style="font-weight:600;">${cleanNotificationText(n.title || "Activity")}</div>
+                <div style="color:#6b7280;margin-top:4px;">${cleanNotificationText(n.description || "")}</div>
               </div>
               <small style="color:#9ca3af;white-space:nowrap;">${when}</small>
             </div>
@@ -462,9 +685,9 @@ async function loadNotifications() {
   }
 }
 
-// =====================
+
 // Settings Profile
-// =====================
+
 async function loadProfile() {
   try {
     const res = await fetch("/api/user-profile");
@@ -484,9 +707,9 @@ async function loadProfile() {
   }
 }
 
-// =====================
+
 // Close modals on outside click & ESC
-// =====================
+
 document.addEventListener("click", (e) => {
   const approveModal = document.getElementById("approveModal");
   const rejectModal = document.getElementById("rejectModal");
@@ -525,9 +748,9 @@ document.addEventListener("keydown", (e) => {
   if (annotateModal?.style.display === "flex") closeAnnotateModal();
 });
 
-// =====================
+
 // Workflow Edit Modal
-// =====================
+
 function _getSelectedValues(selectEl) {
   if (!selectEl) return [];
   return Array.from(selectEl.selectedOptions)
@@ -688,3 +911,88 @@ async function adminMarkCompleted(requestId) {
 
   openSysPopup("Success", data.message || "Completed!", true);
 }
+
+const ADMIN_AUTO_REFRESH_MS = 15000;
+
+function isAdminModalOpen() {
+  const modalIds = [
+    "approveModal",
+    "rejectModal",
+    "ccModal",
+    "workflowModal",
+    "confirmModal",
+    "sysPopup",
+    "invModal",
+    "sendModal",
+    "sendCopyModal",
+  ];
+
+  return modalIds.some((id) => {
+    const el = document.getElementById(id);
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    return (
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0"
+    );
+  });
+}
+
+function isAdminUserBusy() {
+  if (document.hidden) return true;
+  if (isAdminModalOpen()) return true;
+
+  const active = document.activeElement;
+  if (active) {
+    const tag = (active.tagName || "").toUpperCase();
+    if (
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      tag === "SELECT" ||
+      active.isContentEditable
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function adminAutoRefreshTick() {
+  const url = new URL(window.location.href);
+  const view =
+    localStorage.getItem("admin_current_view") ||
+    url.searchParams.get("view") ||
+    "dashboard";
+
+  if (view === "notifications") {
+    loadNotifications();
+    return;
+  }
+
+  if (view === "settings") {
+    loadProfile();
+    return;
+  }
+
+  if (view === "reports") {
+    loadreports();
+    return;
+  }
+
+  window.location.reload();
+}
+
+window.addEventListener("load", () => {
+  setInterval(() => {
+    if (isAdminUserBusy()) return;
+    adminAutoRefreshTick();
+  }, ADMIN_AUTO_REFRESH_MS);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  if (isAdminUserBusy()) return;
+  adminAutoRefreshTick();
+});

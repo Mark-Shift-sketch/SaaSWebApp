@@ -270,6 +270,67 @@ function switchView(viewName) {
 
     if (viewEl) viewEl.style.display = "flex";
     if (navEl) navEl.classList.add("active");
+
+    if (viewName === "dashboard") filterTable();
+    if (viewName === "inventory") filterInventory();
+    if (viewName === "inventory-management") filterInvMgmt();
+    if (viewName === "history") filterHistory();
+    if (viewName === "notifications") loadNotifications();
+}
+
+const GSD_FILTER_STATE_KEY = "gsd_filter_state";
+
+function readInputValue(id) {
+    return (document.getElementById(id)?.value || "").trim();
+}
+
+function saveGsdFilterState() {
+    const state = {
+        dashboardSearch: readInputValue("search-input"),
+        dashboardStatus: readInputValue("status-filter"),
+        invMgmtSearch: readInputValue("inv-mgmt-search"),
+        historySearch: readInputValue("history-search"),
+        historyFilter: readInputValue("history-filter"),
+        inventorySearch: readInputValue("inv-search"),
+    };
+
+    localStorage.setItem(GSD_FILTER_STATE_KEY, JSON.stringify(state));
+}
+
+function loadGsdFilterState() {
+    const raw = localStorage.getItem(GSD_FILTER_STATE_KEY);
+    if (!raw) return {};
+
+    try {
+        return JSON.parse(raw) || {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function restoreGsdFilterState() {
+    const state = loadGsdFilterState();
+
+    const setIfExists = (id, value) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (typeof value !== "string") return;
+        el.value = value;
+    };
+
+    setIfExists("search-input", state.dashboardSearch);
+    setIfExists("status-filter", state.dashboardStatus);
+    setIfExists("inv-mgmt-search", state.invMgmtSearch);
+    setIfExists("history-search", state.historySearch);
+    setIfExists("history-filter", state.historyFilter);
+    setIfExists("inv-search", state.inventorySearch);
+}
+
+function hasActiveGsdFilters() {
+    const state = loadGsdFilterState();
+    return Object.values(state).some(
+        (value) => typeof value === "string" && value.trim() !== "",
+    );
 }
 
 /* FILTERS */
@@ -291,12 +352,13 @@ function filterTable() {
 
     rows.forEach((row) => {
         const rowText = (row.innerText || "").toLowerCase();
-        const rowStatus = ((row.dataset.status || "") + "")
+        const badgeText = row.querySelector(".status-badge")?.textContent || "";
+        const rowStatus = ((row.dataset.status || badgeText || "") + "")
             .toUpperCase()
             .trim();
 
         const matchQ = !q || rowText.includes(q);
-        const matchS = !status || rowStatus === status;
+        const matchS = !status || rowStatus === status || rowStatus.includes(status);
 
         const show = matchQ && matchS;
         row.style.display = show ? "" : "none";
@@ -305,6 +367,60 @@ function filterTable() {
 
     const badge = document.getElementById("table-count-badge");
     if (badge) badge.textContent = String(visible);
+
+    saveGsdFilterState();
+}
+
+function escapeHtml(value) {
+    return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+async function loadNotifications() {
+    const list = document.getElementById("gsd-notification-list");
+    if (!list) return;
+
+    list.innerHTML = '<div style="text-align:center; color:#6b7280; padding:20px">Loading...</div>';
+
+    try {
+        const res = await fetch("/api/activity_logs", {
+            credentials: "same-origin",
+            headers: { Accept: "application/json" },
+        });
+        const payload = await res.json().catch(() => ({ success: false, data: [] }));
+
+        if (!res.ok || !payload.success || !Array.isArray(payload.data)) {
+            list.innerHTML = '<div style="text-align:center; color:#ef4444; padding:20px">Failed to load notifications.</div>';
+            return;
+        }
+
+        if (payload.data.length === 0) {
+            list.innerHTML = '<div style="text-align:center; color:#6b7280; padding:20px">No new notifications.</div>';
+            return;
+        }
+
+        list.innerHTML = payload.data
+            .map((item) => {
+                const title = escapeHtml(item.title || "Notification");
+                const desc = escapeHtml(item.description || "");
+                const created = escapeHtml(item.created_at || "");
+                return `
+                    <div style="padding:12px; border-bottom:1px solid #e5e7eb;">
+                        <div style="font-weight:600">${title}</div>
+                        <div style="font-size:13px; color:#6b7280; margin-top:4px;">${desc}</div>
+                        <div style="font-size:12px; color:#9ca3af; margin-top:4px;">${created}</div>
+                    </div>
+                `;
+            })
+            .join("");
+    } catch (error) {
+        console.error("Failed to load notifications", error);
+        list.innerHTML = '<div style="text-align:center; color:#ef4444; padding:20px">Failed to load notifications.</div>';
+    }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -329,6 +445,8 @@ function filterInvMgmt() {
 
     const badge = document.getElementById("inv-mgmt-count");
     if (badge) badge.textContent = visible;
+
+    saveGsdFilterState();
 }
 
 function filterHistory() {
@@ -355,6 +473,8 @@ function filterHistory() {
 
     const badge = document.getElementById("history-count");
     if (badge) badge.textContent = visible;
+
+    saveGsdFilterState();
 }
 
 function filterInventory() {
@@ -367,6 +487,8 @@ function filterInventory() {
             const name = row.getAttribute("data-name") || "";
             row.style.display = name.includes(q) ? "" : "none";
         });
+
+    saveGsdFilterState();
 }
 
 /* APPROVE / REJECT */
@@ -389,22 +511,33 @@ function getCsrfToken() {
     return "";
 }
 
+function csrfFetch(url, options = {}) {
+    const csrfToken = getCsrfToken();
+    const opts = { ...options };
+    const headers = { ...(opts.headers || {}) };
+
+    if (csrfToken) {
+        headers["X-CSRFToken"] = csrfToken;
+        headers["X-CSRF-Token"] = csrfToken;
+    }
+
+    opts.headers = headers;
+    opts.credentials = opts.credentials || "same-origin";
+    return fetch(url, opts);
+}
+
 async function updateStatus(requestId, status, message = "") {
     const normalizedStatus = String(status).trim().toUpperCase(); // APPROVED / REJECTED
-    const csrfToken = getCsrfToken();
 
     if (!confirm(`Mark request #${requestId} as ${normalizedStatus}?`))
         return;
 
     try {
-        const response = await fetch(`/api/request/${requestId}/status`, {
+        const response = await csrfFetch(`/api/request/${requestId}/status`, {
             method: "POST",
-            credentials: "same-origin", 
             headers: {
                 "Content-Type": "application/json",
                 Accept: "application/json",
-                "X-CSRFToken": csrfToken,
-                "X-CSRF-Token": csrfToken,
             },
             body: JSON.stringify({
                 status: normalizedStatus,
@@ -437,13 +570,6 @@ async function updateStatus(requestId, status, message = "") {
         console.error(err);
         alert("Network error. Failed to update status.");
     }
-}
-
-function rejectRequest(requestId) {
-    const reason = prompt("Please enter the reason for rejection:");
-    if (reason === null) return;
-    if (reason.trim() === "") return alert("Rejection reason is required.");
-    updateStatus(requestId, "REJECTED", reason); // send uppercase
 }
 
 /* INVENTORY MODAL (DEV) */
@@ -490,7 +616,7 @@ async function saveProduct(e) {
     rememberView("inventory");
 
     try {
-        const res = await fetch(url, {
+        const res = await csrfFetch(url, {
             method,
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ product_name, quantity }),
@@ -522,7 +648,7 @@ async function deleteProduct(id) {
     rememberView("inventory");
 
     try {
-        const res = await fetch(`/api/inventory/${id}`, { method: "DELETE" });
+        const res = await csrfFetch(`/api/inventory/${id}`, { method: "DELETE" });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) return alert(data.error || "Failed to delete product.");
         location.reload();
@@ -535,10 +661,88 @@ async function deleteProduct(id) {
 window.addEventListener("load", () => {
     setDates();
     restoreView();
+    restoreGsdFilterState();
 
     if (document.getElementById("search-input")) filterTable();
     if (document.getElementById("inv-mgmt-search")) filterInvMgmt();
     if (document.getElementById("history-search")) filterHistory();
+    if (document.getElementById("inv-search")) filterInventory();
+
+    [
+        "search-input",
+        "status-filter",
+        "inv-mgmt-search",
+        "history-search",
+        "history-filter",
+        "inv-search",
+    ].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener("input", saveGsdFilterState);
+        el.addEventListener("change", saveGsdFilterState);
+    });
 
     if (window.lucide) lucide.createIcons();
+});
+
+const GSD_AUTO_REFRESH_MS = 15000;
+
+function isGsdModalOpen() {
+    const modalIds = ["sendModal", "sendCopyModal", "invModal"];
+
+    return modalIds.some((id) => {
+        const el = document.getElementById(id);
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            style.opacity !== "0"
+        );
+    });
+}
+
+function isGsdUserBusy() {
+    if (document.hidden) return true;
+    if (isGsdModalOpen()) return true;
+
+    const active = document.activeElement;
+    if (active) {
+        const tag = (active.tagName || "").toUpperCase();
+        if (
+            tag === "INPUT" ||
+            tag === "TEXTAREA" ||
+            tag === "SELECT" ||
+            active.isContentEditable
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function gsdAutoRefreshTick() {
+    const activeView = localStorage.getItem("activeView") || "dashboard";
+
+    if (activeView === "notifications") {
+        loadNotifications();
+        return;
+    }
+
+    if (hasActiveGsdFilters()) return;
+    window.location.reload();
+}
+
+window.addEventListener("load", () => {
+    setInterval(() => {
+        if (isGsdUserBusy()) return;
+        gsdAutoRefreshTick();
+    }, GSD_AUTO_REFRESH_MS);
+});
+
+document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    if (isGsdUserBusy()) return;
+    gsdAutoRefreshTick();
 });

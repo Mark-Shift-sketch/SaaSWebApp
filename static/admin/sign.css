@@ -158,3 +158,46 @@ input[type="file"] {
 .pill label {
   opacity: 0.9;
 }
+
+/* ======================
+   REPORT CHARTS (FIXED SIZE)
+===================== */
+
+.charts-section{
+  display:grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 22px;
+  margin-top: 25px;
+  align-items: start; /* prevents stretching */
+}
+
+.chart-card{
+  background:#fff;
+  border:1px solid var(--border-color);
+  border-radius:14px;
+  padding:20px;
+  box-shadow:0 2px 6px rgba(0,0,0,0.05);
+
+  height: 380px;              /* ✅ fixed card height */
+  display: flex;              /* ✅ let canvas grow */
+  flex-direction: column;
+}
+
+.chart-card h3{
+  font-size:1rem;
+  font-weight:800;
+  margin:0 0 10px;
+}
+
+/* ✅ canvas fills remaining space inside the fixed card */
+.chart-card canvas{
+  flex: 1;
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
+@media(max-width:900px){
+  .charts-section{ grid-template-columns:1fr; }
+  .chart-card{ height: 360px; }
+}

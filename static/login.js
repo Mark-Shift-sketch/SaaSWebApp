@@ -13,20 +13,3 @@ function TTP(fieldId, togleId) {
     toggle.alt = "Show Password";
 }
 }
-
-
-const email = document.getElementById("email").value;
-
-fetch("/send-otp", {
-    method: "POST",
-    headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: new URLSearchParams({
-        email: email
-    })
-})
-.then(res => res.text())
-.then(data => {
-    alert(data);
-});

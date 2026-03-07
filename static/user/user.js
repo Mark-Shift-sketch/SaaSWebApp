@@ -2,6 +2,7 @@
 const API_URL = '/api';
 let userRequests = [];
 let currentFilter = 'all';
+const USER_AUTO_REFRESH_MS = 15000;
 
 document.addEventListener('DOMContentLoaded', () => {
     lucide.createIcons();
@@ -9,6 +10,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchUserData();
     refreshDashboard();
     fetchNotifications();
+    startUserAutoRefresh();
 });
 
 async function refreshDashboard() {
@@ -22,13 +24,17 @@ function updateDate() {
         new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 }
 
-document.querySelector('input[type="file"]').addEventListener("change", function () {
-    const maxSize = 20 * 1024 * 1024;
-    if (this.files[0].size > maxSize) {
-        alert("File must be below 20MB");
-        this.value = "";
-    }
-});
+const fileInput = document.querySelector('input[type="file"]');
+if (fileInput) {
+    fileInput.addEventListener("change", function () {
+        const maxSize = 20 * 1024 * 1024;
+        const selectedFile = this.files && this.files[0] ? this.files[0] : null;
+        if (selectedFile && selectedFile.size > maxSize) {
+            alert("File must be below 20MB");
+            this.value = "";
+        }
+    });
+}
 
 async function fetchUserData() {
     try {
@@ -394,4 +400,59 @@ function showSystemStatus(message) {
     document.getElementById("toast-message").textContent = message;
     toast.classList.add("show");
     setTimeout(() => { toast.classList.remove("show"); }, 3000);
+}
+
+function isUserModalOpen() {
+    const modalIds = ["request-modal", "template-form-modal", "rejection-modal"];
+    return modalIds.some((id) => {
+        const el = document.getElementById(id);
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        return (
+            style.display !== "none" ||
+            el.classList.contains("show")
+        );
+    });
+}
+
+function isUserBusy() {
+    if (document.hidden) return true;
+    if (isUserModalOpen()) return true;
+
+    const active = document.activeElement;
+    if (active) {
+        const tag = (active.tagName || "").toUpperCase();
+        if (
+            tag === "INPUT" ||
+            tag === "TEXTAREA" ||
+            tag === "SELECT" ||
+            active.isContentEditable
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+async function userAutoRefreshTick() {
+    try {
+        await refreshDashboard();
+        await fetchNotifications();
+    } catch (e) {
+        console.error("Auto-refresh failed", e);
+    }
+}
+
+function startUserAutoRefresh() {
+    setInterval(() => {
+        if (isUserBusy()) return;
+        userAutoRefreshTick();
+    }, USER_AUTO_REFRESH_MS);
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) return;
+        if (isUserBusy()) return;
+        userAutoRefreshTick();
+    });
 }

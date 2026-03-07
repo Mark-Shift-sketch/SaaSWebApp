@@ -28,7 +28,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from reportlab.pdfgen import canvas as _rl_canvas
 from reportlab.lib.utils import ImageReader as _ImageReader
 from pypdf import PdfReader as _PdfReader, PdfWriter as _PdfWriter
-
+from flask import Response
 
 import datetime
 import os
@@ -134,6 +134,10 @@ def verify_token(token, max_age=60 * 60 * 24 * 7):
 def require_token(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        # Allow CORS preflight through auth decorator
+        if request.method == "OPTIONS":
+            return ("", 200)
+
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             return jsonify({"error": "Missing token"}), 401
@@ -204,7 +208,11 @@ def get_user_id(email):
     try:
         cursor.execute("SELECT user_id FROM users WHERE email=%s", (email,))
         user = cursor.fetchone()
-        return user["user_id"] if user else None
+        if not user:
+            return None
+        if isinstance(user, dict):
+            return user.get("user_id")
+        return None
     finally:
         cursor.close()
         conn.close()
@@ -566,13 +574,19 @@ def api_activity_logs():
         conn.close()
 
 @app.route("/api/user_dashboard", methods=["GET", "OPTIONS"])
+@require_token
 def api_user_dashboard():
-    if "email" not in session:
-        return jsonify({"error": "Unauthorized"}), 401
+    if request.method == "OPTIONS":
+        return ("", 200)
 
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
-    user_id = get_user_id(session["email"])
+    user_id = get_user_id(request.user_email)
+
+    if not user_id:
+        cursor.close()
+        conn.close()
+        return jsonify({"error": "Unauthorized"}), 401
 
     try:
         cursor.execute("""
@@ -597,7 +611,6 @@ def api_user_dashboard():
         """, (user_id,))
         all_request = cursor.fetchall()
 
-        # JSON-safe datetime
         for r in all_request:
             if r.get("created_at"):
                 r["created_at"] = r["created_at"].isoformat()
@@ -622,7 +635,6 @@ def api_user_dashboard():
     finally:
         cursor.close()
         conn.close()
-
 
 @app.route("/gsd_dashboard")
 def gsdh_dashboard():
@@ -1415,8 +1427,49 @@ def create_request():
         conn.close()
 
 
+@app.route("/api/reports")
+def reports_api():
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT COUNT(*) AS c FROM requests WHERE WEEK(created_at)=WEEK(NOW())")
+        weekly = cur.fetchone()["c"]
+
+        cur.execute("SELECT COUNT(*) AS c FROM requests WHERE MONTH(created_at)=MONTH(NOW())")
+        monthly = cur.fetchone()["c"]
+
+        cur.execute("SELECT COUNT(*) AS c FROM requests WHERE YEAR(created_at)=YEAR(NOW())")
+        yearly = cur.fetchone()["c"]
+
+        cur.execute("""
+            SELECT t.type_name, COUNT(*) as total
+            FROM requests r
+            JOIN request_types t ON r.request_type_id=t.request_type_id
+            GROUP BY t.type_name
+            ORDER BY total DESC
+            LIMIT 1
+        """)
+        top = cur.fetchone()
+
+        return jsonify({
+            "success": True,
+            "weekly_requests": weekly,
+            "monthly_requests": monthly,
+            "yearly_requests": yearly,
+            "top_request_type": top["type_name"] if top else "None"
+        })
+    except Exception:
+        logger.exception("reports_api failed")
+        return jsonify({
+            "success": False,
+            "message": "Failed to load reports"
+        }), 500
+    finally:
+        cur.close()
+        conn.close()
+    
 # Download template
-from flask import Response
+
 @app.route("/download_attachment/<int:request_id>")
 def download_attachment(request_id):
     if "email" not in session:
@@ -2154,19 +2207,22 @@ def create_position():
 
 @app.route("/api/request/<int:request_id>/status", methods=["POST"])
 def update_request_status(request_id):
+    
     if "email" not in session:
-        return jsonify({"error": "Unauthorized"})
+        return jsonify({"error": "Unauthorized"}), 401
 
-    data = request.json
-    new_status = data.get("status")
-    rejection_msg = data.get("message", None)
+    data = request.get_json(silent=True) or {}
+    new_status = (data.get("status") or request.form.get("status") or "").strip()
+    rejection_msg = data.get("message") or request.form.get("message")
+
+    if not new_status:
+        return jsonify({"error": "Missing status"}), 400
 
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        
-        new_status = (data.get("status") or "").strip()
+        new_status = (new_status or "").strip()
         if new_status.lower() in ("inprogress", "in_progress", "in progress"):
             new_status = "IN PROGRESS"
             
@@ -2292,6 +2348,12 @@ def update_request_status(request_id):
             req_type_id = req["request_type_id"]
             current_stage = req["stage_position_id"]
 
+            cursor.execute(
+                "SELECT status_id FROM request_status WHERE status_name = 'PENDING'"
+            )
+            pending_row = cursor.fetchone()
+            pending_status_id = pending_row["status_id"] if pending_row else 1
+
             # reviewers first, then approvers
             cursor.execute(
                 """
@@ -2302,7 +2364,11 @@ def update_request_status(request_id):
                 """,
                 (req_type_id,),
             )
-            reviewers = [r["position_id"] for r in cursor.fetchall()]
+            reviewers = [
+                int(r["position_id"])
+                for r in cursor.fetchall()
+                if r.get("position_id") is not None
+            ]
 
             cursor.execute(
                 """
@@ -2313,8 +2379,19 @@ def update_request_status(request_id):
                 """,
                 (req_type_id,),
             )
-            approvers = [a["position_id"] for a in cursor.fetchall()]
-            workflow = reviewers + approvers
+            approvers = [
+                int(a["position_id"])
+                for a in cursor.fetchall()
+                if a.get("position_id") is not None
+            ]
+
+            workflow = []
+            for position in reviewers + approvers:
+                if position not in workflow:
+                    workflow.append(position)
+
+            if current_stage is not None:
+                current_stage = int(current_stage)
 
             if not workflow:
                 cursor.execute(
@@ -2334,10 +2411,10 @@ def update_request_status(request_id):
                 cursor.execute(
                     """
                     UPDATE requests
-                    SET status_id = 1, rejection_message = NULL, stage_position_id = %s
+                    SET status_id = %s, rejection_message = NULL, stage_position_id = %s
                     WHERE request_id = %s
                 """,
-                    (workflow[0], request_id),
+                    (pending_status_id, workflow[0], request_id),
                 )
                 conn.commit()
                 return jsonify({"message": "Request routed to first stage."})
@@ -2348,10 +2425,10 @@ def update_request_status(request_id):
                 cursor.execute(
                     """
                     UPDATE requests
-                    SET status_id = 1, rejection_message = NULL, stage_position_id = %s
+                    SET status_id = %s, rejection_message = NULL, stage_position_id = %s
                     WHERE request_id = %s
                 """,
-                    (workflow[0], request_id),
+                    (pending_status_id, workflow[0], request_id),
                 )
                 conn.commit()
                 return jsonify({"message": "Request stage reset to first stage."})
@@ -2361,10 +2438,10 @@ def update_request_status(request_id):
                 cursor.execute(
                     """
                     UPDATE requests
-                    SET status_id = 1, rejection_message = NULL, stage_position_id = %s
+                    SET status_id = %s, rejection_message = NULL, stage_position_id = %s
                     WHERE request_id = %s
                 """,
-                    (next_stage, request_id),
+                    (pending_status_id, next_stage, request_id),
                 )
                 conn.commit()
                 return jsonify({"message": "Approved. Moved to next stage."})
@@ -3138,6 +3215,61 @@ def delete_account():
         cursor.close()
         conn.close()
 
+@app.route("/api/reports/chartdata")
+def report_chart_data():
+
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    try:
+        # Monthly totals
+        cur.execute("""
+            SELECT DATE_FORMAT(created_at,'%b') AS month,
+            COUNT(*) AS total
+            FROM requests
+            WHERE YEAR(created_at)=YEAR(NOW())
+            GROUP BY MONTH(created_at)
+            ORDER BY MONTH(created_at)
+        """)
+
+        rows = cur.fetchall()
+
+        months=[r["month"] for r in rows]
+        totals=[r["total"] for r in rows]
+
+
+        # Request types
+        cur.execute("""
+            SELECT t.type_name,COUNT(*) as total
+            FROM requests r
+            JOIN request_types t ON r.request_type_id=t.request_type_id
+            GROUP BY t.type_name
+        """)
+
+        types=cur.fetchall()
+
+        type_names=[r["type_name"] for r in types]
+        type_totals=[r["total"] for r in types]
+
+        return jsonify({
+            "success": True,
+            "months":months,
+            "monthTotals":totals,
+            "types":type_names,
+            "typeTotals":type_totals
+        })
+    except Exception:
+        logger.exception("report_chart_data failed")
+        return jsonify({
+            "success": False,
+            "message": "Failed to load chart data",
+            "months": [],
+            "monthTotals": [],
+            "types": [],
+            "typeTotals": []
+        }), 500
+    finally:
+        cur.close()
+        conn.close()
 
 # Auth Routes (Signup/Login)
 # Web Sign up
@@ -3353,6 +3485,33 @@ def mobile_login():
         cursor.close()
         conn.close()
 
+@app.route("/api/user_notifications", methods=["GET", "OPTIONS"])
+@require_token
+def user_notifications():
+
+    if request.method == "OPTIONS":
+        return ("", 200)
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    user_id = get_user_id(request.user_email)
+
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    cursor.execute("""
+        SELECT message, created_at
+        FROM notifications
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+    """, (user_id,))
+
+    notifications = cursor.fetchall()
+
+    return jsonify({
+        "notifications": notifications
+    })
 
 @app.route("/api/mobile/user-profile", methods=["GET"])
 @require_token

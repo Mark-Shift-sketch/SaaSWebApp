@@ -23,30 +23,29 @@ class ApiService {
 
   static Future<Map<String, String>> _headers() async {
     final token = await _getToken();
-    final headers = <String, String>{
-      "Content-Type": "application/json",
-    };
+    final headers = <String, String>{"Content-Type": "application/json"};
     if (token != null && token.isNotEmpty) {
       headers["Authorization"] = "Bearer $token";
     }
     return headers;
   }
 
-  // Notifications 
+  // Notifications
   static Future<List<dynamic>> fetchUserNotifications() async {
     final baseUrl = getBaseUrl();
-    final url = Uri.parse("$baseUrl/api/user_notifications");
+    final url = Uri.parse("$baseUrl/api/mobile/notifications");
 
     final res = await http.get(url, headers: await _headers());
     if (res.statusCode != 200) {
       throw Exception("Notifications failed: ${res.statusCode} ${res.body}");
     }
+
     final decoded = jsonDecode(res.body);
     if (decoded is List) return decoded;
     return [];
   }
 
-  // Activity Logs 
+  // Activity Logs
   static Future<List<dynamic>> fetchActivityLogs() async {
     final baseUrl = getBaseUrl();
     final url = Uri.parse("$baseUrl/api/activity_logs");
@@ -57,13 +56,15 @@ class ApiService {
     }
 
     final decoded = jsonDecode(res.body);
-    if (decoded is Map && decoded["success"] == true && decoded["data"] is List) {
+    if (decoded is Map &&
+        decoded["success"] == true &&
+        decoded["data"] is List) {
       return decoded["data"] as List;
     }
     return [];
   }
 
-  // Dashboard 
+  // Dashboard
   static Future<Map<String, dynamic>> fetchUserDashboard() async {
     final baseUrl = getBaseUrl();
     final url = Uri.parse("$baseUrl/api/user_dashboard");

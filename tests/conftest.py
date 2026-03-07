@@ -13,12 +13,11 @@ os.environ.setdefault("SESSION_COOKIE_SECURE", "false")
 def app():
     import importlib
 
-    # Change THIS if your file is not main.py
-    module_name = "main"   # <-- if your file is app.py, set "app"
+    module_name = "main"   
 
     mod = importlib.import_module(module_name)
 
-    flask_app = getattr(mod, "app")  # expects `app = Flask(__name__)`
+    flask_app = getattr(mod, "app")  
     flask_app.config.update(
         TESTING=True,
         WTF_CSRF_ENABLED=False,

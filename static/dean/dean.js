@@ -62,6 +62,13 @@ function filterTable() {
 
 document.addEventListener("DOMContentLoaded", filterTable);
 
+function cleanNotificationText(value) {
+    return String(value || "")
+        .replace(/\s*\(pos_id=\d+\)\s*/gi, " ")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+}
+
 // Actions (Approve/Reject)
 function rejectRequest(requestId) {
     const reason = prompt("Please enter the reason for rejection:");
@@ -90,9 +97,9 @@ async function loadNotifications() {
             (n) => `
                 <div style="padding:12px;
                             border-bottom:1px solid #e5e7eb;">
-                    <div style="font-weight:600">${n.title}</div>
+                    <div style="font-weight:600">${cleanNotificationText(n.title)}</div>
                     <div style="font-size:13px;color:#6b7280;">
-                    ${n.description}
+                    ${cleanNotificationText(n.description)}
                     </div>
                     <div style="font-size:12px;color:#9ca3af;">
                     ${n.created_at || ""}
@@ -114,14 +121,80 @@ async function loadProfile() {
         data.position_name || "{{ session.get('position','') }}";
 }
 
-async function updateStatus(id, status) {
+function getCsrfToken() {
+    const tokenEl = document.querySelector('meta[name="csrf-token"]');
+    return tokenEl ? tokenEl.getAttribute("content") : "";
+}
+
+async function updateStatus(id, status, message = null) {
     if (!confirm("Confirm action?")) return;
 
-    await fetch(`/api/request/${id}/status`, {
+    const csrfToken = getCsrfToken();
+    const response = await fetch(`/api/request/${id}/status`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: status }),
+        headers: {
+            "Content-Type": "application/json",
+            "X-CSRFToken": csrfToken,
+        },
+        body: JSON.stringify({ status: status, message: message }),
+        credentials: "same-origin",
     });
+
+    if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        alert(payload.error || `Request failed (${response.status})`);
+        return;
+    }
 
     location.reload();
 }
+
+const DEAN_AUTO_REFRESH_MS = 15000;
+
+function isDeanUserBusy() {
+    if (document.hidden) return true;
+
+    const active = document.activeElement;
+    if (active) {
+        const tag = (active.tagName || "").toUpperCase();
+        if (
+            tag === "INPUT" ||
+            tag === "TEXTAREA" ||
+            tag === "SELECT" ||
+            active.isContentEditable
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function deanAutoRefreshTick() {
+    const view = localStorage.getItem("dean_view") || "dashboard";
+
+    if (view === "notifications") {
+        loadNotifications();
+        return;
+    }
+
+    if (view === "settings") {
+        loadProfile();
+        return;
+    }
+
+    location.reload();
+}
+
+window.addEventListener("load", () => {
+    setInterval(() => {
+        if (isDeanUserBusy()) return;
+        deanAutoRefreshTick();
+    }, DEAN_AUTO_REFRESH_MS);
+});
+
+document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    if (isDeanUserBusy()) return;
+    deanAutoRefreshTick();
+});

@@ -4,3 +4,5 @@ __pycache__/
 venv/
 *.pyc
 instance/
+.vscode
+.DB_Store

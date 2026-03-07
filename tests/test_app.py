@@ -1,3 +1,7 @@
+import pytest
+from itsdangerous import BadSignature
+
+
 # --- Fake DB layer (mock get_connection -> FakeConn -> FakeCursor) ---
 
 class FakeCursor:
@@ -145,3 +149,118 @@ def test_activity_logs_requires_login(client):
     assert r.status_code == 200
     data = r.get_json()
     assert data["success"] is False
+
+
+def test_allowed_file_only_accepts_pdf_extension():
+    import main
+
+    assert main.allowed_file("request.pdf") is True
+    assert main.allowed_file("request.PDF") is True
+    assert main.allowed_file("request.txt") is False
+    assert main.allowed_file("request") is False
+
+
+def test_token_create_and_verify_round_trip():
+    import main
+
+    token = main.create_token("user@example.com")
+    assert main.verify_token(token) == "user@example.com"
+
+
+def test_verify_token_rejects_invalid_signature():
+    import main
+
+    with pytest.raises(BadSignature):
+        main.verify_token("not-a-valid-token")
+
+
+def test_api_user_dashboard_requires_bearer_token(client):
+    r = client.get("/api/user_dashboard")
+    assert r.status_code == 401
+    assert r.get_json() == {"error": "Missing token"}
+
+
+@pytest.mark.parametrize(
+    "session_data, expected_path",
+    [
+        ({}, "/login"),
+        (
+            {
+                "email": "dean@example.com",
+                "role": "Dean",
+                "dept": "CEA",
+                "position": "Dean",
+            },
+            "/dean",
+        ),
+        (
+            {
+                "email": "admin@example.com",
+                "role": "Admin",
+                "dept": "GSD",
+                "position": "Admin",
+            },
+            "/gsd_dashboard",
+        ),
+        (
+            {
+                "email": "admin2@example.com",
+                "role": "Admin",
+                "dept": "CEA",
+                "position": "Admin",
+            },
+            "/admin",
+        ),
+        (
+            {
+                "email": "it@example.com",
+                "role": "IT",
+                "dept": "IT",
+                "position": "IT",
+            },
+            "/IT",
+        ),
+        (
+            {
+                "email": "user@example.com",
+                "role": "User",
+                "dept": "CEA",
+                "position": "None",
+            },
+            "/udashboard",
+        ),
+    ],
+)
+def test_home_redirects_to_role_dashboard(client, session_data, expected_path):
+    with client.session_transaction() as sess:
+        sess.clear()
+        for key, value in session_data.items():
+            sess[key] = value
+
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code in (301, 302)
+    assert expected_path in (r.headers.get("Location", "") or "")
+
+
+def test_logout_clears_session(client):
+    with client.session_transaction() as sess:
+        sess["email"] = "user@example.com"
+        sess["role"] = "User"
+
+    r = client.get("/logout", follow_redirects=False)
+    assert r.status_code in (301, 302)
+    assert "/login" in (r.headers.get("Location", "") or "")
+
+    with client.session_transaction() as sess:
+        assert "email" not in sess
+        assert "role" not in sess
+
+
+def test_security_headers_are_set(client):
+    r = client.get("/login")
+
+    assert r.headers.get("X-Content-Type-Options") == "nosniff"
+    assert r.headers.get("X-Frame-Options") == "DENY"
+    assert r.headers.get("Referrer-Policy") == "no-referrer"
+    assert r.headers.get("Cross-Origin-Resource-Policy") == "same-site"
+    assert "default-src 'self'" in (r.headers.get("Content-Security-Policy") or "")

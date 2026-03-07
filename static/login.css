@@ -7,76 +7,108 @@
 
 html, body {
     height: 100%;
-    color: white;
+}
+
+body {
+    background: #F0F9FF;
     display: flex;
-    background-color: #F0F9FF;
     justify-content: center;
     align-items: center;
+    overflow-x: hidden;
+    animation: pageEnter 0.55s ease;
 }
-
 
 .container {
-    width: 350px;
-    padding: 30px;
+    width: min(980px, 95vw);
+    min-height: 560px;
+    background: white;
     border: 3px solid;
     border-image: linear-gradient(90deg, #2563EB, #22D3EE) 1;
-    background-color: white;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    overflow: hidden;
+}
+
+.logo-side {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;   
+    
+    background: linear-gradient(135deg, #007A53, #00A86B);
+    
+    padding: 40px;
+    text-align: center;
+}
+
+.logo {
+    width: 180px;
+    max-width: 300px;
+    height: auto;
+    margin-bottom: 20px;
+}
+
+.logo-side h1 {
+    color: white;
+    font-size: 32px;
+    margin: 10px 0 5px;
+}
+
+.logo-side p {
+    color: #E8F5E9;
+    font-size: 14px;
 }
 
 
+.form-side {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 50px;
+}
 
-.container .log {
-    font-size: 32px;
-    margin-bottom: 50px;
-    margin-top: 30px;
-    margin-left: 90px;
+.log {
+    font-size: 34px;
+    margin-bottom: 14px;
     color: #1E293B;
-
+    font-weight: bold;
 }
 
 .em {
     color: red;
-    font-size: 16px;
-    margin-bottom: 10px;
+    font-size: 15px;
+    margin-bottom: 12px;
 }
 
-
-.container form {
+.form-side form {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 20px;
+    gap: 18px;
 }
 
-
-.container form input {
+.form-side form input {
     width: 100%;
-    padding: 12px;
-    font-size: 16px;
-    border-radius: 5px;
+    padding: 14px;
+    font-size: 15px;
+    border-radius: 10px;
     border: 1px solid #ccc;
-    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
-    transition: box-shadow 0.3s ease;
-}
-
-
-.container form input:focus {
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     outline: none;
-    border: solid 2px;
-    border-color: #2563EB;
+    transition: 0.25s ease;
 }
 
+.form-side form input:focus {
+    border: 2px solid #2563EB;
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+}
 
 .icon {
     position: relative;
     width: 100%;
 }
 
-
-.container .TP {
+.TP {
     position: absolute;
-    right: 10px;
+    right: 14px;
     top: 50%;
     transform: translateY(-50%);
     cursor: pointer;
@@ -87,45 +119,89 @@ html, body {
     height: 20px;
 }
 
-.container .forgot {
+.forgot {
     text-decoration: none;
-    font-size: 16px;
-    margin-left: 150px;
-    color: black;
-
+    font-size: 14px;
+    color: #1F2D3D;
+    align-self: flex-end;
 }
 
-.container .forgot:hover {
-    color: blue;
-    opacity: 1;
+.forgot:hover {
+    text-decoration: underline;
 }
 
-.container form button {
+.form-side form button {
     width: 100%;
-    height: 45px;
+    height: 46px;
     font-size: 15px;
     color: white;
-    background: linear-gradient(90deg, #2563EB, #22D3EE);
+    background: linear-gradient(90deg, #1E4DB7, #3AA1D8);
     border: none;
-    margin-top: 60px;
     border-radius: 30px;
     font-weight: bold;
     cursor: pointer;
+    transition: 0.25s ease;
 }
 
-.container form button:hover {
+.form-side form button:hover {
+    transform: translateY(-1px);
     background: linear-gradient(90deg, #22D3EE, #2563EB);
 }
 
-.container .sign {
-    margin-top: 20px;
-    color: black;
+.sign {
+    margin-top: 8px;
+    color: #111827;
+    text-align: center;
 }
 
-.container .a {
-    background: none;
-    border: none;
-    color: blue;
-    cursor: pointer;
-    font-size: 14px;
+.a {
+    color: #1F2D3D;
+    text-decoration: none;
+    font-weight: bold;
+}
+
+.a:hover {
+    text-decoration: underline;
+}
+
+/* slide animation */
+body.slide-out-left {
+    animation: pageOutLeft 0.45s ease forwards;
+}
+
+body.slide-out-right {
+    animation: pageOutRight 0.45s ease forwards;
+}
+
+@keyframes pageEnter {
+    from { opacity: 0; transform: translateX(60px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pageOutLeft {
+    from { opacity: 1; transform: translateX(0); }
+    to { opacity: 0; transform: translateX(-80px); }
+}
+
+@keyframes pageOutRight {
+    from { opacity: 1; transform: translateX(0); }
+    to { opacity: 0; transform: translateX(80px); }
+}
+
+@media (max-width: 768px) {
+    .container {
+        grid-template-columns: 1fr;
+    }
+
+    .logo-side {
+        padding: 24px 24px 10px;
+    }
+
+    .logo {
+        width: 180px;
+    }
+
+    .form-side {
+        padding: 30px 24px 40px;
+    }
 }

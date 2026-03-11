@@ -280,7 +280,10 @@ class _MainLayoutState extends State<MainLayout> {
         ListTile(
           leading: const Icon(Icons.logout, color: Colors.red),
           title: const Text('Logout', style: TextStyle(color: Colors.red)),
-          onTap: () {
+          onTap: () async {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.remove('token');
+            if (!mounted) return;
             Navigator.of(context).pushReplacement(
               MaterialPageRoute(builder: (_) => const LoginPage()),
             );

@@ -21,6 +21,26 @@ class ApiService {
     return prefs.getString("token");
   }
 
+  // Startup auth check
+  static Future<Map<String, dynamic>> fetchMobileUserProfile() async {
+    final baseUrl = getBaseUrl();
+    final url = Uri.parse("$baseUrl/api/mobile/user-profile");
+
+    final res = await http.get(url, headers: await _headers());
+    if (res.statusCode != 200) {
+      throw Exception("Profile failed: ${res.statusCode} ${res.body}");
+    }
+
+    final decoded = jsonDecode(res.body);
+    if (decoded is Map<String, dynamic>) {
+      if (decoded["error"] != null) {
+        throw Exception(decoded["error"].toString());
+      }
+      return decoded;
+    }
+    throw Exception("Invalid profile response");
+  }
+
   static Future<Map<String, String>> _headers() async {
     final token = await _getToken();
     final headers = <String, String>{"Content-Type": "application/json"};

@@ -27,6 +27,95 @@ def sent_otp(receiver, otp):
     except Exception as e:
         print("Email error:", e)
         return False
+
+
+def _get_request_value(key):
+    form_value = request.form.get(key)
+    if form_value is not None and str(form_value).strip() != "":
+        return str(form_value).strip()
+
+    data = request.get_json(silent=True) or {}
+    value = data.get(key)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def request_signup_otp(email):
+    email = (email or "").strip().lower()
+    if not email:
+        return "Email is required", False
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("SELECT 1 FROM users WHERE email=%s", (email,))
+        if cursor.fetchone():
+            return "Email already registered", False
+
+        cursor.execute(
+            """
+            SELECT TIMESTAMPDIFF(SECOND, created_at, NOW())
+            FROM otp_codes
+            WHERE email=%s
+            """,
+            (email,),
+        )
+        rs = cursor.fetchone()
+
+        if rs and rs[0] < 120:
+            return f"Please wait {120 - rs[0]} seconds before resending", False
+
+        otp = random.randint(100000, 999999)
+
+        cursor.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
+        cursor.execute(
+            "INSERT INTO otp_codes (email, otp) VALUES (%s, %s)",
+            (email, otp),
+        )
+        conn.commit()
+
+        if not sent_otp(email, otp):
+            return "Failed to send OTP. Please try again.", False
+
+        return "OTP sent successfully", True
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def verify_signup_otp(email, userotp, consume=True):
+    email = (email or "").strip().lower()
+    userotp = (userotp or "").strip()
+
+    if not email or not userotp:
+        return "Email and OTP are required", False
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT otp FROM otp_codes
+            WHERE email=%s
+            AND TIMESTAMPDIFF(MINUTE, created_at, NOW()) <= 10
+            """,
+            (email,),
+        )
+        rs = cursor.fetchone()
+
+        if rs and hmac.compare_digest(str(rs[0]), str(userotp)):
+            if consume:
+                cursor.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
+                conn.commit()
+            return "OTP verified successfully", True
+
+        return "Invalid or expired OTP", False
+    finally:
+        cursor.close()
+        conn.close()
     
     
 # resend otp if more than 2 minute not recieve 
@@ -67,66 +156,22 @@ def c():
 
 
 def srotp():
-    email = request.form['email']
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT 1 FROM users WHERE email=%s", (email,))
-    if cursor.fetchone():
-        return "Email already registered"
-
-    cursor.execute("""SELECT TIMESTAMPDIFF(SECOND, created_at, NOW())
-        FROM otp_codes WHERE email=%s
-    """, (email,))
-    rs = cursor.fetchone()
-
-    if rs and rs[0] < 120:
-        return f"Please wait {120 - rs[0]} seconds before resending"
-
-    otp = random.randint(100000, 999999)
-
-    cursor.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
-    cursor.execute(
-        "INSERT INTO otp_codes (email, otp) VALUES (%s, %s)",
-        (email, otp)
-    )
-    conn.commit()
-
-    sent_otp(email, otp)
-
-    cursor.close()
-    conn.close()
-
-    return "OTP sent successfully"
+    email = _get_request_value("email").lower()
+    message, _ok = request_signup_otp(email)
+    return message
 
 
     # verify otp
 def verify():
-    email = request.form['email']
-    userotp = request.form['otp']
+    email = _get_request_value("email").lower()
+    userotp = _get_request_value("otp")
 
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT otp FROM otp_codes
-        WHERE email=%s
-        AND TIMESTAMPDIFF(MINUTE, created_at, NOW()) <= 10
-    """, (email,))
-    rs = cursor.fetchone()
-
-    if rs and hmac.compare_digest(str(rs[0]), str(userotp)):
-        cursor.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
-        conn.commit()
-
-        # Connects to sign up
+    message, ok = verify_signup_otp(email, userotp, consume=True)
+    if ok:
         session['otp_verified'] = True
         session['otp_email'] = email
 
-        return "OTP verified successfully"
-
-    return "Invalid or expired OTP"
+    return message
 
 # send email for approval or rejected request
 def send_request_email(receiver, status):

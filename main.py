@@ -15,7 +15,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 from dotenv import load_dotenv
-from sendotp import srotp, verify
+from sendotp import srotp, verify, request_signup_otp, verify_signup_otp
 from config import get_connection
 from sendotp import send_cc_email, send_request_email
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
@@ -135,6 +135,20 @@ def create_password_reset_token(email):
 def verify_password_reset_token(token, max_age=60 * 60):
     data = serializer.loads(token, salt="password-reset-salt", max_age=max_age)
     if data.get("purpose") != "password_reset":
+        raise BadSignature("Invalid token purpose")
+    return data["email"]
+
+
+def create_mobile_signup_otp_token(email):
+    return serializer.dumps(
+        {"email": email, "purpose": "mobile_signup_otp"},
+        salt="mobile-signup-otp-salt",
+    )
+
+
+def verify_mobile_signup_otp_token(token, max_age=60 * 15):
+    data = serializer.loads(token, salt="mobile-signup-otp-salt", max_age=max_age)
+    if data.get("purpose") != "mobile_signup_otp":
         raise BadSignature("Invalid token purpose")
     return data["email"]
 
@@ -4131,7 +4145,7 @@ def signup():
         cp = request.form["cpass"]
         dept_name = request.form.get("dept", "").strip()
 
-        allow_domain = "phinmaed.com"
+        ad = "phinmaed.com"
 
         if not dept_name:
             return render_template(
@@ -4143,7 +4157,7 @@ def signup():
             return render_template(
                 "signup.html", message="Invalid email address", departments=departments
             )
-        if e.split("@")[1] != allow_domain:
+        if e.split("@")[1] != ad:
             return render_template(
                 "signup.html",
                 message="Use your phinmaed account",
@@ -4374,7 +4388,151 @@ def reset_password(token):
     return render_template("reset_password.html", token_valid=True)
 
 
+@app.route("/api/mobile/departments", methods=["GET"])
+@csrf.exempt
+def mobile_departments():
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT dept_name FROM departments ORDER BY dept_name")
+        rows = cursor.fetchall() or []
+        departments = [row["dept_name"] for row in rows if row.get("dept_name")]
+        return jsonify({"departments": departments})
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/mobile/send-otp", methods=["POST", "OPTIONS"])
+@csrf.exempt
+def mobile_send_otp():
+    if request.method == "OPTIONS":
+        return ("", 200)
+
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    message, ok = request_signup_otp(email)
+
+    if not ok:
+        return jsonify({"error": message}), 400
+
+    return jsonify({"message": message}), 200
+
+
+@app.route("/api/mobile/verify-otp", methods=["POST", "OPTIONS"])
+@csrf.exempt
+def mobile_verify_otp():
+    if request.method == "OPTIONS":
+        return ("", 200)
+
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    otp = (data.get("otp") or "").strip()
+    message, ok = verify_signup_otp(email, otp, consume=True)
+
+    if not ok:
+        return jsonify({"error": message}), 400
+
+    signup_otp_token = create_mobile_signup_otp_token(email)
+    return jsonify({"message": message, "signup_otp_token": signup_otp_token}), 200
+
+
 # Mobile API Endpoints (Connected to flutter)
+@app.route("/api/mobile/signup", methods=["POST", "OPTIONS"])
+@csrf.exempt
+def mobile_signup():
+    if request.method == "OPTIONS":
+        return ("", 200)
+
+    data = request.get_json(silent=True) or {}
+    e = (data.get("email") or "").strip().lower()
+    p = data.get("password") or ""
+    cp = (
+        data.get("confirmpassword")
+        or data.get("confirm_password")
+        or data.get("cpass")
+        or ""
+    )
+    dept_name = (
+        data.get("department")
+        or data.get("departments")
+        or data.get("dept")
+        or ""
+    ).strip()
+    signup_otp_token = (
+        data.get("signup_otp_token")
+        or data.get("otp_verification_token")
+        or data.get("verification_token")
+        or ""
+    ).strip()
+
+    ad = "phinmaed.com"
+
+    if not e or not p or not cp or not dept_name or not signup_otp_token:
+        return jsonify({"error": "Please fill all fields"}), 400
+
+    if not re.match(r"[a-z0-9.%+]+@[a-z0-9.-]+\.[a-z]{2,}$", e):
+        return jsonify({"error": "Invalid email address"}), 400
+
+    if "@" not in e or e.split("@", 1)[1] != ad:
+        return jsonify({"error": "Please use your phinmaed email"}), 400
+
+    try:
+        verified_email = verify_mobile_signup_otp_token(signup_otp_token)
+    except SignatureExpired:
+        return jsonify({"error": "Verified OTP session expired. Please verify OTP again."}), 400
+    except BadSignature:
+        return jsonify({"error": "Invalid OTP verification session. Please verify OTP again."}), 400
+
+    if verified_email.strip().lower() != e:
+        return jsonify({"error": "OTP was verified for a different email."}), 400
+
+    if len(p) < 6 or not any(c.isdigit() for c in p) or not any(c.isupper() for c in p):
+        return jsonify({"error": "Password: 6+ chars, 1 digit, 1 uppercase"}), 400
+
+    if p != cp:
+        return jsonify({"error": "Passwords do not match"}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT user_id FROM users WHERE email=%s", (e,))
+        if cursor.fetchone():
+            return jsonify({"error": "Email already used, please login"}), 409
+
+        cursor.execute("SELECT dept_id FROM departments WHERE dept_name=%s", (dept_name,))
+        dept = cursor.fetchone()
+        if not dept:
+            return jsonify({"error": "Invalid department"}), 400
+        dept_id = dept["dept_id"]
+
+        cursor.execute("SELECT role_id FROM roles WHERE role_name='User'")
+        role_row = cursor.fetchone()
+        role_id = role_row["role_id"] if role_row else 1
+
+        cursor.execute("SELECT position_id FROM positions WHERE position_name='None'")
+        pos_row = cursor.fetchone()
+        position_id = pos_row["position_id"] if pos_row else 1
+
+        hp = generate_password_hash(p, method="pbkdf2:sha256", salt_length=16)
+        cursor.execute(
+            "INSERT INTO users (email, password, dept_id, role_id, position_id) VALUES (%s,%s,%s,%s,%s)",
+            (e, hp, dept_id, role_id, position_id),
+        )
+        conn.commit()
+
+        return jsonify({"message": "Account created successfully"}), 201
+
+    except Exception as ex:
+        conn.rollback()
+        print("Mobile signup error:", ex)
+        return jsonify({"error": "Something went wrong"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+    
+    
 @app.route("/api/mobile/login", methods=["POST"])
 @csrf.exempt
 def mobile_login():

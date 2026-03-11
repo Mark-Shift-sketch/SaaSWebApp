@@ -23,8 +23,6 @@
       <aside class="sidebar">
         <div class="sidebar-header">
           <div class="logo">
-            <!-- <i data-lucide="user"></i>
-        <span>Employee Portal</span> -->
             <img
               src="/static/user/coclogo.png"
               style="max-width: 100%; height: auto"
@@ -72,8 +70,6 @@
       <div class="mobile-header">
         <div class="mobile-header-inner">
           <div class="logo">
-            <i data-lucide="user"></i>
-            <span>Employee Portal</span>
           </div>
           <button onclick="toggleMobileMenu()" class="btn-link">
             <i data-lucide="menu" style="color: var(--text)"></i>
@@ -124,17 +120,7 @@
               <i data-lucide="calendar"></i>
               <span id="current-date"></span>
             </div>
-            <div class="profile">
-              <img
-                id="user-avatar"
-                src="https://ui-avatars.com/api/?name=User&background=eff6ff&color=2563eb"
-                alt="User"
-              />
-              <div class="profile-text">
-                <p id="profile-name">Loading...</p>
-                <p id="profile-dept">...</p>
-              </div>
-            </div>
+            
           </div>
         </div>
 
@@ -357,8 +343,12 @@
               >
                 {{ type.type_name }}
               </option>
+              
               {% endfor %}
             </select>
+            <label>Total Amount</label>
+            <input type="number" name="amount" id="modal-amount" required min="0" step="0.01" required/>
+            
           </div>
 
           <!-- TEMPLATE CONTROL BOX -->
@@ -416,7 +406,7 @@
 
           <div class="form-group">
             <label>Upload Document</label>
-            <input type="file" name="file" accept=".pdf" />
+            <input type="file" name="file" accept=".pdf" required/>
           </div>
 
           <div class="modal-actions">

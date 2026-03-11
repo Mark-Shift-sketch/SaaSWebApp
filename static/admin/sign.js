@@ -3,6 +3,25 @@ function uid() {
     return Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
 
+function showStatus(message, kind = "info") {
+    let node = document.getElementById("sign-status-toast");
+    if (!node) {
+        node = document.createElement("div");
+        node.id = "sign-status-toast";
+        node.style.cssText =
+            "position:fixed;top:16px;right:16px;z-index:99999;padding:10px 12px;border-radius:10px;color:#fff;max-width:360px;font-size:13px;box-shadow:0 10px 20px rgba(0,0,0,.2);";
+        document.body.appendChild(node);
+    }
+
+    const bg = kind === "error" ? "#b91c1c" : kind === "success" ? "#15803d" : "#111827";
+    node.style.background = bg;
+    node.textContent = message;
+    node.style.display = "block";
+    setTimeout(() => {
+        if (node) node.style.display = "none";
+    }, 3000);
+}
+
 function getActivePageIndex() {
     const pages = Array.from(document.querySelectorAll(".page"));
     if (!pages.length) return 0;
@@ -310,11 +329,11 @@ async function loadSaved() {
 
 async function saveAll() {
     if (window.IS_SIGNED) {
-        alert("This document is already saved/final. Open View PDF.");
+        showStatus("This document is already saved/final. Open View PDF.", "error");
         return;
     }
     if (DRAW_MODE) {
-        alert("Finish drawing first (click Done).");
+        showStatus("Finish drawing first (click Done).", "error");
         return;
     }
 
@@ -346,9 +365,9 @@ async function saveAll() {
         });
         const out = await res.json();
         if (!res.ok) throw new Error(out.error || "Save failed");
-        alert("Saved! Click View PDF to see updates.");
+        showStatus("Saved! Click View PDF to see updates.", "success");
     } catch (err) {
-        alert("Failed to save: " + err.message);
+        showStatus("Failed to save: " + err.message, "error");
     }
 }
 

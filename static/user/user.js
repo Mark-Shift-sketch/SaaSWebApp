@@ -30,7 +30,7 @@ if (fileInput) {
         const maxSize = 20 * 1024 * 1024;
         const selectedFile = this.files && this.files[0] ? this.files[0] : null;
         if (selectedFile && selectedFile.size > maxSize) {
-            alert("File must be below 20MB");
+            showSystemStatus("20MB max supported file size.");
             this.value = "";
         }
     });
@@ -125,11 +125,11 @@ async function userComplete(requestId) {
     const data = await res.json();
 
     if (!res.ok) {
-        alert(data.error || "Failed");
+        showSystemStatus(data.error || "Failed");
         return;
     }
 
-    alert(data.message);
+    showSystemStatus(data.message || "Request updated.");
     refreshDashboard();
 }
 
@@ -275,6 +275,9 @@ function calcTemplateTotal() {
 
     document.getElementById('tf_total').textContent = total.toFixed(2);
     document.getElementById('template_total').value = total.toFixed(2);
+
+    const amountInput = document.getElementById('modal-amount');
+    if (amountInput) amountInput.value = total.toFixed(2);
 }
 
 function applyTemplateForm() {
@@ -286,9 +289,9 @@ function applyTemplateForm() {
         particulars: []
     };
 
-    if (!data.name) return alert("Name is required.");
-    if (!data.date_needed) return alert("Date Needed is required.");
-    if (!data.disbursement_type) return alert("Disbursement Type is required.");
+    if (!data.name) return showSystemStatus("Name is required.");
+    if (!data.date_needed) return showSystemStatus("Date Needed is required.");
+    if (!data.disbursement_type) return showSystemStatus("Disbursement Type is required.");
 
     document.querySelectorAll('#tf_body tr').forEach(tr => {
         const p = tr.querySelector('.tf_part')?.value?.trim() || '';
@@ -296,7 +299,7 @@ function applyTemplateForm() {
         if (p) data.particulars.push({ particulars: p, amount: isNaN(a) ? 0 : a });
     });
 
-    if (data.particulars.length === 0) return alert("Add at least 1 Particular item.");
+    if (data.particulars.length === 0) return showSystemStatus("Add at least 1 Particular item.");
 
     document.getElementById('template_data_json').value = JSON.stringify(data);
 

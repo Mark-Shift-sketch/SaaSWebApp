@@ -106,3 +106,31 @@ input:focus,
     text-align: center;
     font-size: 18px;
 }
+
+@media (max-width: 768px) {
+    .confirmation-modal {
+        width: min(400px, calc(100vw - 32px));
+        padding: 22px;
+    }
+
+    .otpE {
+        gap: 6px;
+    }
+
+    .Eotp {
+        width: 38px;
+        height: 42px;
+        font-size: 16px;
+    }
+}
+
+@media (max-width: 420px) {
+    .signuplogo {
+        font-size: 28px;
+    }
+
+    .Eotp {
+        width: 34px;
+        height: 40px;
+    }
+}

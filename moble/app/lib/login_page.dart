@@ -16,12 +16,9 @@ class LoginPage extends StatefulWidget {
 String getBaseUrl() {
   // Flutter Web (Edge/Chrome)
   if (kIsWeb) {
-    final host = Uri.base.host; // 127.0.0.1 OR 192.168.0.102
+    final host = Uri.base.host; 
     return "http://$host:5000";
   }
-
-  // Android Emulator
-  if (Platform.isAndroid) return "http://10.0.2.2:5000";
 
   // Windows desktop app 
   if (Platform.isWindows) return "http://127.0.0.1:5000";
@@ -68,10 +65,6 @@ class LoginPageState extends State<LoginPage> {
           )
           .timeout(const Duration(seconds: 10));
 
-      debugPrint("URL: $url");
-      debugPrint("STATUS: ${response.statusCode}");
-      debugPrint("BODY: ${response.body}");
-
       Map<String, dynamic> data;
       try {
         data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -103,7 +96,6 @@ class LoginPageState extends State<LoginPage> {
       setState(() {
         errorMessage = "Cannot connect to server: $err";
       });
-      debugPrint("LOGIN ERROR: $err");
     } finally {
       if (mounted) {
         setState(() => isLoading = false);

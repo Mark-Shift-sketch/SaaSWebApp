@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Annotate PDF</title>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="{{ url_for('static', filename='pdf.min.js') }}"></script>
 
     <style>
       body {
@@ -337,6 +337,26 @@
         const meta = document.querySelector('meta[name="csrf-token"]');
         return meta ? meta.getAttribute("content") : "";
       }
+
+      function showAnnotateStatus(message, kind = "info") {
+        let node = document.getElementById("annotate-status-toast");
+        if (!node) {
+          node = document.createElement("div");
+          node.id = "annotate-status-toast";
+          node.style.cssText =
+            "position:fixed;top:16px;right:16px;z-index:99999;padding:10px 12px;border-radius:10px;color:#fff;max-width:360px;font-size:13px;box-shadow:0 10px 20px rgba(0,0,0,.2);";
+          document.body.appendChild(node);
+        }
+
+        const bg = kind === "error" ? "#b91c1c" : kind === "success" ? "#15803d" : "#111827";
+        node.style.background = bg;
+        node.textContent = message;
+        node.style.display = "block";
+        setTimeout(() => {
+          if (node) node.style.display = "none";
+        }, 3000);
+      }
+
       function uid() {
         return Math.random().toString(16).slice(2) + Date.now().toString(16);
       }
@@ -673,11 +693,11 @@
 
       async function saveAll() {
         if (window.IS_SIGNED) {
-          alert("This document is already saved/final. Open View PDF.");
+          showAnnotateStatus("This document is already saved/final. Open View PDF.", "error");
           return;
         }
         if (DRAW_MODE) {
-          alert("Finish drawing first (click Done).");
+          showAnnotateStatus("Finish drawing first (click Done).", "error");
           return;
         }
 
@@ -715,9 +735,9 @@
           });
           const out = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(out.error || "Save failed");
-          alert("Saved! Click View PDF to see updates.");
+          showAnnotateStatus("Saved! Click View PDF to see updates.", "success");
         } catch (err) {
-          alert("Failed to save: " + err.message);
+          showAnnotateStatus("Failed to save: " + err.message, "error");
         }
       }
 
@@ -850,9 +870,9 @@
         if (!e.target.closest(".item")) deselect();
       });
 
-      // =========================
+
       // Signature Modal
-      // =========================
+
       const sigModal = document.getElementById("sigModal");
       const sigCanvas = document.getElementById("sigCanvas");
       const sigCtx = sigCanvas.getContext("2d");

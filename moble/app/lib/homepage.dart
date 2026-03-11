@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'login_page.dart';
-import 'api_service.dart'; // <-- make sure this file exists
+import 'api_service.dart'; 
 
 class Homepage extends StatelessWidget {
   final Map user;
@@ -33,17 +34,32 @@ class RequestItem {
 }
 
 class NotificationItem {
+  final String id;
   final String title;
   final String message;
   final DateTime time;
+  final String timeLabel;
   final bool isRead;
 
   NotificationItem({
+    required this.id,
     required this.title,
     required this.message,
     required this.time,
+    required this.timeLabel,
     this.isRead = false,
   });
+
+  NotificationItem copyWith({bool? isRead}) {
+    return NotificationItem(
+      id: id,
+      title: title,
+      message: message,
+      time: time,
+      timeLabel: timeLabel,
+      isRead: isRead ?? this.isRead,
+    );
+  }
 }
 
 class UserProfile {
@@ -64,7 +80,7 @@ class UserProfile {
   });
 }
 
-// ---------------- MAIN LAYOUT ----------------
+// MAIN LAYOUT
 
 class MainLayout extends StatefulWidget {
   final Map user;
@@ -77,12 +93,62 @@ class MainLayout extends StatefulWidget {
 class _MainLayoutState extends State<MainLayout> {
   int _selectedIndex = 0;
   bool _isMobile = false;
+  int _unreadCount = 0;
 
   late final List<Widget> _pages = [
     DashboardPage(user: widget.user),
-    const NotificationsPage(),
+    NotificationsPage(
+      userEmail: (widget.user['email'] ?? '').toString(),
+      onUnreadCountChanged: _updateUnreadCount,
+    ),
     SettingsPage(user: widget.user),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshUnreadCount();
+  }
+
+  String _notificationReadStorageKey() {
+    final email = (widget.user['email'] ?? '').toString().trim().toLowerCase();
+    return 'mobile_read_notifications:$email';
+  }
+
+  String _notificationKeyFromRaw(Map<String, dynamic> raw) {
+    final id = (raw['id'] ?? '').toString();
+    final title = (raw['title'] ?? '').toString();
+    final message = (raw['message'] ?? '').toString();
+    final time = (raw['time'] ?? '').toString();
+    return '$id|$title|$message|$time';
+  }
+
+  Future<void> _refreshUnreadCount() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final readKeys =
+          (prefs.getStringList(_notificationReadStorageKey()) ?? <String>[])
+              .toSet();
+
+      final raw = await ApiService.fetchUserNotifications();
+      int unread = 0;
+      for (final n in raw) {
+        final row = n is Map ? Map<String, dynamic>.from(n) : <String, dynamic>{};
+        final key = _notificationKeyFromRaw(row);
+        if (!readKeys.contains(key)) unread += 1;
+      }
+
+      if (!mounted) return;
+      setState(() => _unreadCount = unread);
+    } catch (_) {
+      // Keep UI responsive even if notification fetch fails.
+    }
+  }
+
+  void _updateUnreadCount(int value) {
+    if (!mounted) return;
+    setState(() => _unreadCount = value);
+  }
 
   void _onItemTapped(int index) {
     setState(() => _selectedIndex = index);
@@ -181,15 +247,19 @@ class _MainLayoutState extends State<MainLayout> {
         ListTile(
           leading: const Icon(Icons.notifications_outlined),
           title: const Text('Notifications'),
-          trailing: Container(
-            padding: const EdgeInsets.all(6),
-            decoration: const BoxDecoration(
-              color: Colors.redAccent,
-              shape: BoxShape.circle,
-            ),
-            child: const Text('3',
-                style: TextStyle(color: Colors.white, fontSize: 12)),
-          ),
+          trailing: _unreadCount > 0
+              ? Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: const BoxDecoration(
+                    color: Colors.redAccent,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Text(
+                    _unreadCount > 99 ? '99+' : _unreadCount.toString(),
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                  ),
+                )
+              : null,
           selected: _selectedIndex == 1,
           onTap: () {
             _onItemTapped(1);
@@ -222,7 +292,7 @@ class _MainLayoutState extends State<MainLayout> {
   }
 }
 
-// ---------------- DASHBOARD ----------------
+// DASHBOARD
 
 class DashboardPage extends StatefulWidget {
   final Map user;
@@ -250,16 +320,18 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Future<List<RequestItem>> _loadRequests() async {
-    // Needs Flask endpoint: /api/user_dashboard returning JSON with "all_request"
     final dash = await ApiService.fetchUserDashboard();
     final list = (dash["all_request"] as List?) ?? [];
 
     return list.map<RequestItem>((r) {
       final statusName =
-          (r["status_name"] ?? "PENDING").toString().toUpperCase();
+          (r["status_name"] ?? "PENDING").toString().trim().toUpperCase();
 
       final RequestStatus status;
-      if (statusName == "APPROVED") {
+      if (statusName == "APPROVED" ||
+          statusName == "COMPLETED" ||
+          statusName == "COMPLETE" ||
+          statusName == "DONE") {
         status = RequestStatus.approved;
       } else if (statusName == "REJECTED") {
         status = RequestStatus.rejected;
@@ -272,15 +344,31 @@ class _DashboardPageState extends State<DashboardPage> {
 
       final rejectionMsg = (r["rejection_message"] ?? "").toString().trim();
 
+      final rawStage = (r["current_stage"] ?? r["position_name"] ?? "")
+          .toString()
+          .trim();
+      final normalizedStage = _normalizeStage(rawStage);
+
       return RequestItem(
         reqId: "REQ-${r["request_id"]}",
         fileName: (r["filename"] ?? "").toString(),
-        currentApprover: (r["current_stage"] ?? "—").toString(),
+        currentApprover: normalizedStage,
         status: status,
         date: createdAt,
         rejectionReason: rejectionMsg.isEmpty ? null : rejectionMsg,
       );
     }).toList();
+  }
+
+  String _normalizeStage(String rawStage) {
+    if (rawStage.isEmpty) return 'Pending Review';
+
+    final normalized = rawStage.toLowerCase();
+    if (normalized == 'none' || normalized == 'null' || rawStage == '-') {
+      return 'Pending Review';
+    }
+
+    return rawStage;
   }
 
   List<RequestItem> _applyFilter(List<RequestItem> all) {
@@ -590,40 +678,130 @@ class _DashboardPageState extends State<DashboardPage> {
 // ---------------- NOTIFICATIONS ----------------
 
 class NotificationsPage extends StatefulWidget {
-  const NotificationsPage({super.key});
+  final String userEmail;
+  final ValueChanged<int> onUnreadCountChanged;
+
+  const NotificationsPage({
+    super.key,
+    required this.userEmail,
+    required this.onUnreadCountChanged,
+  });
 
   @override
   State<NotificationsPage> createState() => _NotificationsPageState();
 }
 
 class _NotificationsPageState extends State<NotificationsPage> {
-  late Future<List<NotificationItem>> _futureNotifs;
+  bool _isLoading = true;
+  String? _error;
+  List<NotificationItem> _notifications = [];
+  Set<String> _readIds = <String>{};
+
+  String _readStorageKey() {
+    final email = widget.userEmail.trim().toLowerCase();
+    return 'mobile_read_notifications:$email';
+  }
+
+  String _notificationKeyFromRaw(Map<String, dynamic> raw) {
+    final id = (raw['id'] ?? '').toString();
+    final title = (raw['title'] ?? '').toString();
+    final message = (raw['message'] ?? '').toString();
+    final time = (raw['time'] ?? '').toString();
+    return '$id|$title|$message|$time';
+  }
+
+  DateTime _parseTime(String timeLabel) {
+    final parsed = DateTime.tryParse(timeLabel);
+    return parsed ?? DateTime.now();
+  }
+
+  void _publishUnreadCount() {
+    final unread = _notifications.where((n) => !n.isRead).length;
+    widget.onUnreadCountChanged(unread);
+  }
+
+  Future<void> _saveReadIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_readStorageKey(), _readIds.toList());
+  }
+
+  Future<void> _markAsRead(NotificationItem item) async {
+    if (item.isRead) return;
+
+    final index = _notifications.indexWhere((n) => n.id == item.id);
+    if (index == -1) return;
+
+    setState(() {
+      _notifications[index] = _notifications[index].copyWith(isRead: true);
+      _readIds.add(item.id);
+    });
+    _publishUnreadCount();
+    await _saveReadIds();
+  }
+
+  Future<void> _markAllAsRead() async {
+    setState(() {
+      _notifications = _notifications
+          .map((n) => n.isRead ? n : n.copyWith(isRead: true))
+          .toList();
+      _readIds = _notifications.map((n) => n.id).toSet();
+    });
+    _publishUnreadCount();
+    await _saveReadIds();
+  }
 
   @override
   void initState() {
     super.initState();
-    _futureNotifs = _load();
+    _reload();
   }
 
   Future<void> _refresh() async {
-    setState(() {
-      _futureNotifs = _load();
-    });
-    await _futureNotifs;
+    await _reload();
   }
 
-  Future<List<NotificationItem>> _load() async {
-    final raw = await ApiService.fetchUserNotifications();
+  Future<void> _reload() async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
 
-    return raw.map<NotificationItem>((n) {
-      final title = (n["title"] ?? "Notification").toString();
-      final message = (n["message"] ?? "").toString();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _readIds = (prefs.getStringList(_readStorageKey()) ?? <String>[]).toSet();
 
-      // your backend returns string time; keep DateTime.now if you don't want parsing
-      final dt = DateTime.now();
+      final raw = await ApiService.fetchUserNotifications();
+      final loaded = raw.map<NotificationItem>((n) {
+        final row = n is Map ? Map<String, dynamic>.from(n) : <String, dynamic>{};
+        final title = (row['title'] ?? 'Notification').toString();
+        final message = (row['message'] ?? '').toString();
+        final timeLabel = (row['time'] ?? '').toString();
+        final id = _notificationKeyFromRaw(row);
 
-      return NotificationItem(title: title, message: message, time: dt);
-    }).toList();
+        return NotificationItem(
+          id: id,
+          title: title,
+          message: message,
+          time: _parseTime(timeLabel),
+          timeLabel: timeLabel,
+          isRead: _readIds.contains(id),
+        );
+      }).toList();
+
+      if (!mounted) return;
+      setState(() {
+        _notifications = loaded;
+        _isLoading = false;
+      });
+      _publishUnreadCount();
+    } catch (err) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _error = err.toString();
+      });
+      _publishUnreadCount();
+    }
   }
 
   @override
@@ -642,78 +820,106 @@ class _NotificationsPageState extends State<NotificationsPage> {
           ),
           const SizedBox(height: 24),
 
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton.icon(
+                onPressed: _notifications.isEmpty ? null : _markAllAsRead,
+                icon: const Icon(Icons.done_all, size: 18),
+                label: const Text('Mark all as read'),
+              ),
+            ],
+          ),
+
           Expanded(
             child: RefreshIndicator(
               onRefresh: _refresh,
-              child: FutureBuilder<List<NotificationItem>>(
-                future: _futureNotifs,
-                builder: (context, snap) {
-                  if (snap.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  if (snap.hasError) {
-                    return ListView(
-                      children: [
-                        const SizedBox(height: 120),
-                        Center(child: Text("Failed to load: ${snap.error}")),
-                      ],
-                    );
-                  }
-
-                  final notifications = snap.data ?? [];
-                  if (notifications.isEmpty) {
-                    return ListView(
-                      children: const [
-                        SizedBox(height: 120),
-                        Center(child: Text("No notifications")),
-                      ],
-                    );
-                  }
-
-                  // keep your list design
-                  return ListView.separated(
-                    itemCount: notifications.length,
-                    separatorBuilder: (ctx, i) => const Divider(height: 1),
-                    itemBuilder: (context, index) {
-                      final notif = notifications[index];
-                      return ListTile(
-                        tileColor: Colors.white,
-                        shape: index == 0
-                            ? const RoundedRectangleBorder(
-                                borderRadius:
-                                    BorderRadius.vertical(top: Radius.circular(12)))
-                            : index == notifications.length - 1
-                                ? const RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.vertical(
-                                        bottom: Radius.circular(12)))
-                                : null,
-                        leading: CircleAvatar(
-                          backgroundColor: Colors.blue.shade50,
-                          child: Icon(Icons.notifications,
-                              color: Colors.blue.shade700),
-                        ),
-                        title: Text(notif.title,
-                            style:
-                                const TextStyle(fontWeight: FontWeight.bold)),
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+              child: _isLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _error != null
+                      ? ListView(
                           children: [
-                            const SizedBox(height: 4),
-                            Text(notif.message),
-                            const SizedBox(height: 4),
-                            Text(
-                              "${notif.time.day}/${notif.time.month} ${notif.time.hour}:${notif.time.minute.toString().padLeft(2, '0')}",
-                              style: TextStyle(
-                                  fontSize: 12, color: Colors.grey.shade600),
-                            ),
+                            const SizedBox(height: 120),
+                            Center(child: Text('Failed to load: $_error')),
                           ],
-                        ),
-                        isThreeLine: true,
-                      );
-                    },
-                  );
-                },
-              ),
+                        )
+                      : _notifications.isEmpty
+                          ? ListView(
+                              children: const [
+                                SizedBox(height: 120),
+                                Center(child: Text('No notifications')),
+                              ],
+                            )
+                          : ListView.separated(
+                              itemCount: _notifications.length,
+                              separatorBuilder: (ctx, i) =>
+                                  const Divider(height: 1),
+                              itemBuilder: (context, index) {
+                                final notif = _notifications[index];
+                                final isUnread = !notif.isRead;
+
+                                return ListTile(
+                                  onTap: () => _markAsRead(notif),
+                                  tileColor: isUnread
+                                      ? Colors.blue.shade50
+                                      : Colors.white,
+                                  shape: index == 0
+                                      ? const RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.vertical(
+                                              top: Radius.circular(12)))
+                                      : index == _notifications.length - 1
+                                          ? const RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.vertical(
+                                                      bottom:
+                                                          Radius.circular(12)))
+                                          : null,
+                                  leading: CircleAvatar(
+                                    backgroundColor: isUnread
+                                        ? Colors.blue.shade100
+                                        : Colors.blue.shade50,
+                                    child: Icon(
+                                      Icons.notifications,
+                                      color: Colors.blue.shade700,
+                                    ),
+                                  ),
+                                  trailing: isUnread
+                                      ? const Icon(
+                                          Icons.brightness_1,
+                                          color: Colors.blue,
+                                          size: 10,
+                                        )
+                                      : null,
+                                  title: Text(
+                                    notif.title,
+                                    style: TextStyle(
+                                      fontWeight: isUnread
+                                          ? FontWeight.w700
+                                          : FontWeight.w600,
+                                    ),
+                                  ),
+                                  subtitle: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      const SizedBox(height: 4),
+                                      Text(notif.message),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        notif.timeLabel.isNotEmpty
+                                            ? notif.timeLabel
+                                            : "${notif.time.day}/${notif.time.month} ${notif.time.hour}:${notif.time.minute.toString().padLeft(2, '0')}",
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  isThreeLine: true,
+                                );
+                              },
+                            ),
             ),
           ),
         ],
@@ -722,7 +928,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
   }
 }
 
-// ---------------- SETTINGS ----------------
+// SETTINGS 
 
 class SettingsPage extends StatefulWidget {
   final Map user;

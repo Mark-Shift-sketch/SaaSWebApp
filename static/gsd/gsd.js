@@ -1,4 +1,23 @@
 /* SHIPMENT MODAL (DEV) */
+function showStatus(message, kind = "info") {
+    let node = document.getElementById("gsd-status-toast");
+    if (!node) {
+        node = document.createElement("div");
+        node.id = "gsd-status-toast";
+        node.style.cssText =
+            "position:fixed;top:16px;right:16px;z-index:99999;padding:10px 12px;border-radius:10px;color:#fff;max-width:360px;font-size:13px;box-shadow:0 10px 20px rgba(0,0,0,.2);";
+        document.body.appendChild(node);
+    }
+
+    const bg = kind === "error" ? "#b91c1c" : kind === "success" ? "#15803d" : "#111827";
+    node.style.background = bg;
+    node.textContent = message;
+    node.style.display = "block";
+    setTimeout(() => {
+        if (node) node.style.display = "none";
+    }, 3000);
+}
+
 function openSendModal() {
     const m = document.getElementById("sendModal");
     if (m) m.style.display = "flex";
@@ -73,15 +92,16 @@ async function submitShipment(e) {
     });
 
     if (!payload.shipment_number)
-        return alert("Shipment Number is required.");
-    if (!payload.shipment_date) return alert("Shipment Date is required.");
-    if (!payload.entry_type) return alert("Entry Type is required.");
+        return showStatus("Shipment Number is required.", "error");
+    if (!payload.shipment_date) return showStatus("Shipment Date is required.", "error");
+    if (!payload.entry_type) return showStatus("Entry Type is required.", "error");
     if (payload.items.length === 0)
-        return alert("Add at least 1 item row.");
+        return showStatus("Add at least 1 item row.", "error");
 
     console.log("Shipment payload:", payload);
-    alert(
+    showStatus(
         "Ready to submit (check console). Connect to your API endpoint next.",
+        "success",
     );
     closeSendModal();
 }
@@ -205,12 +225,12 @@ async function submitSendCopy(e) {
         payload.items.push(row);
     });
 
-    if (!payload.vendor_name) return alert("Vendor Name is required.");
+    if (!payload.vendor_name) return showStatus("Vendor Name is required.", "error");
     if (payload.items.length === 0)
-        return alert("Add at least 1 item row.");
+        return showStatus("Add at least 1 item row.", "error");
 
     console.log("Send Copy payload:", payload);
-    alert("Saved locally (console). Connect backend later.");
+    showStatus("Saved locally (console). Connect backend later.", "success");
     closeSendCopyModal();
 }
 
@@ -249,6 +269,22 @@ function restoreView() {
     if (v) switchView(v);
 }
 
+function toggleMobileMenu() {
+    const menu = document.getElementById("mobileNavMenu");
+    const toggle = document.getElementById("mobileMenuToggle");
+    if (!menu) return;
+    const isOpen = menu.classList.toggle("show");
+    if (toggle) toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+}
+
+function closeMobileMenu() {
+    const menu = document.getElementById("mobileNavMenu");
+    const toggle = document.getElementById("mobileMenuToggle");
+    if (!menu) return;
+    menu.classList.remove("show");
+    if (toggle) toggle.setAttribute("aria-expanded", "false");
+}
+
 function switchView(viewName) {
     document
         .querySelectorAll(".view-section")
@@ -270,6 +306,7 @@ function switchView(viewName) {
 
     if (viewEl) viewEl.style.display = "flex";
     if (navEl) navEl.classList.add("active");
+    closeMobileMenu();
 
     if (viewName === "dashboard") filterTable();
     if (viewName === "inventory") filterInventory();
@@ -380,37 +417,127 @@ function escapeHtml(value) {
         .replace(/'/g, "&#39;");
 }
 
+function cleanNotificationText(value) {
+    return String(value || "")
+        .replace(/\s*\(pos_id=\d+\)\s*/gi, " ")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+}
+
+let __gsdLatestNotificationTs = 0;
+
+function getGsdNotificationReadKey() {
+    const email = String(window.CURRENT_USER_EMAIL || "anonymous").trim().toLowerCase();
+    return `gsd_notifications_read_at:${email}`;
+}
+
+function getGsdNotificationsReadAt() {
+    const raw = localStorage.getItem(getGsdNotificationReadKey()) || "0";
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function setGsdNotificationsReadAt(ts) {
+    const safe = Number.isFinite(Number(ts)) ? Number(ts) : Date.now();
+    localStorage.setItem(getGsdNotificationReadKey(), String(safe));
+}
+
+function parseGsdNotificationTs(raw) {
+    const ts = Date.parse(String(raw || ""));
+    return Number.isFinite(ts) ? ts : 0;
+}
+
+function setGsdNotificationBadgeCount(count) {
+    ["gsd-notification-badge", "gsd-mobile-notification-badge"].forEach((id) => {
+        const node = document.getElementById(id);
+        if (!node) return;
+        if (count > 0) {
+            node.textContent = String(count);
+            node.style.display = "inline-flex";
+        } else {
+            node.textContent = "0";
+            node.style.display = "none";
+        }
+    });
+}
+
+function updateGsdNotificationBadges(rows) {
+    const items = Array.isArray(rows) ? rows : [];
+    const readAt = getGsdNotificationsReadAt();
+
+    __gsdLatestNotificationTs = items.reduce((max, row) => {
+        const ts = parseGsdNotificationTs(row?.created_at);
+        return Math.max(max, ts);
+    }, 0);
+
+    const unread = items.reduce((sum, row) => {
+        const ts = parseGsdNotificationTs(row?.created_at);
+        return sum + (ts > readAt ? 1 : 0);
+    }, 0);
+
+    setGsdNotificationBadgeCount(unread);
+}
+
+async function fetchGsdNotificationRows() {
+    const res = await fetch("/api/activity_logs", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+    });
+    const payload = await res.json().catch(() => ({ success: false, data: [] }));
+
+    if (!res.ok || !payload.success || !Array.isArray(payload.data)) {
+        throw new Error(payload.message || payload.error || "Failed to load notifications");
+    }
+
+    return payload.data;
+}
+
+async function refreshGsdNotificationBadge() {
+    try {
+        const rows = await fetchGsdNotificationRows();
+        updateGsdNotificationBadges(rows);
+    } catch (_) {
+        // Keep badge unchanged on fetch failures.
+    }
+}
+
 async function loadNotifications() {
-    const list = document.getElementById("gsd-notification-list");
+    const list = document.getElementById("notifList") || document.getElementById("gsd-notification-list");
     if (!list) return;
 
     list.innerHTML = '<div style="text-align:center; color:#6b7280; padding:20px">Loading...</div>';
 
     try {
-        const res = await fetch("/api/activity_logs", {
-            credentials: "same-origin",
-            headers: { Accept: "application/json" },
-        });
-        const payload = await res.json().catch(() => ({ success: false, data: [] }));
+        const rows = await fetchGsdNotificationRows();
+        updateGsdNotificationBadges(rows);
+        const items = rows.slice().sort((a, b) => parseGsdNotificationTs(b?.created_at) - parseGsdNotificationTs(a?.created_at));
+        const readAt = getGsdNotificationsReadAt();
 
-        if (!res.ok || !payload.success || !Array.isArray(payload.data)) {
-            list.innerHTML = '<div style="text-align:center; color:#ef4444; padding:20px">Failed to load notifications.</div>';
+        if (items.length === 0) {
+            list.innerHTML = '<div style="text-align:center; color:#6b7280; padding:20px">No notifications yet.</div>';
             return;
         }
 
-        if (payload.data.length === 0) {
-            list.innerHTML = '<div style="text-align:center; color:#6b7280; padding:20px">No new notifications.</div>';
-            return;
-        }
-
-        list.innerHTML = payload.data
+        list.innerHTML = items
             .map((item) => {
-                const title = escapeHtml(item.title || "Notification");
-                const desc = escapeHtml(item.description || "");
-                const created = escapeHtml(item.created_at || "");
+                const title = escapeHtml(cleanNotificationText(item.title || "Activity"));
+                const desc = escapeHtml(cleanNotificationText(item.description || ""));
+                const created = item.created_at ? new Date(item.created_at).toLocaleString() : "";
+                const ts = parseGsdNotificationTs(item?.created_at);
+                const isUnread = ts > readAt;
+                const rowStyle = isUnread
+                    ? "padding:12px;border-bottom:1px solid #dbeafe;background:#eff6ff;border-left:4px solid #3b82f6;border-radius:8px;margin-bottom:8px;"
+                    : "padding:12px; border-bottom:1px solid #e5e7eb;";
+                const unreadTag = isUnread
+                    ? '<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:9999px;background:#dbeafe;color:#1d4ed8;font-size:11px;font-weight:700;">Unread</span>'
+                    : "";
                 return `
-                    <div style="padding:12px; border-bottom:1px solid #e5e7eb;">
-                        <div style="font-weight:600">${title}</div>
+                    <div style="${rowStyle}">
+                        <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
+                          <div style="font-weight:600">${title}</div>
+                          ${unreadTag}
+                        </div>
                         <div style="font-size:13px; color:#6b7280; margin-top:4px;">${desc}</div>
                         <div style="font-size:12px; color:#9ca3af; margin-top:4px;">${created}</div>
                     </div>
@@ -420,6 +547,17 @@ async function loadNotifications() {
     } catch (error) {
         console.error("Failed to load notifications", error);
         list.innerHTML = '<div style="text-align:center; color:#ef4444; padding:20px">Failed to load notifications.</div>';
+    }
+}
+
+function markAllNotificationsRead() {
+    const latest = __gsdLatestNotificationTs || Date.now();
+    setGsdNotificationsReadAt(latest);
+    setGsdNotificationBadgeCount(0);
+    showStatus("All notifications marked as read.", "success");
+
+    if (document.getElementById("view-notifications")?.style.display === "flex") {
+        loadNotifications();
     }
 }
 
@@ -495,8 +633,42 @@ function filterInventory() {
 function rejectRequest(requestId) {
     const reason = prompt("Please enter the reason for rejection:");
     if (reason === null) return;
-    if (reason.trim() === "") return alert("Rejection reason is required.");
+    if (reason.trim() === "") return showStatus("Rejection reason is required.", "error");
     updateStatus(requestId, "rejected", reason);
+}
+
+async function sendBackRequest(requestId) {
+    const note = prompt("Enter note for send back:");
+    if (note === null) return;
+
+    const message = String(note || "").trim();
+    if (!message) {
+        showStatus("Send-back message is required.", "error");
+        return;
+    }
+
+    try {
+        const response = await csrfFetch(`/api/request/${requestId}/send-back`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+            },
+            body: JSON.stringify({ message }),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            showStatus(payload.error || `Send back failed (${response.status})`, "error");
+            return;
+        }
+
+        showStatus(payload.message || "Request sent back.", "success");
+        location.reload();
+    } catch (err) {
+        console.error(err);
+        showStatus("Network error. Failed to send back request.", "error");
+    }
 }
 
 function getCsrfToken() {
@@ -560,15 +732,15 @@ async function updateStatus(requestId, status, message = "") {
                 data.message ||
                 text?.slice(0, 300) ||
                 `HTTP ${response.status}`;
-            alert("Error: " + msg);
+            showStatus("Error: " + msg, "error");
             return;
         }
 
-        alert("Success: " + (data.message || "Updated"));
+        showStatus("Success: " + (data.message || "Updated"), "success");
         location.reload();
     } catch (err) {
         console.error(err);
-        alert("Network error. Failed to update status.");
+        showStatus("Network error. Failed to update status.", "error");
     }
 }
 
@@ -606,9 +778,9 @@ async function saveProduct(e) {
     ).trim();
     const quantity = Number(document.getElementById("inv_quantity")?.value);
 
-    if (!product_name) return alert("Product name is required.");
+    if (!product_name) return showStatus("Product name is required.", "error");
     if (Number.isNaN(quantity) || quantity < 0)
-        return alert("Quantity must be 0 or above.");
+        return showStatus("Quantity must be 0 or above.", "error");
 
     const url = id ? `/api/inventory/${id}` : `/api/inventory`;
     const method = id ? "PUT" : "POST";
@@ -625,20 +797,21 @@ async function saveProduct(e) {
         const data = await res.json().catch(() => ({}));
 
         if (res.status === 409) {
-            alert(data.error || "Product already in inventory.");
+            showStatus(data.error || "Product already in inventory.", "error");
             return;
         }
 
         if (!res.ok) {
-            alert(data.error || "Failed to save product.");
+            showStatus(data.error || "Failed to save product.", "error");
             return;
         }
 
         closeInvModal();
+        showStatus("Product saved successfully.", "success");
         location.reload();
     } catch (err) {
         console.error(err);
-        alert("Network error.");
+        showStatus("Network error.", "error");
     }
 }
 
@@ -650,11 +823,12 @@ async function deleteProduct(id) {
     try {
         const res = await csrfFetch(`/api/inventory/${id}`, { method: "DELETE" });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) return alert(data.error || "Failed to delete product.");
+        if (!res.ok) return showStatus(data.error || "Failed to delete product.", "error");
+        showStatus("Product deleted successfully.", "success");
         location.reload();
     } catch (err) {
         console.error(err);
-        alert("Network error.");
+        showStatus("Network error.", "error");
     }
 }
 
@@ -662,6 +836,7 @@ window.addEventListener("load", () => {
     setDates();
     restoreView();
     restoreGsdFilterState();
+    refreshGsdNotificationBadge();
 
     if (document.getElementById("search-input")) filterTable();
     if (document.getElementById("inv-mgmt-search")) filterInvMgmt();

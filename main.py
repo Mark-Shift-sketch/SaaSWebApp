@@ -1,5 +1,6 @@
 import json
 import logging
+import csv
 from flask import (
     Flask,
     session,
@@ -10,16 +11,13 @@ from flask import (
     flash,
     jsonify,
 )
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 from dotenv import load_dotenv
 from sendotp import srotp, verify
-from config import Email, password, get_connection
-import mysql.connector
-from sendotp import send_cc_email
+from config import get_connection
+from sendotp import send_cc_email, send_request_email
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from functools import wraps
 from sendotp import send_cc_email_with_blob
@@ -30,11 +28,12 @@ from reportlab.lib.utils import ImageReader as _ImageReader
 from pypdf import PdfReader as _PdfReader, PdfWriter as _PdfWriter
 from flask import Response
 
+import mysql.connector
 import datetime
 import os
 import re
 import base64
-from io import BytesIO
+from io import BytesIO, StringIO
 from flask import send_file
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -69,13 +68,8 @@ try:
 except Exception:
     csrf = None  
 
-# Rate limiting
-try:
-    from flask_limiter import Limiter
-    from flask_limiter.util import get_remote_address
-    limiter = Limiter(get_remote_address, app=app, default_limits=[])
-except Exception:
-    limiter = None
+# Rate limiting disabled
+limiter = None
 
 
 FRONTEND_ORIGINS = [o.strip() for o in (os.environ.get("FRONTEND_ORIGINS", "")).split(",") if o.strip()]
@@ -128,6 +122,20 @@ def create_token(email):
 
 def verify_token(token, max_age=60 * 60 * 24 * 7):
     data = serializer.loads(token, max_age=max_age)
+    return data["email"]
+
+
+def create_password_reset_token(email):
+    return serializer.dumps(
+        {"email": email, "purpose": "password_reset"},
+        salt="password-reset-salt",
+    )
+
+
+def verify_password_reset_token(token, max_age=60 * 60):
+    data = serializer.loads(token, salt="password-reset-salt", max_age=max_age)
+    if data.get("purpose") != "password_reset":
+        raise BadSignature("Invalid token purpose")
     return data["email"]
 
 
@@ -218,13 +226,136 @@ def get_user_id(email):
         conn.close()
 
 
-# OTP Routes 
-if limiter:
-    srotp_view = limiter.limit("5 per minute")(srotp)
-    verify_view = limiter.limit("10 per minute")(verify)
-else:
-    srotp_view = srotp
-    verify_view = verify
+def get_effective_workflow_positions(cursor, request_id, request_type_id):
+    """
+    Resolve workflow for a request.
+    Prefer per-request overrides, then fall back to request-type defaults.
+    """
+    cursor.execute(
+        """
+        SELECT position_id
+        FROM request_workflow_reviewers
+        WHERE request_id = %s
+        ORDER BY order_no ASC
+    """,
+        (request_id,),
+    )
+    reviewers = [
+        int(row["position_id"])
+        for row in (cursor.fetchall() or [])
+        if row.get("position_id") is not None
+    ]
+
+    if not reviewers:
+        cursor.execute(
+            """
+            SELECT position_id
+            FROM request_type_reviewers
+            WHERE request_type_id = %s
+            ORDER BY order_no ASC
+        """,
+            (request_type_id,),
+        )
+        reviewers = [
+            int(row["position_id"])
+            for row in (cursor.fetchall() or [])
+            if row.get("position_id") is not None
+        ]
+
+    cursor.execute(
+        """
+        SELECT position_id
+        FROM request_workflow_approvers
+        WHERE request_id = %s
+        ORDER BY order_no ASC
+    """,
+        (request_id,),
+    )
+    approvers = [
+        int(row["position_id"])
+        for row in (cursor.fetchall() or [])
+        if row.get("position_id") is not None
+    ]
+
+    if not approvers:
+        cursor.execute(
+            """
+            SELECT position_id
+            FROM request_type_approvers
+            WHERE request_type_id = %s
+            ORDER BY order_no ASC
+        """,
+            (request_type_id,),
+        )
+        approvers = [
+            int(row["position_id"])
+            for row in (cursor.fetchall() or [])
+            if row.get("position_id") is not None
+        ]
+
+    workflow = []
+    for pid in reviewers + approvers:
+        if pid not in workflow:
+            workflow.append(pid)
+
+    return reviewers, approvers, workflow
+
+
+def apply_send_back_visibility(cursor, request_rows):
+    rows = request_rows or []
+
+    for row in rows:
+        row["can_send_back"] = 0
+
+        req_id = row.get("request_id")
+        stage_position_id = row.get("stage_position_id")
+        req_type_id = row.get("request_type_id")
+
+        if req_id is None or stage_position_id is None:
+            continue
+
+        try:
+            req_id = int(req_id)
+            stage_position_id = int(stage_position_id)
+        except (TypeError, ValueError):
+            continue
+
+        if req_type_id is None:
+            cursor.execute(
+                "SELECT request_type_id FROM requests WHERE request_id = %s LIMIT 1",
+                (req_id,),
+            )
+            req_type_row = cursor.fetchone() or {}
+            req_type_id = req_type_row.get("request_type_id")
+
+        try:
+            req_type_id = int(req_type_id)
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            _reviewers, _approvers, workflow = get_effective_workflow_positions(
+                cursor,
+                request_id=req_id,
+                request_type_id=req_type_id,
+            )
+        except Exception:
+            workflow = []
+
+        if not workflow:
+            continue
+
+        try:
+            row["can_send_back"] = 1 if workflow.index(stage_position_id) > 0 else 0
+        except ValueError:
+            row["can_send_back"] = 0
+
+    return rows
+
+
+# OTP Routes
+srotp_view = srotp
+verify_view = verify
 
 app.add_url_rule("/send-otp", "send_otp", srotp_view, methods=["POST"])
 app.add_url_rule("/verify", "verify_otp", verify_view, methods=["POST"])
@@ -286,6 +417,7 @@ def dean_dashboard():
         cursor.execute("""
             SELECT
             r.request_id,
+            r.request_type_id,
             r.filename,
             r.created_at,
             u.email,
@@ -332,10 +464,11 @@ def dean_dashboard():
             (s.status_name='PENDING' AND r.stage_position_id=%s)
             OR (ra.request_id IS NOT NULL)
 
-            ORDER BY r.created_at DESC
+            ORDER BY r.created_at ASC
             LIMIT 50
             """, (position_id, position_id, position_id, position_id, position_id))
         r_requests = cursor.fetchall()
+        apply_send_back_visibility(cursor, r_requests)
 
         # Total Approved (unique requests approved by THIS position)
         cursor.execute("""
@@ -422,7 +555,7 @@ def udashboard():
             LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
             LEFT JOIN request_status s ON r.status_id = s.status_id
             WHERE r.user_id = %s
-            ORDER BY r.request_id DESC
+            ORDER BY r.request_id 
         """, (user_id,))
         all_request = cursor.fetchall()
 
@@ -472,7 +605,7 @@ def get_user_notifications():
             JOIN request_status s ON r.status_id = s.status_id
             LEFT JOIN positions p ON r.stage_position_id = p.position_id
             WHERE r.user_id = %s
-            ORDER BY r.created_at DESC
+            ORDER BY r.created_at ASC
         """
         cursor.execute(query, (user_id,))
         requests = cursor.fetchall()
@@ -510,7 +643,7 @@ def get_user_notifications():
                 notif["icon"] = "check-circle"
             else:
                 notif["message"] = (
-                    f"Currently being reviewed by: {req['current_stage']}"
+                    f"New request submitted. Currently being reviewed by: {req['current_stage']}"
                 )
                 notif["type"] = "pending"
                 notif["icon"] = "clock"
@@ -532,20 +665,37 @@ def api_activity_logs():
     if "email" not in session:
         return jsonify({"success": False})
 
+    position_id = session.get("position_id")
+    try:
+        position_id = int(position_id)
+    except (TypeError, ValueError):
+        return jsonify({"success": True, "data": []})
+
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
 
     try:
         cur.execute("""
             SELECT
-                ra.action_id AS id,
+                CONCAT('A-', ra.action_id) AS id,
+                ra.request_id,
+                r.request_type_id,
                 ra.created_at,
-
-                CONCAT('Request ', ra.action) AS title,
-
+                CONCAT(
+                    'Request ',
+                    CASE
+                    WHEN ra.message LIKE 'Sent back to %' THEN 'SENT BACK'
+                    ELSE REPLACE(ra.action, '_', ' ')
+                    END
+                ) AS title,
                 CONCAT(
                     'REQ#', ra.request_id, ' ',
-                    LOWER(ra.action), ' by ',
+                    LOWER(
+                        CASE
+                        WHEN ra.message LIKE 'Sent back to %' THEN 'SENT BACK'
+                        ELSE REPLACE(ra.action, '_', ' ')
+                        END
+                    ), ' by ',
                     COALESCE(ra.actor_email,'Unknown'),
                     CASE
                     WHEN ra.actor_position_id IS NULL THEN ''
@@ -556,13 +706,97 @@ def api_activity_logs():
                     ELSE CONCAT('. Reason/Note: ', ra.message)
                     END
                 ) AS description
-
             FROM request_actions ra
+            JOIN requests r ON r.request_id = ra.request_id
             ORDER BY ra.created_at DESC
-            LIMIT 200
+            LIMIT 300
         """)
+        action_rows = cur.fetchall() or []
 
-        rows = cur.fetchall()
+        cur.execute("""
+            SELECT
+                CONCAT('R-', r.request_id) AS id,
+                r.request_id,
+                r.request_type_id,
+                r.created_at,
+                'New Request Submitted' AS title,
+                CONCAT(
+                    'REQ#', r.request_id,
+                    ' submitted by ', COALESCE(u.email, 'Unknown'),
+                    CASE
+                    WHEN rt.type_name IS NULL OR rt.type_name = '' THEN ''
+                    ELSE CONCAT(' for ', rt.type_name)
+                    END,
+                    CASE
+                    WHEN p.position_name IS NULL OR p.position_name = '' THEN '.'
+                    ELSE CONCAT('. Routed to ', p.position_name, '.')
+                    END
+                ) AS description
+            FROM requests r
+            LEFT JOIN users u ON u.user_id = r.user_id
+            LEFT JOIN request_types rt ON rt.request_type_id = r.request_type_id
+            LEFT JOIN positions p ON p.position_id = r.stage_position_id
+            ORDER BY r.created_at DESC
+            LIMIT 300
+        """)
+        request_rows = cur.fetchall() or []
+
+        visibility_cache = {}
+
+        def can_view_request(req_id, req_type_id):
+            if req_id is None or req_type_id is None:
+                return False
+
+            key = (int(req_id), int(req_type_id))
+            if key in visibility_cache:
+                return visibility_cache[key]
+
+            try:
+                reviewers, approvers, workflow = get_effective_workflow_positions(
+                    cur,
+                    request_id=key[0],
+                    request_type_id=key[1],
+                )
+            except Exception:
+                reviewers, approvers, workflow = [], [], []
+
+            allowed_positions = set(reviewers + approvers + workflow)
+            visible = position_id in allowed_positions
+            visibility_cache[key] = visible
+            return visible
+
+        rows = []
+        for row in action_rows:
+            if can_view_request(row.get("request_id"), row.get("request_type_id")):
+                rows.append(
+                    {
+                        "id": row.get("id"),
+                        "created_at": row.get("created_at"),
+                        "title": row.get("title"),
+                        "description": row.get("description"),
+                    }
+                )
+
+        for row in request_rows:
+            if can_view_request(row.get("request_id"), row.get("request_type_id")):
+                rows.append(
+                    {
+                        "id": row.get("id"),
+                        "created_at": row.get("created_at"),
+                        "title": row.get("title"),
+                        "description": row.get("description"),
+                    }
+                )
+
+        rows.sort(
+            key=lambda item: (
+                item.get("created_at").timestamp()
+                if hasattr(item.get("created_at"), "timestamp")
+                else 0
+            ),
+            reverse=True,
+        )
+        rows = rows[:200]
 
         return jsonify({
             "success": True,
@@ -599,19 +833,63 @@ def api_user_dashboard():
         cursor.execute("""
             SELECT
                 r.request_id,
+                r.request_type_id,
                 rt.type_name,
                 r.filename,
                 s.status_name,
+                r.rejection_message,
+                COALESCE(p.position_name, '-') AS current_stage,
                 r.created_at
             FROM requests r
             LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
             LEFT JOIN request_status s ON r.status_id = s.status_id
+            LEFT JOIN positions p ON r.stage_position_id = p.position_id
             WHERE r.user_id = %s
-            ORDER BY r.request_id DESC
+            ORDER BY r.request_id ASC
         """, (user_id,))
         all_request = cursor.fetchall()
 
         for r in all_request:
+            status_name = (r.get("status_name") or "").strip().upper()
+            current_stage = (r.get("current_stage") or "").strip()
+
+            if status_name == "PENDING" and (
+                not current_stage
+                or current_stage == "-"
+                or current_stage.lower() in ("none", "null")
+            ):
+                req_id = r.get("request_id")
+                req_type_id = r.get("request_type_id")
+
+                try:
+                    req_id = int(req_id)
+                    req_type_id = int(req_type_id)
+                except (TypeError, ValueError):
+                    req_id = None
+                    req_type_id = None
+
+                if req_id and req_type_id:
+                    _, _, workflow = get_effective_workflow_positions(
+                        cursor,
+                        request_id=req_id,
+                        request_type_id=req_type_id,
+                    )
+                    if workflow:
+                        cursor.execute(
+                            "SELECT position_name FROM positions WHERE position_id = %s LIMIT 1",
+                            (workflow[0],),
+                        )
+                        stage_row = cursor.fetchone() or {}
+                        stage_name = (stage_row.get("position_name") or "").strip()
+                        if stage_name:
+                            r["current_stage"] = stage_name
+
+                # Final fallback for unresolved pending stage.
+                if not (r.get("current_stage") or "").strip() or str(
+                    r.get("current_stage")
+                ).strip() in ("-", "none", "null", "None", "NULL"):
+                    r["current_stage"] = "Pending Review"
+
             if r.get("created_at"):
                 r["created_at"] = r["created_at"].isoformat()
 
@@ -663,6 +941,8 @@ def gsdh_dashboard():
         cursor.execute("""
             SELECT 
                 r.request_id,
+                r.request_type_id,
+                r.stage_position_id,
                 r.filename,
                 r.created_at,
                 u.email,
@@ -675,10 +955,11 @@ def gsdh_dashboard():
             JOIN request_status s ON r.status_id = s.status_id
             LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
             WHERE r.stage_position_id = %s
-            ORDER BY r.created_at DESC
+            ORDER BY r.created_at ASC
             LIMIT 50
             """, (position_id,))
         recent_requests = cursor.fetchall()
+        apply_send_back_visibility(cursor, recent_requests)
 
                 # Pending count (assigned to THIS position)
         cursor.execute("""
@@ -916,8 +1197,10 @@ def admin_dashboard():
         recent_sql = """
             SELECT
             r.request_id,
+            r.request_type_id,
             r.filename,
             r.created_at,
+            r.amount,
             u.email,
             d.dept_name,
             s.status_name,
@@ -925,7 +1208,6 @@ def admin_dashboard():
             r.stage_position_id,
             sp.position_name AS stage_position_name,
 
-            -- latest action by MY position (if any)
             ra.action AS my_action,
 
             CASE
@@ -964,7 +1246,7 @@ def admin_dashboard():
             OR (s.status_name = 'PENDING' AND r.stage_position_id = %(pos_id)s)
             OR (ra.request_id IS NOT NULL)
 
-            ORDER BY r.created_at DESC
+            ORDER BY r.created_at ASC
             LIMIT 50
             """
 
@@ -976,25 +1258,8 @@ def admin_dashboard():
             },
         )
         recent_requests = cursor.fetchall()
+        apply_send_back_visibility(cursor, recent_requests)
 
-        # My requests
-        query_my = """
-            SELECT
-                r.request_id,
-                r.filename,
-                r.created_at,
-                s.status_name,
-                rt.type_name,
-                r.rejection_message
-            FROM requests r
-            LEFT JOIN request_status s ON r.status_id = s.status_id
-            LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
-            WHERE r.user_id = %s
-            ORDER BY r.created_at DESC
-            LIMIT 50
-        """
-        cursor.execute(query_my, (user_id,))
-        my_requests = cursor.fetchall()
 
         # Positions dropdown
         cursor.execute(
@@ -1042,7 +1307,6 @@ def admin_dashboard():
             total_users=total_users,
             in_progress=in_progress,
             recent_requests=recent_requests,
-            my_requests=my_requests,
             positions=positions,
             existing_types=existing_types,
             cc_recipients=cc_recipients,
@@ -1056,14 +1320,176 @@ def admin_dashboard():
         conn.close()
 
 
+@app.route("/api/admin/live")
+def api_admin_live():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    role = session.get("role")
+    if role not in ["Admin", "AssistantAdmin", "SuperAdmin"]:
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        position_id = int(session.get("position_id") or 0)
+        position_name = (session.get("position") or "").strip().lower()
+        is_purchasing = 1 if "purchasing" in position_name else 0
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM requests r
+            JOIN request_status s ON r.status_id = s.status_id
+            WHERE s.status_name = 'PENDING'
+            AND r.stage_position_id = %s
+            """,
+            (position_id,),
+        )
+        pending_count = cursor.fetchone()["count"]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM request_actions
+            WHERE actor_position_id = %s AND action = 'APPROVED'
+            """,
+            (position_id,),
+        )
+        approved_count = cursor.fetchone()["count"]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM request_actions
+            WHERE actor_position_id = %s AND action = 'REJECTED'
+            """,
+            (position_id,),
+        )
+        rejected_count = cursor.fetchone()["count"]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM requests r
+            JOIN request_status s ON r.status_id = s.status_id
+            WHERE s.status_name = 'IN PROGRESS'
+            """
+        )
+        in_progress = cursor.fetchone()["count"]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM requests r
+            JOIN request_status s ON r.status_id = s.status_id
+            WHERE s.status_name = 'COMPLETED'
+            """
+        )
+        completed = cursor.fetchone()["count"]
+
+        recent_sql = """
+            SELECT
+            r.request_id,
+            r.request_type_id,
+            r.filename,
+            r.created_at,
+            r.amount,
+            u.email,
+            d.dept_name,
+            s.status_name,
+            rt.type_name,
+            r.stage_position_id,
+            sp.position_name AS stage_position_name,
+
+            ra.action AS my_action,
+
+            CASE
+                WHEN %(is_purchasing)s = 1 THEN s.status_name
+                WHEN s.status_name = 'PENDING' AND r.stage_position_id = %(pos_id)s THEN 'PENDING'
+                WHEN ra.action IS NOT NULL THEN ra.action
+                ELSE s.status_name
+            END AS status_for_me,
+
+            CASE
+                WHEN (s.status_name = 'PENDING' AND r.stage_position_id = %(pos_id)s) THEN 1
+                ELSE 0
+            END AS can_act
+
+            FROM requests r
+            JOIN users u ON r.user_id = u.user_id
+            LEFT JOIN departments d ON u.dept_id = d.dept_id
+            JOIN request_status s ON r.status_id = s.status_id
+            LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
+            LEFT JOIN positions sp ON r.stage_position_id = sp.position_id
+
+            LEFT JOIN (
+            SELECT x.request_id, x.action
+            FROM request_actions x
+            JOIN (
+                SELECT request_id, MAX(created_at) AS max_created
+                FROM request_actions
+                WHERE actor_position_id = %(pos_id)s
+                GROUP BY request_id
+            ) last ON last.request_id = x.request_id AND last.max_created = x.created_at
+            WHERE x.actor_position_id = %(pos_id)s
+            ) ra ON ra.request_id = r.request_id
+
+            WHERE
+            (%(is_purchasing)s = 1)
+            OR (s.status_name = 'PENDING' AND r.stage_position_id = %(pos_id)s)
+            OR (ra.request_id IS NOT NULL)
+
+            ORDER BY r.created_at ASC
+            LIMIT 50
+            """
+
+        cursor.execute(
+            recent_sql,
+            {
+                "pos_id": position_id,
+                "is_purchasing": is_purchasing,
+            },
+        )
+        recent_requests = cursor.fetchall() or []
+        apply_send_back_visibility(cursor, recent_requests)
+
+        for row in recent_requests:
+            created_at = row.get("created_at")
+            if hasattr(created_at, "isoformat"):
+                row["created_at"] = created_at.isoformat()
+
+        return jsonify(
+            {
+                "success": True,
+                "counts": {
+                    "pending_count": pending_count,
+                    "approved_count": approved_count,
+                    "rejected_count": rejected_count,
+                    "in_progress": in_progress,
+                    "completed": completed,
+                },
+                "recent_requests": recent_requests,
+                "is_purchasing": bool(is_purchasing),
+            }
+        )
+    except Exception:
+        logger.exception("api_admin_live failed")
+        return jsonify({"success": False, "error": "Failed to load live data"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @app.route("/api/request/<int:request_id>/workflow", methods=["GET"])
 def get_request_workflow(request_id):
     if "email" not in session:
         return jsonify({"error": "Unauthorized"}), 401
 
-    role = session.get("role")
-    position = session.get('position_id')
-    if role not in ["AssistantAdmin"] and position not in ["Purchasing"]:
+    role = (session.get("role") or "").strip()
+    position_name = (session.get("position") or "").strip().lower()
+    if role not in ["AssistantAdmin", "Admin", "SuperAdmin"] and "purchasing" not in position_name:
         return jsonify({"error": "Forbidden"}), 403
 
     conn = get_connection()
@@ -1082,55 +1508,11 @@ def get_request_workflow(request_id):
         if not req:
             return jsonify({"error": "Request not found"}), 404
 
-        # prefer per-request override reviewers
-        cursor.execute(
-            """
-            SELECT position_id
-            FROM request_workflow_reviewers
-            WHERE request_id = %s
-            ORDER BY order_no ASC
-        """,
-            (request_id,),
+        rev, app, _workflow = get_effective_workflow_positions(
+            cursor,
+            request_id=request_id,
+            request_type_id=req["request_type_id"],
         )
-        rev = [row["position_id"] for row in cursor.fetchall()]
-
-        #  fallback to request_type reviewers
-        if not rev:
-            cursor.execute(
-                """
-                SELECT position_id
-                FROM request_type_reviewers
-                WHERE request_type_id = %s
-                ORDER BY order_no ASC
-            """,
-                (req["request_type_id"],),
-            )
-            rev = [row["position_id"] for row in cursor.fetchall()]
-
-        # prefer per-request override approvers
-        cursor.execute(
-            """
-            SELECT position_id
-            FROM request_workflow_approvers
-            WHERE request_id = %s
-            ORDER BY order_no ASC
-        """,
-            (request_id,),
-        )
-        app = [row["position_id"] for row in cursor.fetchall()]
-
-        # fallback to request_type approvers
-        if not app:
-            cursor.execute(
-                """
-                SELECT position_id
-                FROM request_type_approvers
-                WHERE request_type_id = %s
-                ORDER BY order_no ASC
-            """,
-                (req["request_type_id"],),
-            )
-            app = [row["position_id"] for row in cursor.fetchall()]
 
         return jsonify(
             {
@@ -1340,7 +1722,35 @@ def create_request():
 
     user_id = session["user_id"]
     request_type_id = request.form.get("request_type_id")
+    amount_raw = (
+        request.form.get("template_total")
+        or request.form.get("amount")
+        or ""
+    ).strip()
     file = request.files.get("file")
+
+    if not amount_raw:
+        msg = "Amount is required."
+        if request.headers.get("X-Requested-With") == "fetch":
+            return jsonify({"success": False, "message": msg}), 400
+        flash(msg, "danger")
+        return redirect(request.referrer or "/udashboard")
+
+    try:
+        amount = float(amount_raw)
+    except (TypeError, ValueError):
+        msg = "Invalid amount value."
+        if request.headers.get("X-Requested-With") == "fetch":
+            return jsonify({"success": False, "message": msg}), 400
+        flash(msg, "danger")
+        return redirect(request.referrer or "/udashboard")
+
+    if amount < 0:
+        msg = "Amount cannot be negative."
+        if request.headers.get("X-Requested-With") == "fetch":
+            return jsonify({"success": False, "message": msg}), 400
+        flash(msg, "danger")
+        return redirect(request.referrer or "/udashboard")
 
     filename = None
     file_blob = None
@@ -1402,14 +1812,16 @@ def create_request():
 
         # Insert Request
         cursor.execute("""
-            INSERT INTO requests (user_id, request_type_id, filename, attachment, status_id, stage_position_id)
-            VALUES (%s, %s, %s, %s, 1, %s)
-        """, (user_id, request_type_id, filename, file_blob, stage_position_id))
+            INSERT INTO requests (user_id, request_type_id, filename, attachment, amount, status_id, stage_position_id)
+            VALUES (%s, %s, %s, %s, %s, 1, %s)
+        """, (user_id, request_type_id, filename, file_blob, amount, stage_position_id))
+
+        request_id = cursor.lastrowid
         conn.commit()
 
         # return JSON for fetch
         if request.headers.get("X-Requested-With") == "fetch":
-            return jsonify({"success": True, "request_id": cursor.lastrowid}), 200
+            return jsonify({"success": True, "request_id": request_id}), 200
 
         flash("Request submitted successfully!", "success")
         return redirect("/udashboard")
@@ -1464,6 +1876,147 @@ def reports_api():
             "success": False,
             "message": "Failed to load reports"
         }), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.route("/api/reports/export")
+def export_reports_csv():
+    if "email" not in session:
+        return Response("Unauthorized", status=401, mimetype="text/plain")
+
+    role = (session.get("role") or "").strip()
+    if role not in {"Admin", "AssistantAdmin"}:
+        return Response("Forbidden: only Admin and AssistantAdmin can export reports", status=403, mimetype="text/plain")
+
+    selected_range = (request.args.get("range") or "this_week").strip().lower()
+    selected_status = (request.args.get("status") or "all").strip().lower()
+    requested_name = (request.args.get("name") or "").strip()
+    allowed_ranges = {
+        "this_week": "This Week",
+        "this_month": "This Month",
+        "three_months": "Last 3 Months",
+        "six_months": "Last 6 Months",
+        "this_year": "This Year",
+    }
+    allowed_statuses = {
+        "all": ("REJECTED", "APPROVED", "COMPLETED"),
+        "rejected": ("REJECTED",),
+        "approved": ("APPROVED",),
+        "completed": ("COMPLETED",),
+    }
+
+    if selected_range not in allowed_ranges:
+        return jsonify({"success": False, "message": "Invalid export range"}), 400
+
+    if selected_status not in allowed_statuses:
+        return jsonify({"success": False, "message": "Invalid export status"}), 400
+
+    if not requested_name:
+        return jsonify({"success": False, "message": "Export file name is required"}), 400
+
+    safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "", requested_name).strip().strip(".")
+    if not safe_name:
+        return jsonify({"success": False, "message": "Invalid export file name"}), 400
+
+    if safe_name.lower().endswith(".csv"):
+        safe_name = safe_name[:-4].strip()
+    if not safe_name:
+        safe_name = "requests_export"
+
+    where_map = {
+        "this_week": (
+            "r.created_at >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY) "
+            "AND r.created_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 7 DAY)"
+        ),
+        "this_month": "YEAR(r.created_at)=YEAR(CURDATE()) AND MONTH(r.created_at)=MONTH(CURDATE())",
+        "three_months": "r.created_at >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)",
+        "six_months": "r.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)",
+        "this_year": "YEAR(r.created_at)=YEAR(CURDATE())",
+    }
+
+    where_clause = where_map[selected_range]
+    status_values = allowed_statuses[selected_status]
+    status_placeholders = ", ".join(["%s"] * len(status_values))
+    status_clause = f"AND s.status_name IN ({status_placeholders})"
+
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            f"""
+            SELECT
+                r.request_id,
+                r.created_at,
+                u.email,
+                COALESCE(d.dept_name, '-') AS department,
+                COALESCE(rt.type_name, '-') AS request_type,
+                COALESCE(s.status_name, '-') AS status,
+                COALESCE(p.position_name, '-') AS current_stage,
+                COALESCE(r.filename, '-') AS filename
+            FROM requests r
+            JOIN users u ON r.user_id = u.user_id
+            LEFT JOIN departments d ON u.dept_id = d.dept_id
+            LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
+            LEFT JOIN request_status s ON r.status_id = s.status_id
+            LEFT JOIN positions p ON r.stage_position_id = p.position_id
+            WHERE {where_clause}
+            {status_clause}
+            ORDER BY r.created_at DESC
+        """
+            ,
+            status_values,
+        )
+        rows = cur.fetchall() or []
+
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "Request ID",
+                "Created At",
+                "Email",
+                "Department",
+                "Request Type",
+                "Status",
+                "Current Stage",
+                "Filename",
+            ]
+        )
+
+        for row in rows:
+            created_at = row.get("created_at")
+            created_at_str = (
+                created_at.strftime("%Y-%m-%d %H:%M:%S")
+                if hasattr(created_at, "strftime")
+                else str(created_at or "")
+            )
+            writer.writerow(
+                [
+                    row.get("request_id", ""),
+                    created_at_str,
+                    row.get("email", ""),
+                    row.get("department", ""),
+                    row.get("request_type", ""),
+                    row.get("status", ""),
+                    row.get("current_stage", ""),
+                    row.get("filename", ""),
+                ]
+            )
+
+        filename = f"{safe_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        csv_data = output.getvalue()
+        output.close()
+
+        return Response(
+            csv_data,
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except Exception:
+        logger.exception("export_reports_csv failed")
+        return jsonify({"success": False, "message": "Failed to export reports"}), 500
     finally:
         cur.close()
         conn.close()
@@ -1589,6 +2142,8 @@ def save_annotations(request_id):
         r = cur.fetchone()
         if not r or not r.get("attachment"):
             return jsonify({"error": "Original PDF not found"}), 404
+        if not any(data.get("x") is not None and data.get("y") is not None for data in annotations):
+            return jsonify({"error": "Invalid annotation coordinates"}), 400
 
         template_pdf_bytes = r["attachment"]
 
@@ -2053,7 +2608,7 @@ def it_dashboard():
         cursor.execute("SELECT * FROM positions")
         positions = cursor.fetchall()
 
-        cursor.execute("SELECT * FROM activity_logs ORDER BY created_at DESC LIMIT 15")
+        cursor.execute("SELECT * FROM activity_logs ORDER BY created_at ASC LIMIT 15")
         notifications = cursor.fetchall()
 
         return render_template(
@@ -2243,6 +2798,19 @@ def update_request_status(request_id):
         actor_position_id = session.get("position_id")
         actor_email = session.get("email")
 
+        # Request owner email (notification target)
+        cursor.execute(
+            """
+            SELECT u.email AS requestor_email
+            FROM requests r
+            JOIN users u ON u.user_id = r.user_id
+            WHERE r.request_id = %s
+            """,
+            (request_id,),
+        )
+        _owner_row = cursor.fetchone() or {}
+        requestor_email = (_owner_row.get("requestor_email") or "").strip()
+
         # Get current stage before changing (used for logs)
         cursor.execute(
             "SELECT stage_position_id FROM requests WHERE request_id = %s",
@@ -2283,6 +2851,10 @@ def update_request_status(request_id):
         # If REJECTED mark rejected immediately
         
         if (new_status or "").lower() == "rejected":
+            approved_recipients = []
+            request_type_name = "Request"
+            rejection_reason_text = (rejection_msg or "").strip() or "No reason was provided."
+
             cursor.execute(
                 """
                 UPDATE requests
@@ -2314,7 +2886,76 @@ def update_request_status(request_id):
                 )
             except Exception as _log_err:
                 print("request_actions log error:", _log_err)
+
+            # Notify everyone who already approved this request.
+            try:
+                cursor.execute(
+                    """
+                    SELECT DISTINCT COALESCE(ra.actor_email, u.email) AS email
+                    FROM request_actions ra
+                    LEFT JOIN users u ON u.user_id = ra.actor_user_id
+                    WHERE ra.request_id = %s
+                      AND ra.action = 'APPROVED'
+                      AND COALESCE(ra.actor_email, u.email) IS NOT NULL
+                """,
+                    (request_id,),
+                )
+                recipient_rows = cursor.fetchall() or []
+
+                seen_emails = set()
+                actor_email_lower = (actor_email or "").strip().lower()
+
+                for row in recipient_rows:
+                    email = (row.get("email") or "").strip()
+                    email_lower = email.lower()
+                    if not email:
+                        continue
+                    if actor_email_lower and email_lower == actor_email_lower:
+                        continue
+                    if email_lower in seen_emails:
+                        continue
+                    seen_emails.add(email_lower)
+                    approved_recipients.append(email)
+
+                cursor.execute(
+                    """
+                    SELECT COALESCE(rt.type_name, 'Request') AS type_name
+                    FROM requests r
+                    LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
+                    WHERE r.request_id = %s
+                """,
+                    (request_id,),
+                )
+                request_info = cursor.fetchone() or {}
+                request_type_name = request_info.get("type_name") or "Request"
+            except Exception as _notify_err:
+                print("rejection notify preload error:", _notify_err)
+
             conn.commit()
+
+            if requestor_email:
+                try:
+                    send_request_email(requestor_email, "REJECTED")
+                except Exception as _owner_mail_err:
+                    print("requestor reject email error:", _owner_mail_err)
+
+            if approved_recipients:
+                subject = f"Request Rejected Notice - REQ#{request_id}"
+                body = f"""Good day,
+
+                REQ#{request_id} ({request_type_name}) has been REJECTED by {actor_email or 'an approver/reviewer'}.
+                Reason: {rejection_reason_text}
+
+                You are receiving this because you previously approved this request.
+
+                This is an automated message. Do not reply."""
+
+                for recipient in approved_recipients:
+                    try:
+                        send_cc_email(recipient, subject, body)
+                    except Exception as _send_err:
+                        print("rejection notify email error:", _send_err)
+
             return jsonify({"message": "Request rejected successfully"})
 
         # If APPROVED advance to next reviewer/approver
@@ -2354,41 +2995,11 @@ def update_request_status(request_id):
             pending_row = cursor.fetchone()
             pending_status_id = pending_row["status_id"] if pending_row else 1
 
-            # reviewers first, then approvers
-            cursor.execute(
-                """
-                SELECT position_id
-                FROM request_type_reviewers
-                WHERE request_type_id = %s
-                ORDER BY order_no ASC
-                """,
-                (req_type_id,),
+            _reviewers, _approvers, workflow = get_effective_workflow_positions(
+                cursor,
+                request_id=request_id,
+                request_type_id=req_type_id,
             )
-            reviewers = [
-                int(r["position_id"])
-                for r in cursor.fetchall()
-                if r.get("position_id") is not None
-            ]
-
-            cursor.execute(
-                """
-                SELECT position_id
-                FROM request_type_approvers
-                WHERE request_type_id = %s
-                ORDER BY order_no ASC
-                """,
-                (req_type_id,),
-            )
-            approvers = [
-                int(a["position_id"])
-                for a in cursor.fetchall()
-                if a.get("position_id") is not None
-            ]
-
-            workflow = []
-            for position in reviewers + approvers:
-                if position not in workflow:
-                    workflow.append(position)
 
             if current_stage is not None:
                 current_stage = int(current_stage)
@@ -2403,6 +3014,11 @@ def update_request_status(request_id):
                     (status_id, request_id),
                 )
                 conn.commit()
+                if requestor_email:
+                    try:
+                        send_request_email(requestor_email, "APPROVED")
+                    except Exception as _owner_mail_err:
+                        print("requestor approved email error:", _owner_mail_err)
                 return jsonify(
                     {"message": "Request approved (no workflow configured)."}
                 )
@@ -2455,6 +3071,11 @@ def update_request_status(request_id):
                     (status_id, request_id),
                 )
                 conn.commit()
+                if requestor_email:
+                    try:
+                        send_request_email(requestor_email, "APPROVED")
+                    except Exception as _owner_mail_err:
+                        print("requestor approved email error:", _owner_mail_err)
                 return jsonify({"message": "Request fully approved. Completed"})
 
         # Fallback: set status as requested
@@ -2472,6 +3093,203 @@ def update_request_status(request_id):
 
     except Exception as e:
         return jsonify({"error": str(e)})
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/request/<int:request_id>/send-back", methods=["POST"])
+def send_back_request(request_id):
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    note = (data.get("message") or "").strip()
+    if not note:
+        return jsonify({"error": "Message is required."}), 400
+
+    actor_user_id = session.get("user_id")
+    actor_email = (session.get("email") or "").strip()
+    actor_position_id = session.get("position_id")
+
+    try:
+        actor_position_id = int(actor_position_id)
+    except Exception:
+        return jsonify({"error": "Only reviewers/approvers can send back requests."}), 403
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """
+            SELECT r.request_id, r.request_type_id, r.stage_position_id, s.status_name
+            FROM requests r
+            JOIN request_status s ON s.status_id = r.status_id
+            WHERE r.request_id = %s
+            LIMIT 1
+        """,
+            (request_id,),
+        )
+        req = cursor.fetchone()
+        if not req:
+            return jsonify({"error": "Request not found"}), 404
+
+        if (req.get("status_name") or "").upper() != "PENDING":
+            return jsonify({"error": "Only pending requests can be sent back."}), 400
+
+        current_stage = req.get("stage_position_id")
+        if current_stage is None:
+            return jsonify({"error": "Request has no active stage."}), 400
+
+        current_stage = int(current_stage)
+        if current_stage != actor_position_id:
+            return jsonify({"error": "Only the current assigned stage can send this back."}), 403
+
+        _reviewers, _approvers, workflow = get_effective_workflow_positions(
+            cursor,
+            request_id=request_id,
+            request_type_id=req["request_type_id"],
+        )
+
+        if not workflow:
+            return jsonify({"error": "Workflow is not configured for this request."}), 400
+
+        try:
+            idx = workflow.index(current_stage)
+        except ValueError:
+            return jsonify({"error": "Current stage is not part of this workflow."}), 400
+
+        if idx <= 0:
+            return jsonify({"error": "Request is already at the first workflow stage."}), 400
+
+        target_stage = workflow[idx - 1]
+
+        cursor.execute(
+            "SELECT status_id FROM request_status WHERE status_name='PENDING' LIMIT 1"
+        )
+        pending_row = cursor.fetchone()
+        pending_status_id = pending_row["status_id"] if pending_row else 1
+
+        cursor.execute(
+            "SELECT position_name FROM positions WHERE position_id=%s LIMIT 1",
+            (target_stage,),
+        )
+        target_pos_row = cursor.fetchone() or {}
+        if not target_pos_row:
+            return jsonify({"error": "Target workflow stage is invalid. Please update workflow settings."}), 400
+        target_position_name = target_pos_row.get("position_name") or f"Position {target_stage}"
+
+        cursor.execute(
+            """
+            UPDATE requests
+            SET status_id = %s,
+                stage_position_id = %s
+            WHERE request_id = %s
+        """,
+            (pending_status_id, target_stage, request_id),
+        )
+
+        action_message = f"Sent back to {target_position_name}. Note: {note}"
+
+        # Keep send-back note compatible with legacy varchar(message) schemas.
+        try:
+            cursor.execute("SHOW COLUMNS FROM request_actions LIKE 'message'")
+            msg_col = cursor.fetchone() or {}
+            msg_type = str(msg_col.get("Type") or msg_col.get("type") or "")
+            msg_len_match = re.search(r"varchar\((\d+)\)", msg_type, flags=re.IGNORECASE)
+            if msg_len_match:
+                max_len = int(msg_len_match.group(1))
+                if len(action_message) > max_len:
+                    action_message = action_message[:max_len]
+        except Exception:
+            pass
+
+        action_candidates = ["SENT_BACK", "IN_PROGRESS"]
+
+        # Prefer valid enum values when action column is enum in older databases.
+        try:
+            cursor.execute("SHOW COLUMNS FROM request_actions LIKE 'action'")
+            action_col = cursor.fetchone() or {}
+            action_type = str(action_col.get("Type") or action_col.get("type") or "")
+            enum_values = re.findall(r"'([^']+)'", action_type)
+            if enum_values:
+                ordered = []
+                for value in ["SENT_BACK", "IN_PROGRESS"]:
+                    if value in enum_values and value not in ordered:
+                        ordered.append(value)
+                for value in enum_values:
+                    if value not in ordered:
+                        ordered.append(value)
+                if ordered:
+                    action_candidates = ordered
+        except Exception:
+            pass
+
+        try:
+            cursor.execute(
+                """
+                SELECT action
+                FROM request_actions
+                WHERE action IS NOT NULL
+                ORDER BY action_id DESC
+                LIMIT 10
+                """
+            )
+            recent_rows = cursor.fetchall() or []
+            for row in recent_rows:
+                value = str(row.get("action") or "").strip()
+                if value and value not in action_candidates:
+                    action_candidates.append(value)
+        except Exception:
+            pass
+
+        inserted_action = None
+        last_insert_error = None
+
+        for action_value in action_candidates:
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO request_actions
+                    (request_id, actor_user_id, actor_position_id, actor_email, action, message)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        request_id,
+                        actor_user_id,
+                        actor_position_id,
+                        actor_email,
+                        action_value,
+                        action_message,
+                    ),
+                )
+                inserted_action = action_value
+                break
+            except mysql.connector.Error as action_err:
+                last_insert_error = action_err
+
+        if inserted_action is None:
+            # Do not block state transition if legacy action schema refuses all values.
+            logger.warning(
+                "send_back_request log insert skipped; request_id=%s actor_position_id=%s error=%s",
+                request_id,
+                actor_position_id,
+                str(last_insert_error),
+            )
+
+        conn.commit()
+        return jsonify({
+            "success": True,
+            "message": f"Request sent back to {target_position_name}.",
+        })
+    except mysql.connector.Error as db_err:
+        conn.rollback()
+        logger.exception("send_back_request DB error")
+        return jsonify({"error": f"Database error: {db_err}"}), 500
+    except Exception:
+        conn.rollback()
+        logger.exception("send_back_request failed")
+        return jsonify({"error": "Failed to send back request."}), 500
     finally:
         cursor.close()
         conn.close()
@@ -2679,6 +3497,7 @@ def api_requests():
                         r.request_id,
                         rt.type_name,
                         r.filename,
+                        r.amount,
                         rs.status_name,
                         r.stage_position_id,
                         p.position_name,
@@ -2713,6 +3532,22 @@ def api_requests():
         try:
             # Handle JSON
             req_type_id = request.form.get("request_type_id")
+            amount_raw = (
+                request.form.get("template_total")
+                or request.form.get("amount")
+                or ""
+            ).strip()
+
+            if not amount_raw:
+                return jsonify({"error": "Amount is required"}), 400
+
+            try:
+                amount = float(amount_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid amount value"}), 400
+
+            if amount < 0:
+                return jsonify({"error": "Amount cannot be negative"}), 400
 
             # Handle File
             if "attachment" in request.files:
@@ -2757,14 +3592,15 @@ def api_requests():
 
             cursor.execute(
                 """
-                INSERT INTO requests (request_type_id, user_id, filename, attachment, status_id, stage_position_id, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                INSERT INTO requests (request_type_id, user_id, filename, attachment, amount, status_id, stage_position_id, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
             """,
                 (
                     req_type_id,
                     user_id,
                     filename,
                     file_data,
+                    amount,
                     status_id,
                     stage_position_id,
                 ),
@@ -3393,7 +4229,6 @@ def signup():
 
 # web login
 @app.route("/login", methods=["GET", "POST"])
-@limiter.limit("5/minute")
 def login():
     if request.method == "POST":
         e = request.form["email"].strip().lower()
@@ -3432,7 +4267,111 @@ def login():
         finally:
             cursor.close()
             conn.close()
-    return render_template("login.html")
+    return render_template("login.html", message=request.args.get("message"))
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip().lower()
+        generic_msg = "If the email exists, a reset link has been sent."
+
+        if not email:
+            return render_template(
+                "forgot_password.html",
+                message="Please enter your email address",
+                success=False,
+            )
+
+        user_exists = False
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute("SELECT user_id FROM users WHERE email=%s", (email,))
+            user_exists = bool(cursor.fetchone())
+        finally:
+            cursor.close()
+            conn.close()
+
+        if user_exists:
+            token = create_password_reset_token(email)
+            reset_link = url_for("reset_password", token=token, _external=True)
+            subject = "Password Reset Request"
+            body = (
+                "Good day,\n\n"
+                "A password reset was requested for your account.\n"
+                "Open the link below to set a new password:\n\n"
+                f"{reset_link}\n\n"
+                "If you did not request this, you can safely ignore this email.\n\n"
+                "This is an automated message. Do not reply."
+            )
+            send_cc_email(email, subject, body)
+
+        return render_template(
+            "forgot_password.html",
+            message=generic_msg,
+            success=True,
+        )
+
+    return render_template("forgot_password.html")
+
+
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    try:
+        email = verify_password_reset_token(token)
+    except SignatureExpired:
+        return render_template(
+            "reset_password.html",
+            message="Reset link has expired. Request a new one.",
+            token_valid=False,
+        )
+    except BadSignature:
+        return render_template(
+            "reset_password.html",
+            message="Invalid reset link. Request a new one.",
+            token_valid=False,
+        )
+
+    if request.method == "POST":
+        new_pass = request.form.get("pass") or ""
+        confirm_pass = request.form.get("cpass") or ""
+
+        if (
+            len(new_pass) < 6
+            or not any(c.isdigit() for c in new_pass)
+            or not any(c.isupper() for c in new_pass)
+        ):
+            return render_template(
+                "reset_password.html",
+                message="Password: 6+ chars, 1 digit, 1 uppercase",
+                token_valid=True,
+            )
+
+        if new_pass != confirm_pass:
+            return render_template(
+                "reset_password.html",
+                message="Passwords do not match",
+                token_valid=True,
+            )
+
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            new_hash = generate_password_hash(
+                new_pass, method="pbkdf2:sha256", salt_length=16
+            )
+            cursor.execute("UPDATE users SET password=%s WHERE email=%s", (new_hash, email))
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
+
+        return redirect(
+            url_for("login", message="Password reset successful. Please log in.")
+        )
+
+    return render_template("reset_password.html", token_valid=True)
 
 
 # Mobile API Endpoints (Connected to flutter)
@@ -3504,7 +4443,7 @@ def user_notifications():
         SELECT message, created_at
         FROM notifications
         WHERE user_id = %s
-        ORDER BY created_at DESC
+        ORDER BY created_at ASC
     """, (user_id,))
 
     notifications = cursor.fetchall()
@@ -3609,7 +4548,7 @@ def mobile_notifications():
                 "title": f"Update on {req['type_name']}",
                 "time": req["created_at"].strftime("%b %d, %H:%M"),
                 "type": "pending",
-                "message": f"Currently being reviewed by: {req['current_stage']}",
+                "message": f"New request submitted. Currently being reviewed by: {req['current_stage']}",
             }
             if status_lower == "approved":
                 notif["type"] = "success"
@@ -3810,15 +4749,12 @@ test_text = [
     {"page": 0, "x": 470, "y": 330, "text": "CDR-))!", "font": 10},
 ]
 
-@app.get("/api/ping")
-def ping():
-    return jsonify({"ok": True})
-
 
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "5000")),
         debug=(os.environ.get("FLASK_DEBUG", "true").lower() == "true"),
+        use_reloader=True,
     ) 
 

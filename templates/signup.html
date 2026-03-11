@@ -3,6 +3,7 @@
 <head>
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sign Up</title>
     <link rel="stylesheet" href="/static/signup.css">
     <link rel="stylesheet" href="/static/login.css">
@@ -114,6 +115,24 @@ function getOtpValue() {
   return otp;
 }
 
+function showSignupStatus(message, kind = "info") {
+  let node = document.getElementById("signup-status-toast");
+  if (!node) {
+    node = document.createElement("div");
+    node.id = "signup-status-toast";
+    node.style.cssText = "position:fixed;top:16px;right:16px;z-index:99999;padding:10px 12px;border-radius:10px;color:#fff;max-width:340px;font-size:13px;box-shadow:0 10px 20px rgba(0,0,0,.2);";
+    document.body.appendChild(node);
+  }
+
+  const bg = kind === "error" ? "#b91c1c" : kind === "success" ? "#15803d" : "#111827";
+  node.style.background = bg;
+  node.textContent = message;
+  node.style.display = "block";
+  setTimeout(() => {
+    if (node) node.style.display = "none";
+  }, 3000);
+}
+
 function setupOtpInputs() {
   const inputs = Array.from(document.querySelectorAll(".Eotp"));
   if (!inputs.length) return;
@@ -177,7 +196,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (getOtpBtn) {
     getOtpBtn.addEventListener("click", async () => {
       const email = (emailEl?.value || "").trim();
-      if (!email) return alert("Enter email first");
+      if (!email) return showSignupStatus("Enter email first", "error");
 
       try {
         getOtpBtn.disabled = true;
@@ -195,17 +214,17 @@ document.addEventListener("DOMContentLoaded", () => {
         const msg = await res.text();
 
         if (!res.ok) {
-          alert(msg || `Request failed (${res.status})`);
+          showSignupStatus(msg || `Request failed (${res.status})`, "error");
           return;
         }
 
-        alert(msg);
+        showSignupStatus(msg || "OTP request sent.", "success");
 
         if (msg.toLowerCase().includes("otp sent") || msg.toLowerCase().includes("success")) {
           showOverlay();
         }
       } catch (err) {
-        alert("Network error: " + err);
+        showSignupStatus("Network error: " + err, "error");
       } finally {
         getOtpBtn.disabled = false;
       }
@@ -217,8 +236,8 @@ document.addEventListener("DOMContentLoaded", () => {
       const email = (emailEl?.value || "").trim();
       const otp = getOtpValue();
 
-      if (!email) return alert("Enter email first");
-      if (otp.length !== 6) return alert("Enter 6-digit OTP");
+      if (!email) return showSignupStatus("Enter email first", "error");
+      if (otp.length !== 6) return showSignupStatus("Enter 6-digit OTP", "error");
 
       try {
         verifyOtpBtn.disabled = true;
@@ -236,18 +255,18 @@ document.addEventListener("DOMContentLoaded", () => {
         const msg = await res.text();
 
         if (!res.ok) {
-          alert(msg || `Verify failed (${res.status})`);
+          showSignupStatus(msg || `Verify failed (${res.status})`, "error");
           return;
         }
 
-        alert(msg);
+        showSignupStatus(msg || "OTP verified.", "success");
 
         if (msg.toLowerCase().includes("verified")) {
           hideOverlay();
           signupBtn.disabled = false;
         }
       } catch (err) {
-        alert("Network error: " + err);
+        showSignupStatus("Network error: " + err, "error");
       } finally {
         verifyOtpBtn.disabled = false;
       }

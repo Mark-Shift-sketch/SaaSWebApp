@@ -14,18 +14,57 @@
       rel="stylesheet"
       href="{{ url_for('static', filename='fonts/css/all.min.css') }}"
     />
+    <script>
+      window.CURRENT_USER_EMAIL = {{ (session.get('email') or '')|tojson }};
+    </script>
     <script src="/static/gsd/gsd.js"></script>
 
   </head>
 
   <body>
+    <div class="mobile-nav-header">
+      <div class="mobile-nav-bar">
+        <div class="mobile-nav-brand">
+          <i class="fa-solid fa-building-columns"></i>
+          <span>{{ session['role'] }} Menu</span>
+        </div>
+        <button
+          type="button"
+          id="mobileMenuToggle"
+          class="mobile-nav-toggle"
+          aria-label="Toggle menu"
+          aria-controls="mobileNavMenu"
+          aria-expanded="false"
+          onclick="toggleMobileMenu()"
+        >
+          <i class="fa-solid fa-bars"></i>
+        </button>
+      </div>
+
+      <nav id="mobileNavMenu" class="mobile-nav-menu">
+        <a onclick="switchView('dashboard'); closeMobileMenu();">Dashboard</a>
+
+        {% if session['role'] == "dev" %}
+        <a onclick="switchView('inventory'); closeMobileMenu();">Inventory</a>
+        {% endif %}
+
+        <a onclick="switchView('inventory-management'); closeMobileMenu();">Inventory Management</a>
+        <a onclick="switchView('notifications'); closeMobileMenu();">
+          <span>Notifications</span>
+          <span id="gsd-mobile-notification-badge" class="badge-nav" style="display:none;">0</span>
+        </a>
+        <a onclick="switchView('history'); closeMobileMenu();">History</a>
+        <a onclick="switchView('settings'); closeMobileMenu();">Settings</a>
+        <a href="/logout" class="mobile-nav-logout">Logout</a>
+      </nav>
+    </div>
+
     <aside class="sidebar">
       <div class="sidebar-header">
-        <i
-          class="fa-solid fa-building-columns"
-          style="color: white; font-size: 1.125rem"
-        ></i>
-        <h1 class="logo-text">Admin/Assistant Dashboard</h1>
+        <img
+              src="/static/user/coclogo.png"
+              style="max-width: 100%; height: auto"
+            />
       </div>
 
       <nav class="sidebar-nav custom-scrollbar">
@@ -79,6 +118,7 @@
             <i class="fa-regular fa-bell"></i>
             <span>Notifications</span>
           </div>
+          <span id="gsd-notification-badge" class="badge-nav" style="display:none;">0</span>
         </a>
 
         <a id="nav-history" class="nav-item" onclick="switchView('history')">
@@ -287,6 +327,17 @@
                           <i class="fa-solid fa-xmark"></i>
                         </button>
 
+                        {% if req.can_send_back == 1 %}
+                        <button
+                          class="btn-icon"
+                          title="Send Back"
+                          onclick="sendBackRequest('{{ req.request_id }}')"
+                          type="button"
+                        >
+                          <i class="fa-solid fa-rotate-left"></i>
+                        </button>
+                        {% endif %}
+
                         <!-- FIXED: missing closing button -->
                         <button
                           class="btn-icon"
@@ -447,12 +498,12 @@
               <a
                 href="#"
                 class="mark-read-link"
-                onclick="alert('Feature coming soon')"
+                onclick="markAllNotificationsRead(); return false;"
               >
                 Mark all as read
               </a>
             </div>
-            <div class="notification-list" id="gsd-notification-list">
+            <div class="notification-list" id="notifList">
               <div style="text-align: center; color: #6b7280; padding: 20px">
                 Loading...
               </div>

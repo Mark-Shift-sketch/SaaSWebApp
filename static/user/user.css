@@ -1015,8 +1015,18 @@ input:checked + .slider:before {
 
 /* Responsive Breakpoints */
 @media (max-width: 768px) {
+  body {
+    overflow-y: auto;
+    overflow-x: hidden;
+    height: auto;
+    min-height: 100vh;
+  }
+
   .app-container {
     flex-direction: column;
+    height: auto;
+    min-height: 100vh;
+    width: 100%;
   }
 
   .sidebar {
@@ -1031,12 +1041,25 @@ input:checked + .slider:before {
     padding: 1rem;
   }
 
+  .main-content {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
   .user-info {
     display: none;
   }
 
   .content-wrapper {
+    overflow-y: visible;
     padding: 1rem;
+  }
+
+  .mobile-menu {
+    max-height: 60vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 }
 

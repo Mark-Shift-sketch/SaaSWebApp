@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='fonts/css/all.min.css') }}">
     <script src="{{ url_for('static', filename='user/sweetalert.js') }}"></script>
     <script src="{{ url_for('static', filename='alltoast/toast.js') }}"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="{{ url_for('static', filename='chart.js') }}"></script>
 
 
   </head>
@@ -26,14 +26,50 @@
         {% endif %}
       {% endwith %}
     </div>
+
+    <div class="mobile-nav-header">
+      <div class="mobile-nav-bar">
+        <div class="mobile-nav-brand">
+          <img src="/static/user/coclogo.png" alt="COC" />
+          <span>{{ session['role'] }} Menu</span>
+        </div>
+        <button
+          type="button"
+          id="mobileMenuToggle"
+          class="mobile-nav-toggle"
+          aria-label="Toggle menu"
+          aria-controls="mobileNavMenu"
+          aria-expanded="false"
+          onclick="toggleMobileMenu()"
+        >
+          <i class="fa-solid fa-bars"></i>
+        </button>
+      </div>
+
+      <nav id="mobileNavMenu" class="mobile-nav-menu">
+        <a onclick="switchView('dashboard'); closeMobileMenu();">Dashboard</a>
+
+        {% if session['role'] == 'AssistantAdmin' and session['dept'] == "Finance" %}
+        <a onclick="switchView('requests'); closeMobileMenu();">Request Type Management</a>
+        {% endif %}
+
+        <a onclick="switchView('reports'); closeMobileMenu();">Reports</a>
+        <a onclick="switchView('notifications'); closeMobileMenu();">
+          <span>Notifications</span>
+          <span id="admin-mobile-notification-badge" class="badge-nav" style="display:none;">0</span>
+        </a>
+        <a onclick="switchView('settings'); closeMobileMenu();">Settings</a>
+        <a href="/logout" class="mobile-nav-logout">Logout</a>
+      </nav>
+    </div>
+
     <!-- SIDEBAR -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <i
-          class="fa-solid fa-building-columns"
-          style="color: white; font-size: 1.125rem"
-        ></i>
-        <h1 class="logo-text">Admin/Assistant Dashboard</h1>
+      <img
+              src="/static/user/coclogo.png"
+              style="max-width: 100%; height: auto"
+            />
       </div>
 
       <nav class="sidebar-nav custom-scrollbar">
@@ -78,6 +114,7 @@
             <i class="fa-regular fa-bell"></i>
             <span>Notifications</span>
           </div>
+          <span id="admin-notification-badge" class="badge-nav" style="display:none;">0</span>
         </a>
 
         <a id="nav-settings" class="nav-item" onclick="switchView('settings')">
@@ -114,7 +151,7 @@
         <header class="top-header">
           <div class="header-title">
             <h2>{{ session['role'] }} Dashboard</h2>
-            <p>Welcome back, {{ session['email'] }}</p>
+            <p>Welcome back, {{ session['position'] }}</p>
       
           </div>
 
@@ -135,7 +172,7 @@
                 <div class="icon-box"><i class="fa-regular fa-clock"></i></div>
               </div>
               <div>
-                <h3 class="stat-value">{{ pending_count }}</h3>
+                <h3 id="admin-pending-count" class="stat-value">{{ pending_count }}</h3>
                 <p class="stat-label">Pending Approvals</p>
               </div>
             </div>
@@ -145,7 +182,7 @@
                 <div class="icon-box"><i class="fa-solid fa-check"></i></div>
               </div>
               <div>
-                <h3 class="stat-value">{{ approved_count }}</h3>
+                <h3 id="admin-approved-count" class="stat-value">{{ approved_count }}</h3>
                 <p class="stat-label">Total Approved</p>
               </div>
             </div>
@@ -155,7 +192,7 @@
                 <div class="icon-box"><i class="fa-solid fa-xmark"></i></div>
               </div>
               <div>
-                <h3 class="stat-value">{{ rejected_count }}</h3>
+                <h3 id="admin-rejected-count" class="stat-value">{{ rejected_count }}</h3>
                 <p class="stat-label">Total Rejected</p>
               </div>
           </div>
@@ -164,7 +201,7 @@
                 <div class="icon-box"><i class="fa-solid fa-check-double"></i></i></div>
               </div>
               <div>
-                <h3 class="stat-value">{{ in_progress }}</h3>
+                <h3 id="admin-inprogress-count" class="stat-value">{{ in_progress }}</h3>
                 <p class="stat-label">Total In Progress</p>
               </div>
             </div>
@@ -175,7 +212,7 @@
                 </div>
               </div>
               <div>
-                <h3 class="stat-value">{{  completed }}</h3>
+                <h3 id="admin-completed-count" class="stat-value">{{  completed }}</h3>
                 <p class="stat-label">Completed</p>
               </div>
             </div>
@@ -216,8 +253,8 @@
                   <option value="APPROVED">Approved</option>
                   <option value="REJECTED">Rejected</option>
                   {% if session['position'] == 'Purchasing' %}
-                  <option values="INPROGRESS">In Progress</option>
-                  <option values="INPROGRESS">Completed</option>
+                  <option value="IN PROGRESS">In Progress</option>
+                  <option value="COMPLETED">Completed</option>
                   {%endif%}
                 </select>
               </div>
@@ -233,7 +270,8 @@
                     <th>Request Type</th>
                     <th>Attachment</th>
                     <th>Status</th>
-                    <th class="text-right">Action</th>
+                    <th>Amount</th>
+                    <th>Action</th>
                     <th>Current Stage</th>
                   </tr>
                 </thead>
@@ -244,6 +282,7 @@
                     class="request-row"
                     data-status="{{ (req.status_for_me or '')|upper|trim }}"
                   >
+                  
                     <td>REQ#{{ req.request_id }}</td>
                     <td>
                       <div class="user-info-cell">
@@ -272,17 +311,23 @@
                       {{ req.status_for_me }}
                     </span>
                     </td>
+                    <td>
+                      <span class="status-badge status-{{ (req.amount or '')|lower|replace(' ', '-') }}">
+                      {{ req.amount }}
+                    </span>
+                    </td>
+                  
 
                     <td class="text-right">
                       {% if req.can_act == 1 %}
                       <div class="action-group">
                         <button
-                          class="btn-icon btn-approve"
-                          title="Approve"
-                          onclick="openApproveModal('{{ req.request_id }}')"
-                        >
-                          <i class="fa-solid fa-check"></i>
-                        </button>
+                            class="btn-icon btn-approve"
+                            title="Approve"
+                            onclick="openApproveModal('{{ req.request_id }}', {{ 'true' if req.annotations else 'false' }})"
+                          >
+                            <i class="fa-solid fa-check"></i>
+                          </button>
 
                         <button
                           class="btn-icon btn-reject"
@@ -292,12 +337,23 @@
                           <i class="fa-solid fa-xmark"></i>
                         </button>
 
+                        {% if req.can_send_back == 1 %}
+                        <button
+                          class="btn-icon"
+                          title="Send Back"
+                          onclick="sendBackRequest('{{ req.request_id }}')"
+                        >
+                          <i class="fa-solid fa-rotate-left"></i>
+                        </button>
+                        {% endif %}
+
                         <button
                           class="btn-icon"
                           title="Annotate PDF"
                           onclick="window.open('/annotate/{{ req.request_id }}','_blank')"
                         >
                           <i class="fa-solid fa-pen"></i>
+                          
                         </button>
                       </div>
 
@@ -509,26 +565,26 @@
               </div>
 
               <div class="form-group full-width">
-  <label class="form-label">Reviewer Positions</label>
+                <label class="form-label">Reviewer Positions</label>
 
-  <p class="form-hint">
-    Select one or more reviewers (review happens before approvers).
-    Hold Ctrl (Windows) or Cmd (Mac) to select multiple.
-  </p>
+                <p class="form-hint">
+                  Select one or more reviewers (review happens before approvers).
+                  Hold Ctrl (Windows) or Cmd (Mac) to select multiple.
+                </p>
 
-  <select
-    name="reviewer_position_ids[]"
-    class="form-control"
-    multiple
-    size="6"
-  >
-    {% for pos in positions %}
-    <option value="{{ pos.position_id }}">
-      {{ pos.position_name }}
-    </option>
-    {% endfor %}
-  </select>
-</div>
+                <select
+                  name="reviewer_position_ids[]"
+                  class="form-control"
+                  multiple
+                  size="6"
+                >
+                  {% for pos in positions %}
+                  <option value="{{ pos.position_id }}">
+                    {{ pos.position_name }}
+                  </option>
+                  {% endfor %}
+                </select>
+              </div>
 
               <div class="form-group" style="grid-column: span 2">
                 <label class="form-label">Approver Positions</label>
@@ -682,6 +738,9 @@
   </div>
 
   <div class="header-actions">
+    <div class="reports-export-controls">
+      <button type="button" class="btn-primary" onclick="openReportExportModal()">Extract Report</button>
+    </div>
     
     <div class="date-widget">
       <i class="fa-regular fa-calendar" style="margin-right:8px"></i>
@@ -734,6 +793,58 @@
 </div>
 </div>
 
+  <!-- REPORT EXPORT MODAL -->
+  <div id="reportExportModal" class="modal-overlay">
+    <div class="modal-content report-export-modal">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title">Extract Report</h3>
+          <p class="modal-text">Choose file name, time range, and status before exporting.</p>
+        </div>
+        <button type="button" class="modal-close" onclick="closeReportExportModal()" title="Close">✕</button>
+      </div>
+
+      <div class="report-export-grid">
+        <div class="form-group">
+          <label class="form-label" for="reportExportName">File Name</label>
+          <input
+            type="text"
+            id="reportExportName"
+            class="form-control"
+            placeholder="Enter file name"
+            aria-label="Report export file name"
+          />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="reportExportRange">Choose Time</label>
+          <select id="reportExportRange" class="form-control" aria-label="Report export range">
+            <option value="this_week">This Week</option>
+            <option value="this_month">This Month</option>
+            <option value="three_months">Last 3 Months</option>
+            <option value="six_months">Last 6 Months</option>
+            <option value="this_year">This Year</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="reportExportStatus">Status</label>
+          <select id="reportExportStatus" class="form-control" aria-label="Report export status">
+            <option value="all">All (Rejected, Approved, Completed)</option>
+            <option value="rejected">Rejected</option>
+            <option value="approved">Approved</option>
+            <option value="completed">Completed</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" onclick="closeReportExportModal()">Cancel</button>
+        <button type="button" class="btn-primary" onclick="exportReports()">Export Report</button>
+      </div>
+    </div>
+  </div>
+
       <!-- NOTIFICATIONS -->
       <div id="view-notifications" class="view-section" style="display: none">
         <header class="top-header">
@@ -753,7 +864,7 @@
               <a
                 href="#"
                 class="mark-read-link"
-                onclick="alert('Feature coming soon')"
+                onclick="markAllNotificationsRead(); return false;"
                 >Mark all as read</a
               >
             </div>
@@ -1087,6 +1198,8 @@
     <script>
     window.IS_PURCHASING =
       {{ 1 if 'purchasing' in ((session.get('position') or '')|lower) else 0 }};
+    window.ADMIN_ROLE = {{ (session.get('role') or '')|tojson }};
+    window.CURRENT_USER_EMAIL = {{ (session.get('email') or '')|tojson }};
   </script>
     <script src="/static/admin/admin.js"></script>
   </body>

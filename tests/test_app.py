@@ -264,3 +264,29 @@ def test_security_headers_are_set(client):
     assert r.headers.get("Referrer-Policy") == "no-referrer"
     assert r.headers.get("Cross-Origin-Resource-Policy") == "same-site"
     assert "default-src 'self'" in (r.headers.get("Content-Security-Policy") or "")
+
+
+def test_forgot_password_page_loads(client):
+    r = client.get("/forgot-password")
+    assert r.status_code == 200
+
+
+def test_login_page_contains_forgot_password_link(client):
+    r = client.get("/login")
+    assert r.status_code == 200
+    body = r.get_data(as_text=True)
+    assert "/forgot-password" in body
+
+
+def test_password_reset_token_round_trip():
+    import main
+
+    token = main.create_password_reset_token("user@example.com")
+    assert main.verify_password_reset_token(token) == "user@example.com"
+
+
+def test_reset_password_invalid_token_message(client):
+    r = client.get("/reset-password/not-a-valid-token")
+    assert r.status_code == 200
+    body = r.get_data(as_text=True)
+    assert "Invalid reset link" in body

@@ -29,14 +29,13 @@ def sent_otp(receiver, otp):
         return False
     
     
-# resend otp if more than 1 minute not recieve 
+# resend otp if more than 2 minute not recieve 
 def c():
     email = request.form['email']
 
     conn = get_connection()
     cursor = conn.cursor()
 
-    # optional: check if email already exists
     cursor.execute("SELECT 1 FROM users WHERE email=%s", (email,))
     if cursor.fetchone():
         # Generic response to avoid account enumeration

@@ -191,6 +191,7 @@ body.slide-out-right {
 @media (max-width: 768px) {
     .container {
         grid-template-columns: 1fr;
+        min-height: auto;
     }
 
     .logo-side {
@@ -203,5 +204,24 @@ body.slide-out-right {
 
     .form-side {
         padding: 30px 24px 40px;
+    }
+}
+
+@media (max-width: 480px) {
+    body {
+        align-items: flex-start;
+        padding: 10px 0;
+    }
+
+    .container {
+        width: min(980px, 98vw);
+    }
+
+    .logo-side h1 {
+        font-size: 26px;
+    }
+
+    .log {
+        font-size: 28px;
     }
 }

@@ -5,13 +5,46 @@ let currentFilter = 'all';
 const USER_AUTO_REFRESH_MS = 15000;
 
 document.addEventListener('DOMContentLoaded', () => {
+    ensureCompletedFilterUI();
     lucide.createIcons();
     updateDate();
     fetchUserData();
     refreshDashboard();
     fetchNotifications();
     startUserAutoRefresh();
+    bindFileInputValidation();
+    bindNewRequestSubmitHandler();
 });
+
+function ensureCompletedFilterUI() {
+    const cardsGrid = document.querySelector('#section-dashboard .cards-grid');
+    const tabsBar = document.querySelector('#section-dashboard .subnav-tabs');
+
+    if (cardsGrid && !document.getElementById('completedCount')) {
+        const card = document.createElement('div');
+        card.className = 'card interactive';
+        card.setAttribute('onclick', "filterRequests('completed')");
+        card.innerHTML = `
+            <div class="card-header">
+                <div class="icon-wrapper icon-green">
+                    <i data-lucide="badge-check"></i>
+                </div>
+            </div>
+            <h3 id="completedCount">0</h3>
+            <p>Completed</p>
+        `;
+        cardsGrid.appendChild(card);
+    }
+
+    if (tabsBar && !document.getElementById('tab-completed')) {
+        const tab = document.createElement('button');
+        tab.id = 'tab-completed';
+        tab.className = 'nav-tab';
+        tab.textContent = 'Completed';
+        tab.addEventListener('click', () => filterRequests('completed'));
+        tabsBar.appendChild(tab);
+    }
+}
 
 async function refreshDashboard() {
     await fetchRequests();
@@ -24,8 +57,10 @@ function updateDate() {
         new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 }
 
-const fileInput = document.querySelector('input[type="file"]');
-if (fileInput) {
+function bindFileInputValidation() {
+    const fileInput = document.querySelector('#new-request-form input[type="file"]');
+    if (!fileInput) return;
+
     fileInput.addEventListener("change", function () {
         const maxSize = 20 * 1024 * 1024;
         const selectedFile = this.files && this.files[0] ? this.files[0] : null;
@@ -63,14 +98,23 @@ async function fetchRequests() {
     }
 }
 
+function normalizeStatusName(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function isCompletedRequest(req) {
+    return normalizeStatusName(req && req.status_name) === 'completed';
+}
+
 function renderRequests(filter) {
     const tbody = document.getElementById('requests-table-body');
     tbody.innerHTML = '';
 
     let filtered = userRequests;
-    if (filter === 'your') filtered = userRequests.filter(r => (r.status_name || '').toLowerCase() === 'pending');
-    else if (filter === 'rejected') filtered = userRequests.filter(r => (r.status_name || '').toLowerCase() === 'rejected');
-    else if (filter === 'approved') filtered = userRequests.filter(r => (r.status_name || '').toLowerCase() === 'approved');
+    if (filter === 'your') filtered = userRequests.filter(r => normalizeStatusName(r.status_name) === 'pending');
+    else if (filter === 'rejected') filtered = userRequests.filter(r => normalizeStatusName(r.status_name) === 'rejected');
+    else if (filter === 'approved') filtered = userRequests.filter(r => normalizeStatusName(r.status_name) === 'approved');
+    else if (filter === 'completed') filtered = userRequests.filter(isCompletedRequest);
 
     document.getElementById('request-count').textContent = filtered.length;
     document.getElementById('rejection-header').classList.toggle('hidden', filter !== 'rejected');
@@ -108,6 +152,11 @@ function renderRequests(filter) {
     });
 }
 async function userComplete(requestId) {
+    const confirmed = await showSystemConfirm(
+        "Mark this request as COMPLETED?",
+        "Confirm"
+    );
+    if (!confirmed) return;
 
     const csrf = document.querySelector(
         'meta[name="csrf-token"]'
@@ -146,43 +195,84 @@ function searchRequests() {
 }
 
 function updateStats() {
-    document.getElementById('stats-total').textContent = userRequests.length;
-    document.getElementById('stats-pending').textContent = userRequests.filter(r => (r.status_name || '').toLowerCase() === 'pending').length;
-    document.getElementById('stats-approved').textContent = userRequests.filter(r => (r.status_name || '').toLowerCase() === 'approved').length;
-    document.getElementById('stats-rejected').textContent = userRequests.filter(r => (r.status_name || '').toLowerCase() === 'rejected').length;
+    const totalCount = userRequests.length;
+    const pendingCount = userRequests.filter(r => normalizeStatusName(r.status_name) === 'pending').length;
+    const approvedCount = userRequests.filter(r => normalizeStatusName(r.status_name) === 'approved').length;
+    const rejectedCount = userRequests.filter(r => normalizeStatusName(r.status_name) === 'rejected').length;
+    const completedCount = userRequests.filter(isCompletedRequest).length;
+
+    const setCount = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
+    };
+
+    // Current dashboard card IDs
+    setCount('pendingCount', pendingCount);
+    setCount('approvedCount', approvedCount);
+    setCount('rejectedCount', rejectedCount);
+    setCount('completedCount', completedCount);
+
+    // Backward compatibility IDs (if present)
+    setCount('stats-total', totalCount);
+    setCount('stats-pending', pendingCount);
+    setCount('stats-approved', approvedCount);
+    setCount('stats-rejected', rejectedCount);
 }
 
-document.getElementById("new-request-form").addEventListener("submit", async function (e) {
-    e.preventDefault();
+function bindNewRequestSubmitHandler() {
+    const form = document.getElementById("new-request-form");
+    if (!form) return;
 
-    const form = e.target;
-    const formData = new FormData(form);
+    form.addEventListener("submit", async function (e) {
+        e.preventDefault();
 
-    try {
-        const res = await fetch(form.action, {
-            method: "POST",
-            body: formData,
-            headers: { "X-Requested-With": "fetch" }
-        });
+        const formData = new FormData(form);
+        const fileInput = form.querySelector('input[name="file"]');
+        const selectedFile = fileInput && fileInput.files ? fileInput.files[0] : null;
 
-        let data = null;
-        const ct = res.headers.get("content-type") || "";
-        if (ct.includes("application/json")) data = await res.json();
-
-        if (!res.ok || !data || data.success !== true) {
-            const msg = (data && data.message) ? data.message : "System error occurred.";
-            showSystemStatus(msg);
+        if (!selectedFile) {
+            showSystemStatus("Please attach a PDF file before submitting.");
             return;
         }
 
-        showSystemStatus("Request submitted successfully.");
-        closeRequestModal();
-        refreshDashboard();
+        const fileName = (selectedFile.name || "").toLowerCase();
+        const fileType = (selectedFile.type || "").toLowerCase();
+        const isPdfByName = fileName.endsWith(".pdf");
+        const isPdfByType = (fileType === "application/pdf" || fileType === "application/x-pdf");
 
-    } catch (err) {
-        showSystemStatus("System error occurred.");
-    }
-});
+        if (!(isPdfByName || isPdfByType)) {
+            showSystemStatus("Supported file is PDF only. Please upload PDF file.");
+            return;
+        }
+
+        try {
+            const res = await fetch(form.action, {
+                method: "POST",
+                body: formData,
+                headers: { "X-Requested-With": "fetch" }
+            });
+
+            let data = null;
+            const ct = res.headers.get("content-type") || "";
+            if (ct.includes("application/json")) data = await res.json();
+
+            if (!res.ok || !data || data.success !== true) {
+                const msg = (data && (data.message || data.error))
+                    ? (data.message || data.error)
+                    : "System error occurred.";
+                showSystemStatus(msg);
+                return;
+            }
+
+            showSystemStatus("Request submitted successfully.");
+            closeRequestModal();
+            refreshDashboard();
+
+        } catch (err) {
+            showSystemStatus("System error occurred.");
+        }
+    });
+}
 
 //  CONNECTED TEMPLATE LOGIC
 function checkTemplate() {
@@ -394,14 +484,52 @@ function showToast(title, message, type) {
     setTimeout(() => toast.classList.remove('show'), 3000);
 }
 
+async function showSystemConfirm(message, confirmText = 'Confirm') {
+    // SweetAlert v2
+    if (window.Swal && typeof window.Swal.fire === 'function') {
+        const result = await window.Swal.fire({
+            title: 'System Confirmation',
+            text: message,
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonText: confirmText,
+            cancelButtonText: 'Cancel'
+        });
+        return !!result.isConfirmed;
+    }
+
+    // SweetAlert v1
+    if (typeof window.swal === 'function') {
+        try {
+            const result = await window.swal({
+                title: 'System Confirmation',
+                text: message,
+                icon: 'warning',
+                buttons: ['Cancel', confirmText],
+                dangerMode: false
+            });
+            return !!result;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    // Safe fallback
+    return window.confirm(message);
+}
+
 function toggleMobileMenu() { document.getElementById('mobile-menu').classList.toggle('show'); }
-function logout() { if (confirm('Logout?')) window.location.href = '/logout'; }
+async function logout() {
+    const confirmed = await showSystemConfirm('Logout now?', 'Logout');
+    if (confirmed) window.location.href = '/logout';
+}
 
 function showSystemStatus(message) {
     const toast = document.getElementById("toast");
+    if (!toast) return;
     document.getElementById("toast-title").textContent = "System Status";
     document.getElementById("toast-message").textContent = message;
-    toast.classList.add("show");
+    toast.className = "toast show";
     setTimeout(() => { toast.classList.remove("show"); }, 3000);
 }
 

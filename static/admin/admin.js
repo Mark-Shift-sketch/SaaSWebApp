@@ -20,6 +20,99 @@ function csrfFetch(url, options = {}) {
   return fetch(url, opts);
 }
 
+const ADMIN_PIN_MAX_ATTEMPTS = 5;
+const adminPinState = {
+  eligible: Number(window.ADMIN_PIN_ELIGIBLE || 0) === 1,
+  pin_set: false,
+  pin_disabled: false,
+  failed_attempts: 0,
+  remaining_attempts: ADMIN_PIN_MAX_ATTEMPTS,
+  otpVerified: false,
+};
+
+let __pendingAmountEditContext = null;
+
+function isAdminPinEligible() {
+  return adminPinState.eligible === true;
+}
+
+function normalizeAmountInput(value) {
+  const raw = String(value ?? "").replace(/,/g, "").trim();
+  return raw;
+}
+
+function applyAdminPinSettingsUI() {
+  const statusEl = document.getElementById("pin-status-display");
+  const attemptsEl = document.getElementById("pin-attempts-display");
+  const emailEl = document.getElementById("pin-email");
+  const createBtn = document.getElementById("pin-create-btn");
+  const changeBtn = document.getElementById("pin-change-btn");
+
+  if (emailEl) emailEl.value = String(window.CURRENT_USER_EMAIL || "");
+
+  if (!isAdminPinEligible()) {
+    if (statusEl) statusEl.value = "Not available for this role";
+    if (attemptsEl) attemptsEl.value = "-";
+    if (createBtn) createBtn.disabled = true;
+    if (changeBtn) changeBtn.disabled = true;
+    return;
+  }
+
+  if (statusEl) {
+    if (!adminPinState.pin_set) {
+      statusEl.value = "Not set";
+    } else if (adminPinState.pin_disabled) {
+      statusEl.value = "Disabled";
+    } else {
+      statusEl.value = "Active";
+    }
+  }
+
+  if (attemptsEl) {
+    attemptsEl.value = `${Number(adminPinState.failed_attempts || 0)} failed, ${Number(adminPinState.remaining_attempts || 0)} left`;
+  }
+
+  if (createBtn) createBtn.disabled = adminPinState.pin_set;
+  if (changeBtn) changeBtn.disabled = !adminPinState.pin_set;
+}
+
+async function loadAdminPinStatus(showErrors = false) {
+  if (!isAdminPinEligible()) {
+    applyAdminPinSettingsUI();
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/admin/pin/status", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || data.success === false) {
+      throw new Error(data.error || "Failed to load PIN status");
+    }
+
+    if (data.eligible === false) {
+      adminPinState.eligible = false;
+      applyAdminPinSettingsUI();
+      return;
+    }
+
+    adminPinState.eligible = true;
+    adminPinState.pin_set = !!data.pin_set;
+    adminPinState.pin_disabled = !!data.pin_disabled;
+    adminPinState.failed_attempts = Number(data.failed_attempts || 0);
+    adminPinState.remaining_attempts = Number(data.remaining_attempts || 0);
+    applyAdminPinSettingsUI();
+  } catch (err) {
+    if (showErrors) {
+      openSysPopup("Error", err.message || "Failed to load PIN status", false);
+    }
+  }
+}
+
 
 // Date display
 window.addEventListener("load", () => {
@@ -154,7 +247,7 @@ function renderAdminRequestRows(requests) {
   if (rows.length === 0) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="8" style="text-align: center; color: #6b7280; padding: 20px">
+        <td colspan="9" style="text-align: center; color: #6b7280; padding: 20px">
           No requests found.
         </td>
       </tr>
@@ -177,6 +270,7 @@ function renderAdminRequestRows(requests) {
       const stageName = escapeHtml(req.stage_position_name || "-");
       const statusName = String(req.status_name || "").toUpperCase().trim();
       const amount = String(req.amount || "0").toUpperCase().trim();
+      const amountEscaped = escapeHtml(amount);
       const statusForMe = String(req.status_for_me || req.status_name || "-").trim();
       const statusData = escapeHtml(statusForMe.toUpperCase());
       const statusClass = normalizeStatusClass(statusForMe);
@@ -235,7 +329,7 @@ function renderAdminRequestRows(requests) {
         `;
       } else if (statusName === "IN PROGRESS" && isPurchasing) {
         actionHtml = `
-          <button class="btn-link" onclick="adminMarkCompleted('${requestId}')">
+          <button class="btn-link" onclick="adminMarkCompleted('${requestId}', this)">
             <i class="fa-solid fa-file-circle-check"></i>
           </button>
         `;
@@ -254,6 +348,33 @@ function renderAdminRequestRows(requests) {
         `;
       }
 
+      const canEditPendingAmount = statusName === "PENDING";
+      const amountBtnTitle = !canEditPendingAmount
+        ? "Only pending requests can be edited"
+        : adminPinState.pin_disabled
+          ? "PIN disabled"
+          : "Edit Amount";
+
+      const amountControls = isAdminPinEligible()
+        ? `
+          <div class="amount-cell-wrap">
+            <span class="amount-value">${amountEscaped}</span>
+            <button
+              type="button"
+              class="btn-icon amount-edit-btn"
+              title="${amountBtnTitle}"
+              data-edit-amount="1"
+              data-request-id="${requestId}"
+              data-amount="${amountEscaped}"
+              data-status-name="${escapeHtml(statusName)}"
+              ${adminPinState.pin_disabled || !canEditPendingAmount ? "disabled" : ""}
+            >
+              <i class="fa-solid fa-pen-to-square"></i>
+            </button>
+          </div>
+        `
+        : `<span class="amount-value">${amountEscaped}</span>`;
+
       return `
         <tr class="request-row" data-status="${statusData}">
           <td>REQ#${requestId}</td>
@@ -269,7 +390,7 @@ function renderAdminRequestRows(requests) {
           <td>
             <span class="status-badge status-${statusClass}">${escapeHtml(statusForMe || "-")}</span>
           </td>
-          <td class="user-email">${amount}</td>
+          <td>${amountControls}</td>
           <td class="text-right">${actionHtml}</td>
           
           <td>${stageHtml}</td>
@@ -339,10 +460,14 @@ function showQuickStatus(message, kind = "info") {
   }, 3000);
 }
 
-function openSysPopup(title, msg, reloadAfterOk = false) {
+let __sysPopupAutoCloseTimer = null;
+
+function openSysPopup(title, msg, reloadAfterOk = false, options = {}) {
   const modal = document.getElementById("sysPopup");
   const t = document.getElementById("sysPopupTitle");
   const m = document.getElementById("sysPopupMsg");
+  const closeBtn = modal ? modal.querySelector(".modal-close") : null;
+  const footer = modal ? modal.querySelector(".modal-footer") : null;
 
   if (!modal || !t || !m) {
     const text = (title ? title + ": " : "") + (msg || "");
@@ -350,14 +475,42 @@ function openSysPopup(title, msg, reloadAfterOk = false) {
     return;
   }
 
+  if (__sysPopupAutoCloseTimer) {
+    clearTimeout(__sysPopupAutoCloseTimer);
+    __sysPopupAutoCloseTimer = null;
+  }
+
+  const hideButtons = options && options.hideButtons === true;
+  const autoCloseMs = Number(options && options.autoCloseMs ? options.autoCloseMs : 0);
+
+  if (footer) footer.style.display = hideButtons ? "none" : "";
+  if (closeBtn) closeBtn.style.display = hideButtons ? "none" : "";
+
   t.innerText = title || "Status";
   m.innerText = msg || "";
   modal.style.display = "flex";
+
+  if (autoCloseMs > 0) {
+    __sysPopupAutoCloseTimer = setTimeout(() => {
+      closeSysPopup();
+    }, autoCloseMs);
+  }
 }
 
 function closeSysPopup() {
+  if (__sysPopupAutoCloseTimer) {
+    clearTimeout(__sysPopupAutoCloseTimer);
+    __sysPopupAutoCloseTimer = null;
+  }
+
   const modal = document.getElementById("sysPopup");
-  if (modal) modal.style.display = "none";
+  if (modal) {
+    const closeBtn = modal.querySelector(".modal-close");
+    const footer = modal.querySelector(".modal-footer");
+    if (footer) footer.style.display = "";
+    if (closeBtn) closeBtn.style.display = "";
+    modal.style.display = "none";
+  }
 }
 
 let __confirmCallback = null;
@@ -373,6 +526,23 @@ function openConfirm(title, msg, callback) {
 function closeConfirm() {
   document.getElementById("confirmModal").style.display = "none";
   __confirmCallback = null;
+}
+
+async function showSystemConfirmToast(message, confirmText = "Confirm") {
+  if (window.Swal && typeof window.Swal.fire === "function") {
+    const result = await window.Swal.fire({
+      title: "System Confirmation",
+      text: message || "Are you sure?",
+      icon: "warning",
+      showConfirmButton: true,
+      showCancelButton: true,
+      confirmButtonText: confirmText,
+      cancelButtonText: "Cancel",
+    });
+    return !!result.isConfirmed;
+  }
+
+  return window.confirm(message || "Are you sure?");
 }
 
 document.getElementById("confirmYesBtn").onclick = () => {
@@ -416,6 +586,8 @@ async function updateStatus(requestId, status, message = "", hasAnnotation = fal
           return;
         }
       }
+
+      showQuickStatus("Approving request...", "info");
     }
 
     const response = await csrfFetch(`/api/request/${requestId}/status`, {
@@ -434,11 +606,25 @@ async function updateStatus(requestId, status, message = "", hasAnnotation = fal
     const rid = `REQ#${requestId}`;
 
     if ((status || "").toLowerCase() === "approved") {
-      const backendMsg = result.message ? ` (${result.message})` : "";
+      const backendMsg = String(result.message || "").trim();
+      const backendLower = backendMsg.toLowerCase();
+      let approvedMsg = `Request ${rid} has been approved.`;
+
+      if (backendMsg) {
+        if (backendLower.includes("fully approved") || backendLower.includes("completed")) {
+          approvedMsg = `Request ${rid} has been fully approved and completed.`;
+        } else if (backendLower.includes("next stage") || backendLower.includes("next approver")) {
+          approvedMsg = `Request ${rid} has been approved and moved to the next approver.`;
+        } else {
+          approvedMsg = `Request ${rid} has been approved. ${backendMsg}`;
+        }
+      }
+
       openSysPopup(
         "Approved",
-        `Request ${rid} has been approved. It moved to next approver.${backendMsg}`,
-        true
+        approvedMsg,
+        true,
+        { hideButtons: true, autoCloseMs: 3000 }
       );
       return;
     }
@@ -448,7 +634,7 @@ async function updateStatus(requestId, status, message = "", hasAnnotation = fal
       return;
     }
 
-    openSysPopup("Updated", result.message || "Updated!", true);
+    openSysPopup("Updated", result.message || "Updated!", true, { hideButtons: true, autoCloseMs: 3000 });
   } catch (err) {
     console.error(err);
     openSysPopup("Network Error", "Please check your internet and try again.", false);
@@ -1206,23 +1392,372 @@ async function loadProfile() {
     const data = await res.json();
 
     if (data && !data.error) {
+      const email = data.email || "";
       const emailEl = document.getElementById("user-email");
       const deptEl = document.getElementById("user-dept-display");
       const posEl = document.getElementById("user-pos-display");
+      const pinEmailEl = document.getElementById("pin-email");
+      const createPinEmailEl = document.getElementById("create-pin-email");
+      const changePinEmailEl = document.getElementById("change-pin-email");
 
-      if (emailEl) emailEl.value = data.email || "";
+      if (emailEl) emailEl.value = email;
       if (deptEl) deptEl.value = data.dept_name || "";
       if (posEl) posEl.value = data.position_name || "";
+      if (pinEmailEl) pinEmailEl.value = email;
+      if (createPinEmailEl) createPinEmailEl.value = email;
+      if (changePinEmailEl) changePinEmailEl.value = email;
+
+      await loadAdminPinStatus(false);
     }
   } catch (err) {
     console.error("Profile load error:", err);
   }
 }
 
+function openAmountEditModal(requestId, currentAmount, statusName = "") {
+  if (!isAdminPinEligible()) {
+    openSysPopup("Not Allowed", "Only AssistantAdmin, Admin, and SuperAdmin can edit amount.", false);
+    return;
+  }
+
+  if (String(statusName || "").trim().toUpperCase() !== "PENDING") {
+    openSysPopup("Not Allowed", "Only pending request amounts can be edited.", false);
+    return;
+  }
+
+  if (!adminPinState.pin_set) {
+    __pendingAmountEditContext = { requestId, currentAmount, statusName };
+    openCreatePinModal();
+    return;
+  }
+
+  if (adminPinState.pin_disabled) {
+    openSysPopup("PIN Disabled", "PIN is disabled. Reset your PIN in Settings to enable amount editing.", false);
+    return;
+  }
+
+  const modal = document.getElementById("amountEditModal");
+  const reqInput = document.getElementById("amount_edit_request_id");
+  const reqLabel = document.getElementById("amount_edit_reqid");
+  const amountInput = document.getElementById("amount_edit_value");
+  const pinInput = document.getElementById("amount_edit_pin");
+
+  if (!modal || !reqInput || !reqLabel || !amountInput || !pinInput) return;
+
+  reqInput.value = String(requestId || "").trim();
+  reqLabel.textContent = String(requestId || "").trim();
+  amountInput.value = normalizeAmountInput(currentAmount || "");
+  pinInput.value = "";
+  modal.style.display = "flex";
+}
+
+function closeAmountEditModal() {
+  const modal = document.getElementById("amountEditModal");
+  if (modal) modal.style.display = "none";
+  const pinInput = document.getElementById("amount_edit_pin");
+  if (pinInput) pinInput.value = "";
+}
+
+async function submitAmountEdit() {
+  const requestId = String(document.getElementById("amount_edit_request_id")?.value || "").trim();
+  const amount = normalizeAmountInput(document.getElementById("amount_edit_value")?.value || "");
+  const pin = String(document.getElementById("amount_edit_pin")?.value || "").trim();
+
+  if (!requestId) {
+    openSysPopup("Error", "Missing request ID.", false);
+    return;
+  }
+
+  if (!amount) {
+    openSysPopup("Required", "Amount is required.", false);
+    return;
+  }
+
+  if (!/^\d{4}$/.test(pin)) {
+    openSysPopup("Required", "PIN must be exactly 4 digits.", false);
+    return;
+  }
+
+  try {
+    const res = await csrfFetch(`/api/request/${encodeURIComponent(requestId)}/amount`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ amount, pin }),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || data.success === false) {
+      await loadAdminPinStatus(false);
+
+      const code = String(data.code || "");
+      if (code === "PIN_NOT_SET") {
+        closeAmountEditModal();
+        openCreatePinModal();
+        return;
+      }
+
+      if (code === "PIN_WARNING") {
+        openPinWarningModal(
+          data.error ||
+            "You entered PIN 3 times in a row with incorrect PIN. You have 2 more left and amount edit will be disabled. If you forgot your PIN, you can reset it in Settings."
+        );
+        return;
+      }
+
+      if (code === "PIN_DISABLED") {
+        closeAmountEditModal();
+        openSysPopup(
+          "PIN Disabled",
+          data.error || "PIN has been disabled after 5 failed attempts. Reset your PIN in Settings to enable amount editing again.",
+          false
+        );
+        return;
+      }
+
+      openSysPopup("Error", data.error || "Failed to update amount.", false);
+      return;
+    }
+
+    closeAmountEditModal();
+    openSysPopup("Updated", data.message || "Amount updated successfully.", false);
+    await fetchAdminLiveData();
+    await loadAdminPinStatus(false);
+  } catch (err) {
+    openSysPopup("Network Error", "Failed to update amount.", false);
+  }
+}
+
+function openCreatePinModal() {
+  if (!isAdminPinEligible()) {
+    openSysPopup("Not Allowed", "Only AssistantAdmin, Admin, and SuperAdmin can create a PIN.", false);
+    return;
+  }
+
+  const modal = document.getElementById("createPinModal");
+  const emailEl = document.getElementById("create-pin-email");
+  const pinEl = document.getElementById("create-pin-value");
+  const confirmEl = document.getElementById("create-pin-confirm");
+
+  if (emailEl) emailEl.value = String(window.CURRENT_USER_EMAIL || "");
+  if (pinEl) pinEl.value = "";
+  if (confirmEl) confirmEl.value = "";
+  if (modal) modal.style.display = "flex";
+}
+
+function closeCreatePinModal() {
+  const modal = document.getElementById("createPinModal");
+  if (modal) modal.style.display = "none";
+}
+
+async function createAdminPin() {
+  const email = String(document.getElementById("create-pin-email")?.value || "").trim().toLowerCase();
+  const pin = String(document.getElementById("create-pin-value")?.value || "").trim();
+  const confirmPin = String(document.getElementById("create-pin-confirm")?.value || "").trim();
+
+  if (!/^\d{4}$/.test(pin)) {
+    openSysPopup("Required", "PIN must be exactly 4 digits.", false);
+    return;
+  }
+
+  if (pin !== confirmPin) {
+    openSysPopup("Required", "PIN confirmation does not match.", false);
+    return;
+  }
+
+  try {
+    const res = await csrfFetch("/api/admin/pin/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, pin, confirm_pin: confirmPin }),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || data.success === false) {
+      openSysPopup("Error", data.error || "Failed to create PIN.", false);
+      return;
+    }
+
+    closeCreatePinModal();
+    await loadAdminPinStatus(false);
+    openSysPopup("Success", data.message || "PIN created successfully.", false);
+
+    if (__pendingAmountEditContext) {
+      const context = { ...__pendingAmountEditContext };
+      __pendingAmountEditContext = null;
+      openAmountEditModal(context.requestId, context.currentAmount, context.statusName);
+    }
+  } catch (err) {
+    openSysPopup("Network Error", "Failed to create PIN.", false);
+  }
+}
+
+function openChangePinModal() {
+  if (!isAdminPinEligible()) {
+    openSysPopup("Not Allowed", "Only AssistantAdmin, Admin, and SuperAdmin can change PIN.", false);
+    return;
+  }
+
+  if (!adminPinState.pin_set) {
+    openSysPopup("PIN Not Set", "Create your 4-digit PIN first.", false);
+    openCreatePinModal();
+    return;
+  }
+
+  const modal = document.getElementById("changePinModal");
+  const emailEl = document.getElementById("change-pin-email");
+  const otpEl = document.getElementById("change-pin-otp");
+  const pinEl = document.getElementById("change-pin-value");
+  const confirmEl = document.getElementById("change-pin-confirm");
+  const submitBtn = document.getElementById("change-pin-submit-btn");
+
+  adminPinState.otpVerified = false;
+  if (submitBtn) submitBtn.disabled = true;
+
+  if (emailEl) emailEl.value = String(window.CURRENT_USER_EMAIL || "");
+  if (otpEl) otpEl.value = "";
+  if (pinEl) pinEl.value = "";
+  if (confirmEl) confirmEl.value = "";
+  if (modal) modal.style.display = "flex";
+}
+
+function closeChangePinModal() {
+  const modal = document.getElementById("changePinModal");
+  if (modal) modal.style.display = "none";
+  adminPinState.otpVerified = false;
+}
+
+async function requestAdminPinOtp() {
+  const email = String(document.getElementById("change-pin-email")?.value || "").trim().toLowerCase();
+  if (!email) {
+    openSysPopup("Required", "Email is required.", false);
+    return;
+  }
+
+  try {
+    const res = await csrfFetch("/api/admin/pin/request-otp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || data.success === false) {
+      openSysPopup("Error", data.error || "Failed to request OTP.", false);
+      return;
+    }
+
+    adminPinState.otpVerified = false;
+    const submitBtn = document.getElementById("change-pin-submit-btn");
+    if (submitBtn) submitBtn.disabled = true;
+    openSysPopup("OTP Sent", data.message || "OTP sent to your email.", false);
+  } catch (err) {
+    openSysPopup("Network Error", "Failed to request OTP.", false);
+  }
+}
+
+async function verifyAdminPinOtp() {
+  const email = String(document.getElementById("change-pin-email")?.value || "").trim().toLowerCase();
+  const otp = String(document.getElementById("change-pin-otp")?.value || "").trim();
+  if (!otp) {
+    openSysPopup("Required", "OTP is required.", false);
+    return;
+  }
+
+  try {
+    const res = await csrfFetch("/api/admin/pin/verify-otp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, otp }),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || data.success === false) {
+      adminPinState.otpVerified = false;
+      const submitBtn = document.getElementById("change-pin-submit-btn");
+      if (submitBtn) submitBtn.disabled = true;
+      openSysPopup("Error", data.error || "OTP verification failed.", false);
+      return;
+    }
+
+    adminPinState.otpVerified = true;
+    const submitBtn = document.getElementById("change-pin-submit-btn");
+    if (submitBtn) submitBtn.disabled = false;
+    openSysPopup("Verified", data.message || "OTP verified.", false);
+  } catch (err) {
+    openSysPopup("Network Error", "OTP verification failed.", false);
+  }
+}
+
+async function updateAdminPin() {
+  if (!adminPinState.otpVerified) {
+    openSysPopup("Required", "Verify OTP first before changing PIN.", false);
+    return;
+  }
+
+  const email = String(document.getElementById("change-pin-email")?.value || "").trim().toLowerCase();
+  const newPin = String(document.getElementById("change-pin-value")?.value || "").trim();
+  const confirmPin = String(document.getElementById("change-pin-confirm")?.value || "").trim();
+
+  if (!/^\d{4}$/.test(newPin)) {
+    openSysPopup("Required", "PIN must be exactly 4 digits.", false);
+    return;
+  }
+
+  if (newPin !== confirmPin) {
+    openSysPopup("Required", "PIN confirmation does not match.", false);
+    return;
+  }
+
+  try {
+    const res = await csrfFetch("/api/admin/pin/change", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, new_pin: newPin, confirm_pin: confirmPin }),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || data.success === false) {
+      openSysPopup("Error", data.error || "Failed to update PIN.", false);
+      return;
+    }
+
+    closeChangePinModal();
+    await loadAdminPinStatus(false);
+    openSysPopup("Success", data.message || "PIN updated successfully.", false);
+  } catch (err) {
+    openSysPopup("Network Error", "Failed to update PIN.", false);
+  }
+}
+
+function openPinWarningModal(message) {
+  const modal = document.getElementById("pinWarningModal");
+  const text = document.getElementById("pinWarningText");
+  if (text) {
+    text.textContent =
+      message ||
+      "You entered PIN 3 times in a row with incorrect PIN. You have 2 more left and amount edit will be disabled. If you forgot your PIN, you can reset it in Settings.";
+  }
+  if (modal) modal.style.display = "flex";
+}
+
+function closePinWarningModal() {
+  const modal = document.getElementById("pinWarningModal");
+  if (modal) modal.style.display = "none";
+}
+
 
 // Close modals on outside click & ESC
 
 document.addEventListener("click", (e) => {
+  const amountBtn = e.target.closest('[data-edit-amount="1"]');
+  if (amountBtn) {
+    const requestId = amountBtn.getAttribute("data-request-id") || "";
+    const amount = amountBtn.getAttribute("data-amount") || "";
+    const statusName = amountBtn.getAttribute("data-status-name") || "";
+    openAmountEditModal(requestId, amount, statusName);
+    return;
+  }
+
   const approveModal = document.getElementById("approveModal");
   const rejectModal = document.getElementById("rejectModal");
   const ccModal = document.getElementById("ccModal");
@@ -1231,6 +1766,10 @@ document.addEventListener("click", (e) => {
   const sysPopup = document.getElementById("sysPopup");
   const workflowModal = document.getElementById("workflowModal");
   const annotateModal = document.getElementById("annotateModal");
+  const amountEditModal = document.getElementById("amountEditModal");
+  const createPinModal = document.getElementById("createPinModal");
+  const changePinModal = document.getElementById("changePinModal");
+  const pinWarningModal = document.getElementById("pinWarningModal");
 
   if (approveModal && e.target === approveModal) closeApproveModal();
   if (rejectModal && e.target === rejectModal) closeRejectModal();
@@ -1240,6 +1779,10 @@ document.addEventListener("click", (e) => {
   if (sysPopup && e.target === sysPopup) closeSysPopup();
   if (workflowModal && e.target === workflowModal) closeWorkflowModal();
   if (annotateModal && e.target === annotateModal) closeAnnotateModal();
+  if (amountEditModal && e.target === amountEditModal) closeAmountEditModal();
+  if (createPinModal && e.target === createPinModal) closeCreatePinModal();
+  if (changePinModal && e.target === changePinModal) closeChangePinModal();
+  if (pinWarningModal && e.target === pinWarningModal) closePinWarningModal();
 });
 
 document.addEventListener("keydown", (e) => {
@@ -1253,6 +1796,10 @@ document.addEventListener("keydown", (e) => {
   const sysPopup = document.getElementById("sysPopup");
   const workflowModal = document.getElementById("workflowModal");
   const annotateModal = document.getElementById("annotateModal");
+  const amountEditModal = document.getElementById("amountEditModal");
+  const createPinModal = document.getElementById("createPinModal");
+  const changePinModal = document.getElementById("changePinModal");
+  const pinWarningModal = document.getElementById("pinWarningModal");
 
   if (approveModal?.style.display === "flex") closeApproveModal();
   if (rejectModal?.style.display === "flex") closeRejectModal();
@@ -1262,6 +1809,10 @@ document.addEventListener("keydown", (e) => {
   if (sysPopup?.style.display === "flex") closeSysPopup();
   if (workflowModal?.style.display === "flex") closeWorkflowModal();
   if (annotateModal?.style.display === "flex") closeAnnotateModal();
+  if (amountEditModal?.style.display === "flex") closeAmountEditModal();
+  if (createPinModal?.style.display === "flex") closeCreatePinModal();
+  if (changePinModal?.style.display === "flex") closeChangePinModal();
+  if (pinWarningModal?.style.display === "flex") closePinWarningModal();
 });
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -1380,6 +1931,12 @@ async function saveWorkflow() {
 // In progress
 async function markInProgress(requestId, btnEl) {
   try {
+    const confirmed = await showSystemConfirmToast(
+      `Mark REQ#${requestId} as IN PROGRESS?`,
+      "Mark In Progress"
+    );
+    if (!confirmed) return;
+
     if (btnEl) btnEl.disabled = true;
 
     const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content");
@@ -1400,7 +1957,7 @@ async function markInProgress(requestId, btnEl) {
       throw new Error(data.error || "Failed to mark as in progress");
     }
 
-    openSysPopup("Updated", data.message || "Request marked as in progress.", false);
+    openSysPopup("Updated", data.message || "Request marked as in progress.", false, { hideButtons: true, autoCloseMs: 3000 });
 
   } catch (err) {
     openSysPopup("Error", err.message || "Error", false);
@@ -1408,27 +1965,39 @@ async function markInProgress(requestId, btnEl) {
   }
 }
 
-async function adminMarkCompleted(requestId) {
-  const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content");
+async function adminMarkCompleted(requestId, btnEl) {
+  try {
+    const confirmed = await showSystemConfirmToast(
+      `Mark REQ#${requestId} as COMPLETED?`,
+      "Mark Completed"
+    );
+    if (!confirmed) return;
 
-  const res = await fetch(`/api/request/${requestId}/admin-complete`, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: {
-      ...(csrf ? { "X-CSRFToken": csrf } : {}),
-    },
-  });
+    if (btnEl) btnEl.disabled = true;
 
-  const text = await res.text();
-  let data = {};
-  try { data = JSON.parse(text); } catch (_) {}
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content");
 
-  if (!res.ok) {
-    openSysPopup("Error", data.error || "Failed to complete request.", false);
-    return;
+    const res = await fetch(`/api/request/${requestId}/admin-complete`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        ...(csrf ? { "X-CSRFToken": csrf } : {}),
+      },
+    });
+
+    const text = await res.text();
+    let data = {};
+    try { data = JSON.parse(text); } catch (_) {}
+
+    if (!res.ok) {
+      throw new Error(data.error || "Failed to complete request.");
+    }
+
+    openSysPopup("Success", data.message || "Completed!", false, { hideButtons: true, autoCloseMs: 3000 });
+  } catch (err) {
+    openSysPopup("Error", err.message || "Failed to complete request.", false);
+    if (btnEl) btnEl.disabled = false;
   }
-
-  openSysPopup("Success", data.message || "Completed!", false);
 }
 
 function isAdminModalOpen() {
@@ -1436,6 +2005,10 @@ function isAdminModalOpen() {
     "approveModal",
     "rejectModal",
     "ccModal",
+    "amountEditModal",
+    "createPinModal",
+    "changePinModal",
+    "pinWarningModal",
     "reportExportModal",
     "workflowModal",
     "confirmModal",
@@ -1524,4 +2097,6 @@ function startAdminLiveSync() {
 
 document.addEventListener("DOMContentLoaded", () => {
   startAdminLiveSync();
+  applyAdminPinSettingsUI();
+  loadAdminPinStatus(false);
 });

@@ -18,6 +18,23 @@ function showStatus(message, kind = "info") {
     }, 3000);
 }
 
+async function showSystemConfirmToast(message, confirmText = "Confirm") {
+    if (window.Swal && typeof window.Swal.fire === "function") {
+        const result = await window.Swal.fire({
+            title: "System Confirmation",
+            text: message || "Are you sure?",
+            icon: "warning",
+            showConfirmButton: true,
+            showCancelButton: true,
+            confirmButtonText: confirmText,
+            cancelButtonText: "Cancel",
+        });
+        return !!result.isConfirmed;
+    }
+
+    return window.confirm(message || "Are you sure?");
+}
+
 function openSendModal() {
     const m = document.getElementById("sendModal");
     if (m) m.style.display = "flex";
@@ -701,7 +718,11 @@ function csrfFetch(url, options = {}) {
 async function updateStatus(requestId, status, message = "") {
     const normalizedStatus = String(status).trim().toUpperCase(); // APPROVED / REJECTED
 
-    if (!confirm(`Mark request #${requestId} as ${normalizedStatus}?`))
+    const confirmed = await showSystemConfirmToast(
+        `Mark request #${requestId} as ${normalizedStatus}?`,
+        normalizedStatus === "APPROVED" ? "Approve" : normalizedStatus === "REJECTED" ? "Reject" : "Confirm"
+    );
+    if (!confirmed)
         return;
 
     try {

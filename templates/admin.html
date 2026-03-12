@@ -312,9 +312,24 @@
                     </span>
                     </td>
                     <td>
-                      <span class="status-badge status-{{ (req.amount or '')|lower|replace(' ', '-') }}">
-                      {{ req.amount }}
-                    </span>
+                      <div class="amount-cell-wrap">
+                        <span class="amount-value">{{ req.amount }}</span>
+                        {% if session.get('role') in ['AssistantAdmin', 'Admin', 'SuperAdmin'] %}
+                        {% set can_edit_amount = (req.status_name == 'PENDING') %}
+                        <button
+                          type="button"
+                          class="btn-icon amount-edit-btn"
+                          title="{{ 'Edit Amount' if can_edit_amount else 'Only pending requests can be edited' }}"
+                          data-edit-amount="1"
+                          data-request-id="{{ req.request_id }}"
+                          data-amount="{{ req.amount }}"
+                          data-status-name="{{ req.status_name }}"
+                          {% if not can_edit_amount %}disabled{% endif %}
+                        >
+                          <i class="fa-solid fa-pen-to-square"></i>
+                        </button>
+                        {% endif %}
+                      </div>
                     </td>
                   
 
@@ -414,7 +429,7 @@
                   {% endfor %} {% else %}
                   <tr>
                     <td
-                      colspan="8"
+                      colspan="9"
                       style="text-align: center; color: #6b7280; padding: 20px"
                     >
                       No requests found.
@@ -917,6 +932,42 @@
 
             <div class="card">
               <h2 class="card-title">
+                <i class="fa-solid fa-key"></i> Amount Edit PIN
+              </h2>
+
+              <div class="form-group-wrapper">
+                <div class="form-group">
+                  <label>PIN Status</label>
+                  <input type="text" id="pin-status-display" readonly value="Loading..." />
+                </div>
+
+                <div class="form-group">
+                  <label>Failed Attempts</label>
+                  <input type="text" id="pin-attempts-display" readonly value="-" />
+                </div>
+
+                <div class="form-group">
+                  <label>Account Email</label>
+                  <input type="email" id="pin-email" readonly />
+                </div>
+
+                <div class="pin-settings-actions">
+                  <button type="button" class="btn-primary" id="pin-create-btn" onclick="openCreatePinModal()">
+                    Create PIN
+                  </button>
+                  <button type="button" class="btn-secondary" id="pin-change-btn" onclick="openChangePinModal()">
+                    Change / Reset PIN
+                  </button>
+                </div>
+
+                <p class="text-muted text-sm mt-2">
+                  PIN is 4 digits. If PIN is entered incorrectly 5 times in a row, amount editing is disabled until PIN reset in Settings.
+                </p>
+              </div>
+            </div>
+
+            <div class="card">
+              <h2 class="card-title">
                 <i class="fa-regular fa-bell"></i> Notification Preferences
               </h2>
               <p class="text-muted" style="margin-top: 8px">
@@ -1038,6 +1089,163 @@
       <div class="modal-footer">
         <button class="btn-secondary" onclick="closeConfirm()">Cancel</button>
         <button class="btn-danger" id="confirmYesBtn">Yes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AMOUNT EDIT MODAL -->
+  <div id="amountEditModal" class="modal-overlay">
+    <div class="modal-content amount-edit-modal">
+      <h3 class="modal-title">Edit Amount</h3>
+      <p class="modal-text">
+        Update amount for <strong>REQ#<span id="amount_edit_reqid"></span></strong>
+      </p>
+
+      <input type="hidden" id="amount_edit_request_id" />
+
+      <div class="form-group">
+        <label class="form-label">Amount</label>
+        <input
+          type="number"
+          id="amount_edit_value"
+          class="form-control"
+          min="0"
+          step="0.01"
+          placeholder="Enter amount"
+        />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">PIN (4 digits)</label>
+        <input
+          type="password"
+          id="amount_edit_pin"
+          class="form-control"
+          maxlength="4"
+          inputmode="numeric"
+          pattern="[0-9]{4}"
+          placeholder="Enter PIN"
+        />
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn-secondary" type="button" onclick="closeAmountEditModal()">Cancel</button>
+        <button class="btn-primary" type="button" onclick="submitAmountEdit()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CREATE PIN MODAL -->
+  <div id="createPinModal" class="modal-overlay">
+    <div class="modal-content pin-modal">
+      <h3 class="modal-title">Create 4-Digit PIN</h3>
+
+      <div class="form-group">
+        <label class="form-label">Email</label>
+        <input type="email" id="create-pin-email" class="form-control" readonly />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">New PIN</label>
+        <input
+          type="password"
+          id="create-pin-value"
+          class="form-control"
+          maxlength="4"
+          inputmode="numeric"
+          pattern="[0-9]{4}"
+          placeholder="4 digits"
+        />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Confirm PIN</label>
+        <input
+          type="password"
+          id="create-pin-confirm"
+          class="form-control"
+          maxlength="4"
+          inputmode="numeric"
+          pattern="[0-9]{4}"
+          placeholder="Confirm 4 digits"
+        />
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn-secondary" type="button" onclick="closeCreatePinModal()">Cancel</button>
+        <button class="btn-primary" type="button" onclick="createAdminPin()">Create PIN</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHANGE PIN MODAL -->
+  <div id="changePinModal" class="modal-overlay">
+    <div class="modal-content pin-modal">
+      <h3 class="modal-title">Change / Reset PIN</h3>
+
+      <div class="form-group">
+        <label class="form-label">Email</label>
+        <input type="email" id="change-pin-email" class="form-control" readonly />
+      </div>
+
+      <div class="form-group otp-row">
+        <input
+          type="text"
+          id="change-pin-otp"
+          class="form-control"
+          maxlength="6"
+          inputmode="numeric"
+          pattern="[0-9]{6}"
+          placeholder="Enter OTP"
+        />
+        <button class="btn-secondary" type="button" onclick="requestAdminPinOtp()">Request OTP</button>
+        <button class="btn-secondary" type="button" onclick="verifyAdminPinOtp()">Verify OTP</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">New PIN</label>
+        <input
+          type="password"
+          id="change-pin-value"
+          class="form-control"
+          maxlength="4"
+          inputmode="numeric"
+          pattern="[0-9]{4}"
+          placeholder="4 digits"
+        />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Confirm PIN</label>
+        <input
+          type="password"
+          id="change-pin-confirm"
+          class="form-control"
+          maxlength="4"
+          inputmode="numeric"
+          pattern="[0-9]{4}"
+          placeholder="Confirm 4 digits"
+        />
+      </div>
+
+      <p class="text-muted text-sm">Verify OTP first before changing PIN.</p>
+
+      <div class="modal-actions">
+        <button class="btn-secondary" type="button" onclick="closeChangePinModal()">Cancel</button>
+        <button class="btn-primary" type="button" id="change-pin-submit-btn" onclick="updateAdminPin()" disabled>
+          Update PIN
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PIN WARNING MODAL -->
+  <div id="pinWarningModal" class="modal-overlay">
+    <div class="modal-content pin-warning-modal">
+      <h3 class="modal-title">PIN Warning</h3>
+      <p id="pinWarningText" class="modal-text"></p>
+      <div class="modal-actions">
+        <button class="btn-primary" type="button" onclick="closePinWarningModal()">OK</button>
       </div>
     </div>
   </div>
@@ -1200,6 +1408,7 @@
       {{ 1 if 'purchasing' in ((session.get('position') or '')|lower) else 0 }};
     window.ADMIN_ROLE = {{ (session.get('role') or '')|tojson }};
     window.CURRENT_USER_EMAIL = {{ (session.get('email') or '')|tojson }};
+    window.ADMIN_PIN_ELIGIBLE = {{ 1 if session.get('role') in ['AssistantAdmin', 'Admin', 'SuperAdmin'] else 0 }};
   </script>
     <script src="/static/admin/admin.js"></script>
   </body>

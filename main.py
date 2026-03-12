@@ -1,6 +1,7 @@
 import json
 import logging
 import csv
+import importlib
 from flask import (
     Flask,
     session,
@@ -14,6 +15,8 @@ from flask import (
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
 from sendotp import srotp, verify, request_signup_otp, verify_signup_otp
 from config import get_connection
@@ -30,9 +33,13 @@ from flask import Response
 
 import mysql.connector
 import datetime
+from decimal import Decimal, InvalidOperation
 import os
 import re
 import base64
+import time
+import random
+from threading import Thread
 from io import BytesIO, StringIO
 from flask import send_file
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -41,8 +48,94 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+_argon2_hasher = None
+_argon2_verify_mismatch_error = Exception
+_argon2_invalid_hash_error = Exception
+
+try:
+    _argon2_module = importlib.import_module("argon2")
+    _argon2_exceptions = importlib.import_module("argon2.exceptions")
+    _password_hasher_cls = getattr(_argon2_module, "PasswordHasher", None)
+    if _password_hasher_cls is not None:
+        _argon2_hasher = _password_hasher_cls()
+    _argon2_verify_mismatch_error = getattr(
+        _argon2_exceptions,
+        "VerifyMismatchError",
+        Exception,
+    )
+    _argon2_invalid_hash_error = getattr(
+        _argon2_exceptions,
+        "InvalidHashError",
+        Exception,
+    )
+except Exception:
+    _argon2_hasher = None
+
+
+def hash_user_password(raw_password):
+    if _argon2_hasher is None:
+        raise RuntimeError(
+            "argon2-cffi is required for password hashing. Install it with: python -m pip install argon2-cffi"
+        )
+    return _argon2_hasher.hash(raw_password)
+
+
+def verify_user_password(stored_hash, candidate_password):
+    stored_hash = str(stored_hash or "")
+    if not stored_hash:
+        return False
+
+    if stored_hash.startswith("$argon2id$"):
+        if _argon2_hasher is None:
+            return False
+        try:
+            return _argon2_hasher.verify(stored_hash, candidate_password)
+        except (_argon2_verify_mismatch_error, _argon2_invalid_hash_error):
+            return False
+        except Exception:
+            return False
+
+    try:
+        return check_password_hash(stored_hash, candidate_password)
+    except Exception:
+        return False
+
+
+def needs_password_rehash(stored_hash):
+    if _argon2_hasher is None:
+        return False
+
+    stored_hash = str(stored_hash or "")
+    if not stored_hash:
+        return False
+
+    if not stored_hash.startswith("$argon2id$"):
+        return True
+
+    try:
+        return _argon2_hasher.check_needs_rehash(stored_hash)
+    except Exception:
+        return False
+
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
+
+def run_background_task(fn, *args, **kwargs):
+    def _target():
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            logger.exception("Background task failed")
+
+    Thread(target=_target, daemon=True).start()
+
+
+def send_request_email_async(receiver, status):
+    email = (receiver or "").strip()
+    if not email:
+        return
+    run_background_task(send_request_email, email, status)
 
 
 # Security / environment
@@ -57,7 +150,7 @@ serializer = URLSafeTimedSerializer(app.secret_key)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE=os.environ.get("SESSION_COOKIE_SAMESITE", "Lax"),
-    SESSION_COOKIE_SECURE=(os.environ.get("SESSION_COOKIE_SECURE", "true").lower() == "false"),
+    SESSION_COOKIE_SECURE=(os.environ.get("SESSION_COOKIE_SECURE", "true").strip().lower() in {"1", "true", "yes", "on"}),
     PERMANENT_SESSION_LIFETIME=int(os.environ.get("PERMANENT_SESSION_LIFETIME", "3600")),
 )
 
@@ -68,8 +161,16 @@ try:
 except Exception:
     csrf = None  
 
-# Rate limiting disabled
-limiter = None
+# Rate limiting
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=[
+        os.environ.get("RATE_LIMIT_DEFAULT_DAY", "1000 per day"),
+        os.environ.get("RATE_LIMIT_DEFAULT_HOUR", "200 per hour"),
+    ],
+    storage_uri=os.environ.get("RATE_LIMIT_STORAGE_URI", "memory://"),
+)
 
 
 FRONTEND_ORIGINS = [o.strip() for o in (os.environ.get("FRONTEND_ORIGINS", "")).split(",") if o.strip()]
@@ -96,16 +197,7 @@ app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024 # 20 MB file upload
 ALLOWED_EXTENSIONS = {"pdf"}
 
 
-#def get_key():
-#    if request.headers.get("Authorization"):
-#        return request.headers.get("Authorization")
-#    return get_remote_address()
 
-
-#limiter = Limiter(
-#    app, key_func=get_remote_address,
-#    default_limits=["200 per day","50 per hour"]
-#)
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -367,9 +459,166 @@ def apply_send_back_visibility(cursor, request_rows):
     return rows
 
 
+ALLOWED_ADMIN_PIN_ROLES = {"AssistantAdmin", "Admin", "SuperAdmin"}
+ADMIN_PIN_MAX_FAILED_ATTEMPTS = 5
+ADMIN_PIN_WARNING_ATTEMPTS = 3
+ADMIN_PIN_OTP_COOLDOWN_SECONDS = 60
+ADMIN_PIN_OTP_MAX_AGE_SECONDS = 60 * 10
+
+_admin_pin_schema_checked = False
+
+
+def can_use_admin_pin(role=None):
+    effective_role = (role or session.get("role") or "").strip()
+    return effective_role in ALLOWED_ADMIN_PIN_ROLES
+
+
+def _coerce_first_value(row, key, fallback=0):
+    if row is None:
+        return fallback
+    if isinstance(row, dict):
+        return row.get(key, fallback)
+    if isinstance(row, (list, tuple)) and row:
+        return row[0]
+    return fallback
+
+
+def ensure_admin_pin_schema(cursor, conn):
+    global _admin_pin_schema_checked
+
+    if _admin_pin_schema_checked:
+        return
+
+    columns = {
+        "admin_pin_hash": "ALTER TABLE users ADD COLUMN admin_pin_hash VARCHAR(255) NULL",
+        "admin_pin_failed_attempts": (
+            "ALTER TABLE users ADD COLUMN admin_pin_failed_attempts INT NOT NULL DEFAULT 0"
+        ),
+        "admin_pin_disabled": (
+            "ALTER TABLE users ADD COLUMN admin_pin_disabled TINYINT(1) NOT NULL DEFAULT 0"
+        ),
+    }
+
+    missing_ddls = []
+    for column_name, ddl in columns.items():
+        cursor.execute("SHOW COLUMNS FROM users LIKE %s", (column_name,))
+        row = cursor.fetchone()
+        if not row:
+            missing_ddls.append(ddl)
+
+    if missing_ddls:
+        for ddl in missing_ddls:
+            cursor.execute(ddl)
+        conn.commit()
+
+    _admin_pin_schema_checked = True
+
+
+def get_admin_pin_state(cursor, email):
+    cursor.execute(
+        """
+        SELECT
+            user_id,
+            email,
+            admin_pin_hash,
+            COALESCE(admin_pin_failed_attempts, 0) AS admin_pin_failed_attempts,
+            COALESCE(admin_pin_disabled, 0) AS admin_pin_disabled
+        FROM users
+        WHERE email = %s
+        LIMIT 1
+        """,
+        (email,),
+    )
+    return cursor.fetchone()
+
+
+def _build_admin_pin_state_payload(row):
+    failed_attempts = int(_coerce_first_value(row, "admin_pin_failed_attempts", 0) or 0)
+    pin_disabled = bool(int(_coerce_first_value(row, "admin_pin_disabled", 0) or 0))
+    pin_set = bool(_coerce_first_value(row, "admin_pin_hash", None))
+
+    return {
+        "pin_set": pin_set,
+        "pin_disabled": pin_disabled,
+        "failed_attempts": failed_attempts,
+        "remaining_attempts": max(0, ADMIN_PIN_MAX_FAILED_ATTEMPTS - failed_attempts),
+    }
+
+
+def is_valid_admin_pin(pin):
+    return bool(re.fullmatch(r"\d{4}", str(pin or "")))
+
+
+def clear_admin_pin_otp_session_flags():
+    session.pop("admin_pin_otp_pending_email", None)
+    session.pop("admin_pin_otp_pending_at", None)
+    session.pop("admin_pin_otp_verified_email", None)
+    session.pop("admin_pin_otp_verified_at", None)
+
+
+def send_admin_pin_otp(cursor, conn, email):
+    cursor.execute(
+        """
+        SELECT TIMESTAMPDIFF(SECOND, created_at, NOW()) AS age_seconds
+        FROM otp_codes
+        WHERE email = %s
+        LIMIT 1
+        """,
+        (email,),
+    )
+    row = cursor.fetchone()
+    age_seconds = _coerce_first_value(row, "age_seconds", None)
+
+    if age_seconds is not None:
+        try:
+            age_seconds = int(age_seconds)
+        except (TypeError, ValueError):
+            age_seconds = None
+
+    if age_seconds is not None and age_seconds < ADMIN_PIN_OTP_COOLDOWN_SECONDS:
+        wait_for = ADMIN_PIN_OTP_COOLDOWN_SECONDS - age_seconds
+        return False, f"Please wait {wait_for} seconds before requesting a new OTP."
+
+    otp = random.randint(100000, 999999)
+    cursor.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
+    cursor.execute("INSERT INTO otp_codes (email, otp) VALUES (%s, %s)", (email, otp))
+    conn.commit()
+
+    body = (
+        "Good day,\n\n"
+        f"Your PIN verification OTP is: {otp}\n\n"
+        "This OTP expires in 10 minutes.\n"
+        "If you did not request this, please ignore this message."
+    )
+    sent = send_cc_email(email, "PIN Verification OTP", body)
+    if not sent:
+        cursor.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
+        conn.commit()
+        return False, "Failed to send OTP email. Please try again."
+
+    session["admin_pin_otp_pending_email"] = email
+    session["admin_pin_otp_pending_at"] = int(time.time())
+    session.pop("admin_pin_otp_verified_email", None)
+    session.pop("admin_pin_otp_verified_at", None)
+    return True, "OTP sent to your email."
+
+
+def is_admin_pin_otp_verified(email):
+    verified_email = (session.get("admin_pin_otp_verified_email") or "").strip().lower()
+    verified_at = int(session.get("admin_pin_otp_verified_at") or 0)
+    now_ts = int(time.time())
+    if not verified_email or verified_email != email:
+        return False
+    if verified_at <= 0:
+        return False
+    if (now_ts - verified_at) > ADMIN_PIN_OTP_MAX_AGE_SECONDS:
+        return False
+    return True
+
+
 # OTP Routes
-srotp_view = srotp
-verify_view = verify
+srotp_view = limiter.limit("5 per minute")(srotp)
+verify_view = limiter.limit("10 per minute")(verify)
 
 app.add_url_rule("/send-otp", "send_otp", srotp_view, methods=["POST"])
 app.add_url_rule("/verify", "verify_otp", verify_view, methods=["POST"])
@@ -1496,6 +1745,392 @@ def api_admin_live():
         conn.close()
 
 
+@app.route("/api/admin/pin/status", methods=["GET"])
+def admin_pin_status():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    role = (session.get("role") or "").strip()
+    if not can_use_admin_pin(role):
+        return jsonify({"success": True, "eligible": False}), 200
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_admin_pin_schema(cursor, conn)
+        row = get_admin_pin_state(cursor, session["email"])
+        if not row:
+            return jsonify({"success": False, "error": "User not found"}), 404
+
+        return jsonify(
+            {
+                "success": True,
+                "eligible": True,
+                **_build_admin_pin_state_payload(row),
+            }
+        )
+    except Exception:
+        logger.exception("admin_pin_status failed")
+        return jsonify({"success": False, "error": "Failed to load PIN status"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/admin/pin/setup", methods=["POST"])
+def admin_pin_setup():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    role = (session.get("role") or "").strip()
+    if not can_use_admin_pin(role):
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email") or "").strip().lower()
+    pin = str(data.get("pin") or "").strip()
+    confirm_pin = str(data.get("confirm_pin") or "").strip()
+
+    if email != (session.get("email") or "").strip().lower():
+        return jsonify({"success": False, "error": "Email does not match your account."}), 403
+
+    if not is_valid_admin_pin(pin):
+        return jsonify({"success": False, "error": "PIN must be exactly 4 digits."}), 400
+
+    if pin != confirm_pin:
+        return jsonify({"success": False, "error": "PIN confirmation does not match."}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_admin_pin_schema(cursor, conn)
+        row = get_admin_pin_state(cursor, email)
+        if not row:
+            return jsonify({"success": False, "error": "User not found"}), 404
+
+        if row.get("admin_pin_hash"):
+            return jsonify({"success": False, "error": "PIN already exists. Use Change PIN in Settings."}), 400
+
+        pin_hash = generate_password_hash(pin, method="pbkdf2:sha256", salt_length=16)
+        cursor.execute(
+            """
+            UPDATE users
+            SET admin_pin_hash=%s,
+                admin_pin_failed_attempts=0,
+                admin_pin_disabled=0
+            WHERE user_id=%s
+            """,
+            (pin_hash, row["user_id"]),
+        )
+        conn.commit()
+
+        clear_admin_pin_otp_session_flags()
+        return jsonify({"success": True, "message": "PIN created successfully."})
+    except Exception:
+        conn.rollback()
+        logger.exception("admin_pin_setup failed")
+        return jsonify({"success": False, "error": "Failed to create PIN"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/admin/pin/request-otp", methods=["POST"])
+@limiter.limit("5 per minute")
+def admin_pin_request_otp():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    role = (session.get("role") or "").strip()
+    if not can_use_admin_pin(role):
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email") or "").strip().lower()
+    if email != (session.get("email") or "").strip().lower():
+        return jsonify({"success": False, "error": "Email does not match your account."}), 403
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_admin_pin_schema(cursor, conn)
+        row = get_admin_pin_state(cursor, email)
+        if not row:
+            return jsonify({"success": False, "error": "User not found"}), 404
+        if not row.get("admin_pin_hash"):
+            return jsonify({"success": False, "error": "No PIN found. Please create a PIN first."}), 400
+
+        ok, msg = send_admin_pin_otp(cursor, conn, email)
+        if not ok:
+            status = 429 if "Please wait" in msg else 500
+            return jsonify({"success": False, "error": msg}), status
+
+        return jsonify({"success": True, "message": msg})
+    except Exception:
+        logger.exception("admin_pin_request_otp failed")
+        return jsonify({"success": False, "error": "Failed to send OTP"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/admin/pin/verify-otp", methods=["POST"])
+@limiter.limit("10 per minute")
+def admin_pin_verify_otp():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    role = (session.get("role") or "").strip()
+    if not can_use_admin_pin(role):
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email") or "").strip().lower()
+    otp = str(data.get("otp") or "").strip()
+
+    if email != (session.get("email") or "").strip().lower():
+        return jsonify({"success": False, "error": "Email does not match your account."}), 403
+
+    pending_email = (session.get("admin_pin_otp_pending_email") or "").strip().lower()
+    pending_at = int(session.get("admin_pin_otp_pending_at") or 0)
+    now_ts = int(time.time())
+
+    if pending_email != email or pending_at <= 0:
+        return jsonify({"success": False, "error": "Please request OTP first."}), 400
+
+    if (now_ts - pending_at) > ADMIN_PIN_OTP_MAX_AGE_SECONDS:
+        clear_admin_pin_otp_session_flags()
+        return jsonify({"success": False, "error": "OTP session expired. Request a new OTP."}), 400
+
+    message, ok = verify_signup_otp(email, otp, consume=True)
+    if not ok:
+        return jsonify({"success": False, "error": message or "Invalid OTP"}), 400
+
+    session["admin_pin_otp_verified_email"] = email
+    session["admin_pin_otp_verified_at"] = now_ts
+    return jsonify({"success": True, "message": "OTP verified. You can now change your PIN."})
+
+
+@app.route("/api/admin/pin/change", methods=["POST"])
+def admin_pin_change():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    role = (session.get("role") or "").strip()
+    if not can_use_admin_pin(role):
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email") or "").strip().lower()
+    new_pin = str(data.get("new_pin") or "").strip()
+    confirm_pin = str(data.get("confirm_pin") or "").strip()
+
+    if email != (session.get("email") or "").strip().lower():
+        return jsonify({"success": False, "error": "Email does not match your account."}), 403
+
+    if not is_admin_pin_otp_verified(email):
+        return jsonify({"success": False, "error": "Please verify OTP first."}), 400
+
+    if not is_valid_admin_pin(new_pin):
+        return jsonify({"success": False, "error": "PIN must be exactly 4 digits."}), 400
+
+    if new_pin != confirm_pin:
+        return jsonify({"success": False, "error": "PIN confirmation does not match."}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_admin_pin_schema(cursor, conn)
+        row = get_admin_pin_state(cursor, email)
+        if not row:
+            return jsonify({"success": False, "error": "User not found"}), 404
+
+        pin_hash = generate_password_hash(new_pin, method="pbkdf2:sha256", salt_length=16)
+        cursor.execute(
+            """
+            UPDATE users
+            SET admin_pin_hash=%s,
+                admin_pin_failed_attempts=0,
+                admin_pin_disabled=0
+            WHERE user_id=%s
+            """,
+            (pin_hash, row["user_id"]),
+        )
+        conn.commit()
+
+        clear_admin_pin_otp_session_flags()
+        return jsonify({"success": True, "message": "PIN updated successfully."})
+    except Exception:
+        conn.rollback()
+        logger.exception("admin_pin_change failed")
+        return jsonify({"success": False, "error": "Failed to change PIN"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/request/<int:request_id>/amount", methods=["POST"])
+def admin_update_request_amount(request_id):
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    role = (session.get("role") or "").strip()
+    if not can_use_admin_pin(role):
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    amount_raw = str(data.get("amount") or "").strip()
+    pin = str(data.get("pin") or "").strip()
+
+    if not amount_raw:
+        return jsonify({"success": False, "error": "Amount is required."}), 400
+
+    try:
+        amount = Decimal(amount_raw)
+    except (TypeError, ValueError, InvalidOperation):
+        return jsonify({"success": False, "error": "Invalid amount value."}), 400
+
+    if amount < 0:
+        return jsonify({"success": False, "error": "Amount cannot be negative."}), 400
+
+    if not is_valid_admin_pin(pin):
+        return jsonify({"success": False, "error": "PIN must be exactly 4 digits."}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_admin_pin_schema(cursor, conn)
+        pin_row = get_admin_pin_state(cursor, session["email"])
+        if not pin_row:
+            return jsonify({"success": False, "error": "User not found"}), 404
+
+        pin_hash = pin_row.get("admin_pin_hash")
+        failed_attempts = int(pin_row.get("admin_pin_failed_attempts") or 0)
+        is_disabled = bool(int(pin_row.get("admin_pin_disabled") or 0))
+
+        if not pin_hash:
+            return jsonify({
+                "success": False,
+                "code": "PIN_NOT_SET",
+                "error": "PIN is not set. Please create your 4-digit PIN first.",
+            }), 400
+
+        if is_disabled:
+            return jsonify({
+                "success": False,
+                "code": "PIN_DISABLED",
+                "error": "PIN is disabled. Reset your PIN in Settings to enable amount editing again.",
+                "failed_attempts": failed_attempts,
+                "remaining_attempts": 0,
+            }), 423
+
+        if not check_password_hash(pin_hash, pin):
+            new_failed_attempts = min(ADMIN_PIN_MAX_FAILED_ATTEMPTS, failed_attempts + 1)
+            disabled_now = 1 if new_failed_attempts >= ADMIN_PIN_MAX_FAILED_ATTEMPTS else 0
+            cursor.execute(
+                """
+                UPDATE users
+                SET admin_pin_failed_attempts=%s,
+                    admin_pin_disabled=%s
+                WHERE user_id=%s
+                """,
+                (new_failed_attempts, disabled_now, pin_row["user_id"]),
+            )
+            conn.commit()
+
+            remaining = max(0, ADMIN_PIN_MAX_FAILED_ATTEMPTS - new_failed_attempts)
+            if new_failed_attempts >= ADMIN_PIN_MAX_FAILED_ATTEMPTS:
+                return jsonify(
+                    {
+                        "success": False,
+                        "code": "PIN_DISABLED",
+                        "error": "PIN has been disabled after 5 failed attempts. Reset your PIN in Settings to enable amount editing again.",
+                        "failed_attempts": new_failed_attempts,
+                        "remaining_attempts": 0,
+                    }
+                ), 423
+
+            if new_failed_attempts == ADMIN_PIN_WARNING_ATTEMPTS:
+                return jsonify(
+                    {
+                        "success": False,
+                        "code": "PIN_WARNING",
+                        "error": "You entered PIN 3 times in a row with incorrect PIN. You have 2 more left and amount edit will be disabled. If you forgot your PIN, you can reset it in Settings.",
+                        "failed_attempts": new_failed_attempts,
+                        "remaining_attempts": remaining,
+                    }
+                ), 403
+
+            return jsonify(
+                {
+                    "success": False,
+                    "code": "PIN_INVALID",
+                    "error": f"Incorrect PIN. You have {remaining} attempt(s) remaining.",
+                    "failed_attempts": new_failed_attempts,
+                    "remaining_attempts": remaining,
+                }
+            ), 403
+
+        cursor.execute(
+            """
+            SELECT r.request_id, s.status_name
+            FROM requests r
+            JOIN request_status s ON s.status_id = r.status_id
+            WHERE r.request_id = %s
+            LIMIT 1
+            """,
+            (request_id,),
+        )
+        request_row = cursor.fetchone()
+        if not request_row:
+            return jsonify({"success": False, "error": "Request not found"}), 404
+
+        status_name = str(request_row.get("status_name") or "").strip().upper()
+        if status_name != "PENDING":
+            return jsonify(
+                {
+                    "success": False,
+                    "code": "NOT_PENDING",
+                    "error": "Only pending request amounts can be edited.",
+                }
+            ), 400
+
+        cursor.execute(
+            """
+            UPDATE users
+            SET admin_pin_failed_attempts=0,
+                admin_pin_disabled=0
+            WHERE user_id=%s
+            """,
+            (pin_row["user_id"],),
+        )
+        cursor.execute(
+            """
+            UPDATE requests
+            SET amount=%s
+            WHERE request_id=%s
+            """,
+            (str(amount), request_id),
+        )
+
+        conn.commit()
+        return jsonify(
+            {
+                "success": True,
+                "message": "Amount updated successfully.",
+                "request_id": request_id,
+                "amount": amount,
+            }
+        )
+    except Exception:
+        conn.rollback()
+        logger.exception("admin_update_request_amount failed")
+        return jsonify({"success": False, "error": "Failed to update amount"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @app.route("/api/request/<int:request_id>/workflow", methods=["GET"])
 def get_request_workflow(request_id):
     if "email" not in session:
@@ -1773,7 +2408,7 @@ def create_request():
     if file and file.filename:
         # PDF-only checks
         if not allowed_file(file.filename) or file.mimetype != "application/pdf":
-            msg = "Attachment not supported. Please use PDF."
+            msg = "Supported file is PDF only. Please upload PDF file."
             if request.headers.get("X-Requested-With") == "fetch":
                 return jsonify({"success": False, "message": msg}), 400
             flash(msg, "danger")
@@ -2670,6 +3305,8 @@ def get_it_stats():
         conn.close()
 
 @app.route("/api/it/users", methods=["GET"])
+@login_required
+@role_required("IT", "SuperAdmin")
 
 def get_all_users_for_admin():
     """Return all users for IT user management."""
@@ -2695,11 +3332,9 @@ def get_all_users_for_admin():
         conn.close()
 
 @app.route("/create_role", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
 def create_role():
-    # Security check
-    if "email" not in session:
-        return redirect("/login")
-
     role_name = request.form.get("role_name")
 
     conn = get_connection()
@@ -2734,11 +3369,9 @@ def create_role():
 
 
 @app.route("/create_position", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
 def create_position():
-    # Security check
-    if "email" not in session:
-        return redirect("/login")
-
     position_name = request.form.get("position_name")
 
     conn = get_connection()
@@ -2775,10 +3408,23 @@ def create_position():
 
 
 @app.route("/api/request/<int:request_id>/status", methods=["POST"])
+@login_required
+@limiter.limit("30 per minute")
 def update_request_status(request_id):
     
     if "email" not in session:
         return jsonify({"error": "Unauthorized"}), 401
+
+    role = (session.get("role") or "").strip()
+    is_admin_role = role in {"AssistantAdmin", "Admin", "SuperAdmin"}
+
+    actor_position_id_raw = session.get("position_id")
+    actor_position_id_int = None
+    try:
+        if actor_position_id_raw not in (None, ""):
+            actor_position_id_int = int(actor_position_id_raw)
+    except (TypeError, ValueError):
+        actor_position_id_int = None
 
     data = request.get_json(silent=True) or {}
     new_status = (data.get("status") or request.form.get("status") or "").strip()
@@ -2791,6 +3437,21 @@ def update_request_status(request_id):
     cursor = conn.cursor(dictionary=True)
 
     try:
+        cursor.execute(
+            "SELECT stage_position_id FROM requests WHERE request_id = %s",
+            (request_id,),
+        )
+        auth_row = cursor.fetchone()
+        if not auth_row:
+            return jsonify({"error": "Request not found"}), 404
+
+        current_stage_for_auth = auth_row.get("stage_position_id")
+        if not is_admin_role:
+            if actor_position_id_int is None:
+                return jsonify({"error": "Forbidden"}), 403
+            if current_stage_for_auth is None or int(current_stage_for_auth) != actor_position_id_int:
+                return jsonify({"error": "Forbidden"}), 403
+
         new_status = (new_status or "").strip()
         if new_status.lower() in ("inprogress", "in_progress", "in progress"):
             new_status = "IN PROGRESS"
@@ -2809,7 +3470,7 @@ def update_request_status(request_id):
 
         # Actor info (who clicked approve/reject)
         actor_user_id = session.get("user_id")
-        actor_position_id = session.get("position_id")
+        actor_position_id = actor_position_id_int
         actor_email = session.get("email")
 
         # Request owner email (notification target)
@@ -2826,12 +3487,7 @@ def update_request_status(request_id):
         requestor_email = (_owner_row.get("requestor_email") or "").strip()
 
         # Get current stage before changing (used for logs)
-        cursor.execute(
-            "SELECT stage_position_id FROM requests WHERE request_id = %s",
-            (request_id,),
-        )
-        _stage_row = cursor.fetchone()
-        current_stage_before = _stage_row["stage_position_id"] if _stage_row else None
+        current_stage_before = current_stage_for_auth
         
         # IN PROGRESS
         if new_status.lower() == "in progress":
@@ -2949,7 +3605,7 @@ def update_request_status(request_id):
 
             if requestor_email:
                 try:
-                    send_request_email(requestor_email, "REJECTED")
+                    send_request_email_async(requestor_email, "REJECTED")
                 except Exception as _owner_mail_err:
                     print("requestor reject email error:", _owner_mail_err)
 
@@ -3030,7 +3686,7 @@ def update_request_status(request_id):
                 conn.commit()
                 if requestor_email:
                     try:
-                        send_request_email(requestor_email, "APPROVED")
+                        send_request_email_async(requestor_email, "APPROVED")
                     except Exception as _owner_mail_err:
                         print("requestor approved email error:", _owner_mail_err)
                 return jsonify(
@@ -3087,7 +3743,7 @@ def update_request_status(request_id):
                 conn.commit()
                 if requestor_email:
                     try:
-                        send_request_email(requestor_email, "APPROVED")
+                        send_request_email_async(requestor_email, "APPROVED")
                     except Exception as _owner_mail_err:
                         print("requestor approved email error:", _owner_mail_err)
                 return jsonify({"message": "Request fully approved. Completed"})
@@ -3352,11 +4008,9 @@ def update_user_role():
         conn.close()
 
 @app.route("/create_user", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
 def create_user():
-
-    if "email" not in session:
-        return redirect("/login")
-
     # Get Form Data
     email = request.form["email"]
     password = request.form["password"]
@@ -3364,10 +4018,8 @@ def create_user():
     role_id = request.form["role_id"]
     position_id = request.form["position_id"]
 
-    # Hash the password
-    hashed_password = generate_password_hash(
-        password, method="pbkdf2:sha256", salt_length=16
-    )
+    # Hash password using Argon2id (with fallback if unavailable).
+    hashed_password = hash_user_password(password)
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -3408,11 +4060,9 @@ def create_user():
 
 
 @app.route("/create_dept", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
 def create_dept():
-    # Security check
-    if "email" not in session:
-        return redirect("/login")
-
     if request.method == "POST":
         dept_name = request.form["dept_name"]
         # dept_head = request.form.get('dept_head', '')
@@ -3872,10 +4522,9 @@ def user_complete_request(request_id):
         conn.close()
 
 @app.route("/api/request/<int:request_id>/cc", methods=["POST"])
+@login_required
+@limiter.limit("10 per minute")
 def cc_completed_request(request_id):
-    if "email" not in session:
-        return jsonify({"error": "Unauthorized"})
-
     role = session.get("role")
     if role not in ["Admin", "AssistantAdmin", "SuperAdmin"]:
         return jsonify({"error": "Forbidden"})
@@ -3897,28 +4546,28 @@ def cc_completed_request(request_id):
     cursor = conn.cursor(dictionary=True)
     try:
         # allow only Admin/AssistantAdmin recipients
-       # placeholders = ",".join(["%s"] * len(to_emails))
-       # cursor.execute(
-        #    f"""
-         #   SELECT LOWER(u.email) AS email
-          #  FROM users u
-           # JOIN roles r ON u.role_id = r.role_id
-            #WHERE LOWER(u.email) IN ({placeholders})
-          #  AND r.role_name IN ('Admin','AssistantAdmin')
-        #""",
-         #   tuple(to_emails),
-        #)
-        #allowed_rows = cursor.fetchall()
-        #allowed_set = set([row["email"] for row in allowed_rows])
+        placeholders = ",".join(["%s"] * len(to_emails))
+        cursor.execute(
+            f"""
+            SELECT LOWER(u.email) AS email
+            FROM users u
+            JOIN roles r ON u.role_id = r.role_id
+            WHERE LOWER(u.email) IN ({placeholders})
+              AND r.role_name IN ('Admin','AssistantAdmin','SuperAdmin')
+            """,
+            tuple(to_emails),
+        )
+        allowed_rows = cursor.fetchall()
+        allowed_set = set([row["email"] for row in allowed_rows])
 
-        #not_allowed = [e for e in to_emails if e not in allowed_set]
-        #if not_allowed:
-        #    return (
-         #       jsonify(
-          #          {"error": f"Not allowed recipient(s): {', '.join(not_allowed)}"}
-           #     ),
-            #    400,
-            #)
+        not_allowed = [e for e in to_emails if e not in allowed_set]
+        if not_allowed:
+            return (
+                jsonify(
+                    {"error": f"Not allowed recipient(s): {', '.join(not_allowed)}"}
+                ),
+                400,
+            )
 
         # fetch request + attachment blob
         cursor.execute(
@@ -4020,10 +4669,8 @@ def change_password():
         cursor.execute("SELECT password FROM users WHERE email=%s", (email,))
         user = cursor.fetchone()
 
-        if user and check_password_hash(user["password"], current_pass):
-            new_hash = generate_password_hash(
-                new_pass, method="pbkdf2:sha256", salt_length=16
-            )
+        if user and verify_user_password(user["password"], current_pass):
+            new_hash = hash_user_password(new_pass)
             cursor.execute(
                 "UPDATE users SET password=%s WHERE email=%s", (new_hash, email)
             )
@@ -4211,7 +4858,7 @@ def signup():
             pos_row = cursor.fetchone()
             position_id = pos_row["position_id"] if pos_row else 1
 
-            hp = generate_password_hash(p, method="pbkdf2:sha256", salt_length=16)
+            hp = hash_user_password(p)
 
             cursor.execute(
                 "INSERT INTO users (email, password, dept_id, role_id, position_id) VALUES (%s,%s,%s,%s,%s)",
@@ -4243,6 +4890,7 @@ def signup():
 
 # web login
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("20 per minute", methods=["POST"])
 def login():
     if request.method == "POST":
         e = request.form["email"].strip().lower()
@@ -4265,7 +4913,19 @@ def login():
             )
             user = cursor.fetchone()
 
-            if user and check_password_hash(user["password"], password):
+            if user and verify_user_password(user["password"], password):
+                if needs_password_rehash(user.get("password")):
+                    try:
+                        refreshed_hash = hash_user_password(password)
+                        cursor.execute(
+                            "UPDATE users SET password=%s WHERE user_id=%s",
+                            (refreshed_hash, user["user_id"]),
+                        )
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        logger.exception("Password rehash on login failed")
+
                 session["email"] = user["email"]
                 session["user_id"] = user["user_id"]
                 session["role"] = user["role_name"]
@@ -4285,6 +4945,7 @@ def login():
 
 
 @app.route("/forgot-password", methods=["GET", "POST"])
+@limiter.limit("10 per minute", methods=["POST"])
 def forgot_password():
     if request.method == "POST":
         email = (request.form.get("email") or "").strip().lower()
@@ -4372,9 +5033,7 @@ def reset_password(token):
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
-            new_hash = generate_password_hash(
-                new_pass, method="pbkdf2:sha256", salt_length=16
-            )
+            new_hash = hash_user_password(new_pass)
             cursor.execute("UPDATE users SET password=%s WHERE email=%s", (new_hash, email))
             conn.commit()
         finally:
@@ -4405,6 +5064,7 @@ def mobile_departments():
 
 @app.route("/api/mobile/send-otp", methods=["POST", "OPTIONS"])
 @csrf.exempt
+@limiter.limit("5 per minute")
 def mobile_send_otp():
     if request.method == "OPTIONS":
         return ("", 200)
@@ -4421,6 +5081,7 @@ def mobile_send_otp():
 
 @app.route("/api/mobile/verify-otp", methods=["POST", "OPTIONS"])
 @csrf.exempt
+@limiter.limit("10 per minute")
 def mobile_verify_otp():
     if request.method == "OPTIONS":
         return ("", 200)
@@ -4515,7 +5176,7 @@ def mobile_signup():
         pos_row = cursor.fetchone()
         position_id = pos_row["position_id"] if pos_row else 1
 
-        hp = generate_password_hash(p, method="pbkdf2:sha256", salt_length=16)
+        hp = hash_user_password(p)
         cursor.execute(
             "INSERT INTO users (email, password, dept_id, role_id, position_id) VALUES (%s,%s,%s,%s,%s)",
             (e, hp, dept_id, role_id, position_id),
@@ -4535,6 +5196,7 @@ def mobile_signup():
     
 @app.route("/api/mobile/login", methods=["POST"])
 @csrf.exempt
+@limiter.limit("20 per minute")
 def mobile_login():
     data = request.get_json(silent=True) or {}
     e = (data.get("email") or "").strip().lower()
@@ -4560,8 +5222,20 @@ def mobile_login():
         )
         user = cursor.fetchone()
 
-        if not user or not check_password_hash(user["password"], pw):
+        if not user or not verify_user_password(user["password"], pw):
             return jsonify({"error": "Invalid credentials"}), 401
+
+        if needs_password_rehash(user.get("password")):
+            try:
+                refreshed_hash = hash_user_password(pw)
+                cursor.execute(
+                    "UPDATE users SET password=%s WHERE user_id=%s",
+                    (refreshed_hash, user["user_id"]),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.exception("Password rehash on mobile login failed")
 
         if user["role_name"] != "User":
             return jsonify({"error": "User role only"}), 403
@@ -4901,18 +5575,14 @@ def generate_test_cdr_stamped_pdf(
         f.write(final_bytes)
 
 
-test_text = [
-    {"page": 0, "x": 240, "y": 330, "text": "DATE_NEEDE", "font": 10},
-    {"page": 0, "x": 340, "y": 300, "text": "DEpT_HERE", "font": 10},
-    {"page": 0, "x": 470, "y": 330, "text": "CDR-))!", "font": 10},
-]
-
+    
 
 if __name__ == "__main__":
+    debug_mode = (os.environ.get("FLASK_DEBUG", "false").strip().lower() == "true")
     app.run(
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "5000")),
-        debug=(os.environ.get("FLASK_DEBUG", "true").lower() == "true"),
-        use_reloader=True,
+        debug=debug_mode,
+        use_reloader=debug_mode,
     ) 
 

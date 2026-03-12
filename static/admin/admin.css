@@ -1140,9 +1140,9 @@ button.btn-icon[title="Edit Workflow"] {
   margin-bottom: 1rem;
 }
 
-/* Optional: higher z-index for system popup */
+/* Keep system popup above all dashboard modals (including amount edit). */
 .modal-z3000 {
-  z-index: 3000;
+  z-index: 12000;
 }
 
 /* SYS POPUP sizing + style */
@@ -1340,6 +1340,43 @@ button.btn-icon[title="Edit Workflow"] {
   height: 100% !important;
 }
 
+.amount-cell-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.amount-value {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.amount-edit-btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pin-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.amount-edit-modal,
+.pin-modal,
+.pin-warning-modal {
+  width: 100%;
+  max-width: 460px;
+}
+
+.otp-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
 /* Mobile responsive */
 @media (max-width: 900px) {
   .charts-section {
@@ -1456,8 +1493,15 @@ button.btn-icon[title="Edit Workflow"] {
   .approve-modal,
   .reject-modal,
   .confirm-modal,
-  .sys-popup {
+  .sys-popup,
+  .amount-edit-modal,
+  .pin-modal,
+  .pin-warning-modal {
     width: 100%;
     max-width: calc(100vw - 24px);
+  }
+
+  .otp-row {
+    grid-template-columns: 1fr;
   }
 }

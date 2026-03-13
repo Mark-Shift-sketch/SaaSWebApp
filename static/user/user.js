@@ -102,6 +102,30 @@ function normalizeStatusName(value) {
     return String(value || '').trim().toLowerCase();
 }
 
+function parseRequestTimestamp(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return 0;
+
+    const direct = Date.parse(text);
+    if (Number.isFinite(direct)) return direct;
+
+    const normalized = Date.parse(text.replace(' ', 'T'));
+    return Number.isFinite(normalized) ? normalized : 0;
+}
+
+function parseRequestIdValue(raw) {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 0;
+}
+
+function compareRequestsAsc(a, b) {
+    const tsA = parseRequestTimestamp(a && a.created_at);
+    const tsB = parseRequestTimestamp(b && b.created_at);
+    if (tsA !== tsB) return tsA - tsB;
+
+    return parseRequestIdValue(a && a.request_id) - parseRequestIdValue(b && b.request_id);
+}
+
 function isCompletedRequest(req) {
     return normalizeStatusName(req && req.status_name) === 'completed';
 }
@@ -116,15 +140,17 @@ function renderRequests(filter) {
     else if (filter === 'approved') filtered = userRequests.filter(r => normalizeStatusName(r.status_name) === 'approved');
     else if (filter === 'completed') filtered = userRequests.filter(isCompletedRequest);
 
-    document.getElementById('request-count').textContent = filtered.length;
+    const sorted = filtered.slice().sort(compareRequestsAsc);
+
+    document.getElementById('request-count').textContent = sorted.length;
     document.getElementById('rejection-header').classList.toggle('hidden', filter !== 'rejected');
 
-    if (filtered.length === 0) {
+    if (sorted.length === 0) {
         tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No requests found.</td></tr>';
         return;
     }
 
-    filtered.forEach(req => {
+    sorted.forEach(req => {
         const tr = document.createElement('tr');
 
         const fileCell = req.filename

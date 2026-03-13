@@ -30,6 +30,51 @@ function showStatus(message, kind = "info") {
     }, 3000);
 }
 
+let __deanUserStyleToastTimer = null;
+
+function showUserStyleToast(title, message, type = "info") {
+    let toast = document.getElementById("toast");
+    if (!toast) {
+        toast = document.createElement("div");
+        toast.id = "toast";
+        toast.className = "toast";
+        toast.innerHTML = `
+      <div id="toast-icon"></div>
+      <div>
+        <p id="toast-title" class="toast-title"></p>
+        <p id="toast-message" class="toast-message"></p>
+      </div>
+    `;
+        document.body.appendChild(toast);
+    }
+
+    const titleEl = document.getElementById("toast-title");
+    const messageEl = document.getElementById("toast-message");
+
+    const palette = {
+        success: { border: "#16a34a", title: "#166534" },
+        error: { border: "#dc2626", title: "#991b1b" },
+        warning: { border: "#d97706", title: "#92400e" },
+        info: { border: "#2563eb", title: "#1e40af" },
+    };
+
+    const selected = palette[type] || palette.info;
+
+    if (titleEl) {
+        titleEl.textContent = title || "Status";
+        titleEl.style.color = selected.title;
+    }
+    if (messageEl) messageEl.textContent = message || "";
+
+    toast.style.borderLeft = `4px solid ${selected.border}`;
+    toast.className = "toast show";
+
+    if (__deanUserStyleToastTimer) clearTimeout(__deanUserStyleToastTimer);
+    __deanUserStyleToastTimer = setTimeout(() => {
+        toast.classList.remove("show");
+    }, 3000);
+}
+
 async function showSystemConfirmToast(message, confirmText = "Confirm") {
     if (window.Swal && typeof window.Swal.fire === "function") {
         const result = await window.Swal.fire({
@@ -87,10 +132,54 @@ window.addEventListener("load", () => {
     refreshDeanNotificationBadge();
 });
 
+function parseRequestTimestamp(raw) {
+    const text = String(raw || "").trim();
+    if (!text) return 0;
+
+    const direct = Date.parse(text);
+    if (Number.isFinite(direct)) return direct;
+
+    const normalized = Date.parse(text.replace(" ", "T"));
+    return Number.isFinite(normalized) ? normalized : 0;
+}
+
+function parseRequestIdValue(raw) {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 0;
+}
+
+function sortRequestRowsAsc(tbody) {
+    if (!tbody) return;
+
+    const rows = Array.from(tbody.querySelectorAll("tr.request-row"));
+    if (rows.length <= 1) return;
+
+    rows.sort((a, b) => {
+        const tsA = parseRequestTimestamp(a.dataset.createdAt);
+        const tsB = parseRequestTimestamp(b.dataset.createdAt);
+        if (tsA !== tsB) return tsA - tsB;
+
+        const idA = parseRequestIdValue(
+            a.dataset.requestId || (a.querySelector("td")?.textContent || "").replace(/[^0-9]/g, "")
+        );
+        const idB = parseRequestIdValue(
+            b.dataset.requestId || (b.querySelector("td")?.textContent || "").replace(/[^0-9]/g, "")
+        );
+        return idA - idB;
+    });
+
+    rows.forEach((row) => tbody.appendChild(row));
+}
+
 function filterTable() {
     const searchQuery = (document.getElementById("search-input")?.value || "").toLowerCase();
     const statusFilter = (document.getElementById("status-filter")?.value || "").trim().toUpperCase();
-    const rows = document.querySelectorAll("#requests-table-body tr.request-row");
+    const tbody = document.getElementById("requests-table-body");
+    if (!tbody) return;
+
+    sortRequestRowsAsc(tbody);
+
+    const rows = tbody.querySelectorAll("tr.request-row");
 
     let visible = 0;
 
@@ -330,33 +419,106 @@ function getCsrfToken() {
     return tokenEl ? tokenEl.getAttribute("content") : "";
 }
 
+async function requestHasSavedAnnotations(requestId) {
+    try {
+        const response = await fetch(`/api/request/${requestId}/annotations`, {
+            method: "GET",
+            cache: "no-store",
+            credentials: "same-origin",
+        });
+
+        if (!response.ok) return false;
+
+        const data = await response.json().catch(() => ({}));
+        if (typeof data.current_actor_has_annotations === "boolean") {
+            return data.current_actor_has_annotations;
+        }
+
+        const annotations = Array.isArray(data.annotations) ? data.annotations : [];
+        return annotations.length > 0;
+    } catch (err) {
+        console.warn("Could not verify annotations before approval.", err);
+        return false;
+    }
+}
+
 async function updateStatus(id, status, message = null) {
     const normalizedStatus = String(status || "").trim().toUpperCase();
-    const confirmed = await showSystemConfirmToast(
-        `Mark request #${id} as ${normalizedStatus || "UPDATED"}?`,
-        normalizedStatus === "APPROVED" ? "Approve" : normalizedStatus === "REJECTED" ? "Reject" : "Confirm"
-    );
-    if (!confirmed) return;
 
-    const csrfToken = getCsrfToken();
-    const response = await fetch(`/api/request/${id}/status`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "X-CSRFToken": csrfToken,
-        },
-        body: JSON.stringify({ status: status, message: message }),
-        credentials: "same-origin",
-    });
+    let confirmMessage = `Mark request #${id} as ${normalizedStatus || "UPDATED"}?`;
+    let confirmButtonLabel =
+        normalizedStatus === "APPROVED" ? "Approve" : normalizedStatus === "REJECTED" ? "Reject" : "Confirm";
 
-    if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        showStatus(payload.error || `Request failed (${response.status})`, "error");
-        return;
+    if (normalizedStatus === "APPROVED") {
+        const hasSignedOrEdited = await requestHasSavedAnnotations(id);
+        if (!hasSignedOrEdited) {
+            confirmMessage = "You didn't sign the file. Are you sure you want to approve?";
+            confirmButtonLabel = "Approve";
+        }
     }
 
-    showStatus("Request updated successfully.", "success");
-    location.reload();
+    const confirmed = await showSystemConfirmToast(confirmMessage, confirmButtonLabel);
+    if (!confirmed) return;
+
+    try {
+        const csrfToken = getCsrfToken();
+        const response = await fetch(`/api/request/${id}/status`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": csrfToken,
+            },
+            body: JSON.stringify({ status: status, message: message }),
+            credentials: "same-origin",
+        });
+
+        const text = await response.text();
+        let payload = {};
+        try {
+            payload = JSON.parse(text);
+        } catch (_) {
+            payload = {};
+        }
+
+        if (!response.ok) {
+            showStatus(payload.error || payload.message || `Request failed (${response.status})`, "error");
+            return;
+        }
+
+        const rid = `REQ#${id}`;
+
+        if (normalizedStatus === "APPROVED") {
+            const backendMsg = String(payload.message || "").trim();
+            const backendLower = backendMsg.toLowerCase();
+            let approvedMsg = `Request ${rid} has been approved.`;
+
+            if (backendMsg) {
+                if (backendLower.includes("fully approved") || backendLower.includes("completed")) {
+                    approvedMsg = `Request ${rid} has been fully approved and completed.`;
+                } else if (backendLower.includes("next stage") || backendLower.includes("next approver")) {
+                    approvedMsg = `Request ${rid} has been approved and moved to the next approver.`;
+                } else {
+                    approvedMsg = `Request ${rid} has been approved. ${backendMsg}`;
+                }
+            }
+
+            showUserStyleToast("System Status", approvedMsg, "success");
+            setTimeout(() => location.reload(), 1200);
+            return;
+        }
+
+        if (normalizedStatus === "REJECTED") {
+            showUserStyleToast("System Status", `Request ${rid} has been rejected.`, "error");
+            setTimeout(() => location.reload(), 1200);
+            return;
+        }
+
+        showUserStyleToast("System Status", payload.message || "Request updated successfully.", "success");
+        setTimeout(() => location.reload(), 1200);
+    } catch (err) {
+        console.error(err);
+        showStatus("Network error. Failed to update status.", "error");
+    }
 }
 
 const DEAN_AUTO_REFRESH_MS = 15000;

@@ -466,6 +466,7 @@ ADMIN_PIN_OTP_COOLDOWN_SECONDS = 60
 ADMIN_PIN_OTP_MAX_AGE_SECONDS = 60 * 10
 
 _admin_pin_schema_checked = False
+_user_account_control_schema_checked = False
 
 
 def can_use_admin_pin(role=None):
@@ -489,29 +490,16 @@ def ensure_admin_pin_schema(cursor, conn):
     if _admin_pin_schema_checked:
         return
 
-    columns = {
-        "admin_pin_hash": "ALTER TABLE users ADD COLUMN admin_pin_hash VARCHAR(255) NULL",
-        "admin_pin_failed_attempts": (
-            "ALTER TABLE users ADD COLUMN admin_pin_failed_attempts INT NOT NULL DEFAULT 0"
-        ),
-        "admin_pin_disabled": (
-            "ALTER TABLE users ADD COLUMN admin_pin_disabled TINYINT(1) NOT NULL DEFAULT 0"
-        ),
-    }
-
-    missing_ddls = []
-    for column_name, ddl in columns.items():
-        cursor.execute("SHOW COLUMNS FROM users LIKE %s", (column_name,))
-        row = cursor.fetchone()
-        if not row:
-            missing_ddls.append(ddl)
-
-    if missing_ddls:
-        for ddl in missing_ddls:
-            cursor.execute(ddl)
-        conn.commit()
-
     _admin_pin_schema_checked = True
+
+
+def ensure_user_account_control_schema(cursor, conn):
+    global _user_account_control_schema_checked
+
+    if _user_account_control_schema_checked:
+        return
+
+    _user_account_control_schema_checked = True
 
 
 def get_admin_pin_state(cursor, email):
@@ -1550,12 +1538,10 @@ def admin_dashboard():
         """)
         existing_types = cursor.fetchall()
 
-        # CC recipients (Admins + AssistantAdmins)
+        # CC recipients dropdown (all known user emails)
         cursor.execute("""
             SELECT u.email
             FROM users u
-            JOIN roles r ON u.role_id = r.role_id
-            WHERE r.role_name IN ('Admin', 'AssistantAdmin')
             ORDER BY u.email ASC
         """)
         cc_recipients = [row["email"] for row in cursor.fetchall()]
@@ -2363,13 +2349,22 @@ def add_request_type():
 
 @app.route("/create_request", methods=["POST"])
 def create_request():
-    if "user_id" not in session:
+    user_id = session.get("user_id")
+
+    
+    if not user_id and session.get("email"):
+        resolved_user_id = get_user_id(session.get("email"))
+        if resolved_user_id:
+            session["user_id"] = resolved_user_id
+            user_id = resolved_user_id
+
+    if not user_id:
         # JSON for fetch
         if request.headers.get("X-Requested-With") == "fetch":
             return jsonify({"success": False, "message": "Unauthorized"}), 401
         return redirect("/login")
 
-    user_id = session["user_id"]
+    user_id = int(user_id)
     request_type_id = request.form.get("request_type_id")
     amount_raw = (
         request.form.get("template_total")
@@ -2750,6 +2745,19 @@ def get_annotations(request_id):
     if "email" not in session:
         return jsonify({"error": "Unauthorized"}), 401
 
+    actor_user_id = session.get("user_id")
+    actor_position_id = session.get("position_id")
+
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    try:
+        actor_position_id = int(actor_position_id) if actor_position_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_position_id = None
+
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     try:
@@ -2759,8 +2767,45 @@ def get_annotations(request_id):
         )
         row = cur.fetchone()
         if not row or not row.get("annotations_json"):
-            return jsonify({"annotations": []})
-        return jsonify({"annotations": json.loads(row["annotations_json"])})
+            return jsonify({"annotations": [], "has_annotations": False, "current_actor_has_annotations": False})
+
+        annotations = json.loads(row["annotations_json"])
+        if not isinstance(annotations, list):
+            annotations = []
+
+        current_actor_has_annotations = False
+        for ann in annotations:
+            if not isinstance(ann, dict):
+                continue
+
+            ann_user_id = ann.get("actor_user_id")
+            ann_position_id = ann.get("actor_position_id")
+
+            try:
+                ann_user_id = int(ann_user_id) if ann_user_id not in (None, "") else None
+            except (TypeError, ValueError):
+                ann_user_id = None
+
+            try:
+                ann_position_id = int(ann_position_id) if ann_position_id not in (None, "") else None
+            except (TypeError, ValueError):
+                ann_position_id = None
+
+            if actor_user_id is not None and ann_user_id == actor_user_id:
+                current_actor_has_annotations = True
+                break
+
+            if actor_position_id is not None and ann_position_id == actor_position_id:
+                current_actor_has_annotations = True
+                break
+
+        return jsonify(
+            {
+                "annotations": annotations,
+                "has_annotations": len(annotations) > 0,
+                "current_actor_has_annotations": current_actor_has_annotations,
+            }
+        )
     finally:
         cur.close()
         conn.close()
@@ -2774,12 +2819,43 @@ def save_annotations(request_id):
     data = request.get_json() or {}
     annotations = data.get("annotations") or []
 
+    actor_user_id = session.get("user_id")
+    actor_position_id = session.get("position_id")
+    actor_email = (session.get("email") or "").strip().lower() or None
+
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    try:
+        actor_position_id = int(actor_position_id) if actor_position_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_position_id = None
+
     if not isinstance(annotations, list):
         return jsonify({"error": "Invalid annotations"}), 400
 
     #  limit count for safety
     if len(annotations) > 200:
         return jsonify({"error": "Too many items"}), 400
+
+    normalized_annotations = []
+    for item in annotations:
+        if not isinstance(item, dict):
+            continue
+
+        ann = dict(item)
+        if ann.get("actor_user_id") in (None, ""):
+            ann["actor_user_id"] = actor_user_id
+        if ann.get("actor_position_id") in (None, ""):
+            ann["actor_position_id"] = actor_position_id
+        if ann.get("actor_email") in (None, ""):
+            ann["actor_email"] = actor_email
+
+        normalized_annotations.append(ann)
+
+    annotations = normalized_annotations
 
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
@@ -2883,10 +2959,13 @@ def annotate_page(request_id):
                 r.user_id,
                 r.stage_position_id,
                 r.filename,
-                a.signed_pdf
+                a.signed_pdf,
+                s.status_name
             FROM requests r
             LEFT JOIN request_annotations a 
                 ON a.request_id = r.request_id
+            LEFT JOIN request_status s
+                ON s.status_id = r.status_id
             WHERE r.request_id=%s
         """, (request_id,))
         row = cur.fetchone()
@@ -2910,11 +2989,41 @@ def annotate_page(request_id):
         if not allowed:
             return "Access Denied", 403
 
+        current_stage = row.get("stage_position_id")
+        try:
+            current_stage = int(current_stage) if current_stage is not None else None
+        except (TypeError, ValueError):
+            current_stage = None
+
+        actor_position = None
+        try:
+            actor_position = int(position_id) if position_id not in (None, "") else None
+        except (TypeError, ValueError):
+            actor_position = None
+
+        status_name = str(row.get("status_name") or "").strip().upper()
+        locked_final_statuses = {"REJECTED", "COMPLETED", "PENDING_USER"}
+        is_current_stage_actor = (
+            current_stage is not None and actor_position is not None and current_stage == actor_position
+        )
+
+        # Important: keep finalized requests read-only, but allow the currently
+        # assigned next reviewer/approver to continue signing even if a prior
+        # stage already produced signed_pdf.
+        if status_name in locked_final_statuses:
+            is_signed = True
+        elif is_current_stage_actor:
+            is_signed = False
+        elif row.get("user_id") == user_id:
+            is_signed = True
+        else:
+            is_signed = bool(row.get("signed_pdf"))
+
         return render_template(
             "annotate.html",
             request_id=request_id,
             filename=row.get("filename"),
-            is_signed=bool(row.get("signed_pdf"))
+            is_signed=is_signed
         )
     finally:
         cur.close()
@@ -3234,18 +3343,27 @@ def it_dashboard():
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT COUNT(*) as count FROM users")
+        ensure_user_account_control_schema(cursor, conn)
+
+        cursor.execute("SELECT COUNT(*) as count FROM users WHERE COALESCE(is_deleted, 0) = 0")
         result = cursor.fetchone()
         total_users = result["count"] if result else 0
         new_users_count = 5
 
         query_users = """
-            SELECT u.user_id, u.email, d.dept_name, r.role_name, p.position_name
+            SELECT
+                u.user_id,
+                u.email,
+                d.dept_name,
+                r.role_name,
+                p.position_name,
+                COALESCE(u.is_banned, 0) AS is_banned,
+                COALESCE(u.is_deleted, 0) AS is_deleted
             FROM users u
-            JOIN departments d ON u.dept_id = d.dept_id
-            JOIN roles r ON u.role_id = r.role_id
-            JOIN positions p ON u.position_id = p.position_id
-            ORDER BY u.user_id DESC LIMIT 20
+            LEFT JOIN departments d ON u.dept_id = d.dept_id
+            LEFT JOIN roles r ON u.role_id = r.role_id
+            LEFT JOIN positions p ON u.position_id = p.position_id
+            ORDER BY u.user_id DESC
         """
         cursor.execute(query_users)
         users = cursor.fetchall()
@@ -3284,7 +3402,9 @@ def get_it_stats():
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT COUNT(*) as count FROM users")
+        ensure_user_account_control_schema(cursor, conn)
+
+        cursor.execute("SELECT COUNT(*) as count FROM users WHERE COALESCE(is_deleted, 0) = 0")
         total_users = cursor.fetchone()["count"]
 
         cursor.execute("SELECT COUNT(*) as count FROM departments")
@@ -3313,10 +3433,22 @@ def get_all_users_for_admin():
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_user_account_control_schema(cursor, conn)
+
         cursor.execute(
             """
-            SELECT u.user_id, u.email, u.full_name, u.role, u.position_id, p.position_name, u.dept_id, d.dept_name
+            SELECT
+                u.user_id,
+                u.email,
+                u.position_id,
+                p.position_name,
+                u.dept_id,
+                d.dept_name,
+                r.role_name,
+                COALESCE(u.is_banned, 0) AS is_banned,
+                COALESCE(u.is_deleted, 0) AS is_deleted
             FROM users u
+            LEFT JOIN roles r ON r.role_id = u.role_id
             LEFT JOIN positions p ON p.position_id = u.position_id
             LEFT JOIN departments d ON d.dept_id = u.dept_id
             ORDER BY u.user_id DESC
@@ -4007,6 +4139,140 @@ def update_user_role():
         cursor.close()
         conn.close()
 
+
+@app.route("/it/user/<int:user_id>/ban", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
+def it_ban_user(user_id):
+    action = (request.form.get("action") or "ban").strip().lower()
+    if action not in {"ban", "unban"}:
+        flash("Invalid account action.", "danger")
+        return redirect(url_for("it_dashboard"))
+
+    ban_value = 1 if action == "ban" else 0
+
+    actor_user_id = int(session.get("user_id") or 0)
+    if actor_user_id == user_id and ban_value == 1:
+        flash("You cannot ban your own account.", "danger")
+        return redirect(url_for("it_dashboard"))
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_user_account_control_schema(cursor, conn)
+
+        cursor.execute(
+            """
+            SELECT user_id, email, COALESCE(is_banned, 0) AS is_banned, COALESCE(is_deleted, 0) AS is_deleted
+            FROM users
+            WHERE user_id=%s
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        target = cursor.fetchone()
+        if not target:
+            flash("User account not found.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        if int(target.get("is_deleted") or 0) == 1:
+            flash("Cannot change ban status of a deleted account.", "warning")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "UPDATE users SET is_banned=%s WHERE user_id=%s",
+            (ban_value, user_id),
+        )
+
+        title = "Account Banned" if ban_value == 1 else "Account Unbanned"
+        verb = "banned" if ban_value == 1 else "unbanned"
+        cursor.execute(
+            "INSERT INTO activity_logs (title, description) VALUES (%s, %s)",
+            (
+                title,
+                f"{session.get('email')} {verb} account {target.get('email')} (user_id={user_id}).",
+            ),
+        )
+
+        conn.commit()
+        flash(f"Account {verb} successfully.", "success")
+    except Exception:
+        conn.rollback()
+        logger.exception("it_ban_user failed")
+        flash("Failed to update account status.", "danger")
+    finally:
+        cursor.close()
+        conn.close()
+
+    return redirect(url_for("it_dashboard"))
+
+
+@app.route("/it/user/<int:user_id>/delete", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
+def it_delete_user(user_id):
+    actor_user_id = int(session.get("user_id") or 0)
+    if actor_user_id == user_id:
+        flash("You cannot delete your own account.", "danger")
+        return redirect(url_for("it_dashboard"))
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_user_account_control_schema(cursor, conn)
+
+        cursor.execute(
+            """
+            SELECT user_id, email, COALESCE(is_deleted, 0) AS is_deleted
+            FROM users
+            WHERE user_id=%s
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        target = cursor.fetchone()
+        if not target:
+            flash("User account not found.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        if int(target.get("is_deleted") or 0) == 1:
+            flash("Account is already deleted.", "warning")
+            return redirect(url_for("it_dashboard"))
+
+        tombstone_email = f"deleted+{user_id}+{int(time.time())}@deleted.local"
+
+        cursor.execute(
+            """
+            UPDATE users
+            SET is_deleted = 1,
+                is_banned = 1,
+                deleted_at = NOW(),
+                email = %s
+            WHERE user_id = %s
+            """,
+            (tombstone_email, user_id),
+        )
+
+        cursor.execute(
+            "INSERT INTO activity_logs (title, description) VALUES (%s, %s)",
+            (
+                "Account Deleted",
+                f"{session.get('email')} deleted account {target.get('email')} (user_id={user_id}).",
+            ),
+        )
+
+        conn.commit()
+        flash("Account deleted successfully.", "success")
+    except Exception:
+        conn.rollback()
+        logger.exception("it_delete_user failed")
+        flash("Failed to delete account.", "danger")
+    finally:
+        cursor.close()
+        conn.close()
+
+    return redirect(url_for("it_dashboard"))
+
 @app.route("/create_user", methods=["POST"])
 @login_required
 @role_required("IT", "SuperAdmin")
@@ -4542,32 +4808,18 @@ def cc_completed_request(request_id):
     if len(to_emails) == 0:
         return jsonify({"error": "Select at least one recipient"})
 
+    # allow any domain as long as email format is valid
+    email_pattern = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+    invalid_emails = [e for e in to_emails if not email_pattern.match(e)]
+    if invalid_emails:
+        return jsonify({"error": f"Invalid recipient email(s): {', '.join(invalid_emails)}"}), 400
+
+    if len(to_emails) > 100:
+        return jsonify({"error": "Too many recipients. Maximum is 100."}), 400
+
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        # allow only Admin/AssistantAdmin recipients
-        placeholders = ",".join(["%s"] * len(to_emails))
-        cursor.execute(
-            f"""
-            SELECT LOWER(u.email) AS email
-            FROM users u
-            JOIN roles r ON u.role_id = r.role_id
-            WHERE LOWER(u.email) IN ({placeholders})
-              AND r.role_name IN ('Admin','AssistantAdmin','SuperAdmin')
-            """,
-            tuple(to_emails),
-        )
-        allowed_rows = cursor.fetchall()
-        allowed_set = set([row["email"] for row in allowed_rows])
-
-        not_allowed = [e for e in to_emails if e not in allowed_set]
-        if not_allowed:
-            return (
-                jsonify(
-                    {"error": f"Not allowed recipient(s): {', '.join(not_allowed)}"}
-                ),
-                400,
-            )
 
         # fetch request + attachment blob
         cursor.execute(
@@ -4576,6 +4828,7 @@ def cc_completed_request(request_id):
                 r.request_id,
                 r.filename,
                 r.attachment,
+                a.signed_pdf,
                 r.created_at,
                 rs.status_name,
                 r.stage_position_id,
@@ -4587,6 +4840,7 @@ def cc_completed_request(request_id):
             LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
             JOIN users u ON r.user_id = u.user_id
             LEFT JOIN departments d ON u.dept_id = d.dept_id
+            LEFT JOIN request_annotations a ON a.request_id = r.request_id
             WHERE r.request_id = %s
             LIMIT 1
         """,
@@ -4602,7 +4856,9 @@ def cc_completed_request(request_id):
         ] is not None:
             return jsonify({"error": "CC allowed only for completed APPROVED requests"})
 
-        if not req.get("attachment"):
+        # Prefer annotated/signed PDF when available; fallback to original upload.
+        attachment_blob = req.get("signed_pdf") or req.get("attachment")
+        if not attachment_blob:
             return jsonify({"error": "This request has no uploaded attachment"})
 
         subject = f"CC: Completed Approved Request REQ#{req['request_id']}"
@@ -4629,7 +4885,7 @@ def cc_completed_request(request_id):
                 subject=subject,
                 body=body,
                 filename=req.get("filename") or f"request_{request_id}_attachment",
-                file_blob=req["attachment"],
+                file_blob=attachment_blob,
             )
             (sent if ok else failed).append(email)
 
@@ -4864,9 +5120,11 @@ def signup():
                 "INSERT INTO users (email, password, dept_id, role_id, position_id) VALUES (%s,%s,%s,%s,%s)",
                 (e, hp, dept_id, role_id, position_id),
             )
+            created_user_id = cursor.lastrowid
             conn.commit()
 
             session["email"] = e
+            session["user_id"] = created_user_id
             session["dept"] = dept_name
             session["role"] = "User"
             session["position"] = "None"
@@ -4899,10 +5157,14 @@ def login():
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
+            ensure_user_account_control_schema(cursor, conn)
+
             cursor.execute(
                 """
                 SELECT u.user_id, u.email, u.password, r.role_name, 
-                p.position_name, p.position_id, d.dept_name
+                p.position_name, p.position_id, d.dept_name,
+                COALESCE(u.is_banned, 0) AS is_banned,
+                COALESCE(u.is_deleted, 0) AS is_deleted
                 FROM users u
                 JOIN roles r ON u.role_id = r.role_id
                 JOIN positions p ON u.position_id = p.position_id
@@ -4912,6 +5174,12 @@ def login():
                 (e,),
             )
             user = cursor.fetchone()
+
+            if user and int(user.get("is_deleted") or 0) == 1:
+                return render_template("login.html", message="Account has been deleted. Please contact IT.")
+
+            if user and int(user.get("is_banned") or 0) == 1:
+                return render_template("login.html", message="Account is banned. Please contact IT.")
 
             if user and verify_user_password(user["password"], password):
                 if needs_password_rehash(user.get("password")):

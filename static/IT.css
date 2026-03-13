@@ -293,6 +293,90 @@ tr:hover {
   filter: brightness(0.97);
 }
 
+.actions-cell {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.inline-action-form {
+  display: inline;
+}
+
+.btn-action {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.icon-action-btn {
+  border: none;
+  border-radius: 8px;
+  min-width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.state-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+  font-size: 14px;
+  vertical-align: middle;
+}
+
+.state-icon.banned {
+  color: #92400e;
+}
+
+.state-icon.deleted {
+  color: #991b1b;
+}
+
+.btn-ban {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.btn-unban {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.btn-delete {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.badge-active {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.badge-banned {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.badge-deleted {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.text-muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* NOTIFICATIONS */
 
 .notification-list {
@@ -443,6 +527,7 @@ tr:hover {
 
 .table-container {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 table {

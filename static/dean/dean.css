@@ -1,34 +1,3 @@
-:root {
-    /* Color Palette */
-    --primary-blue: #2563eb;
-    --primary-blue-light: #eff6ff;
-
-    --bg-body: #f9fafb;
-    --bg-white: #ffffff;
-
-    --text-dark: #111827;
-    --text-gray: #4b5563;
-    --text-light: #6b7280;
-    --text-white: #ffffff;
-
-    --border-color: #e5e7eb;
-
-    /* Status Colors */
-    --success-bg: #dcfce7;
-    --success-text: #15803d;
-    --warning-bg: #fef9c3;
-    --warning-text: #a16207;
-    --danger-bg: #fee2e2;
-    --danger-text: #b91c1c;
-    --neutral-bg: #f3f4f6;
-    --neutral-text: #6b7280;
-
-    /* Role Badge Colors */
-    --role-approver-bg: #dbeafe;
-    --role-approver-text: #2563eb;
-    --role-reviewer-bg: #f3e8ff;
-    --role-reviewer-text: #9333ea;
-}
 
 * {
     box-sizing: border-box;

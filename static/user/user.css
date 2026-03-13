@@ -9,7 +9,7 @@
   --bg: #f8fafc;
   --surface: #ffffff;
   --text: #1e293b;
-  --text-muted: #64748b;
+  --text-muted: #1e293b;
   --border: #e2e8f0;
 }
 
@@ -434,7 +434,9 @@ body {
   border: 1px solid var(--border);
   border-radius: 0.75rem;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
 }
 
 .table-controls {
@@ -527,6 +529,18 @@ body {
 
 .table-container {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.requests-table-wrapper table,
+.table-container table,
+#section-history table {
+  min-width: 760px;
+}
+
+#section-history {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 table {

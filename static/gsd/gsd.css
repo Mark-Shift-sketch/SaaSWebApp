@@ -1,5 +1,6 @@
 #shipmentTable {
   width: 100%;
+  min-width: 980px;
   border-collapse: collapse;
   background: #fff;
   font-size: 13px;
@@ -26,6 +27,12 @@
 
 #sendModal .table-wrapper {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+#sendCopyModal .table-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Inputs inside table cells */
@@ -220,6 +227,7 @@
 /* Send Copy table - normal grid */
 #sendCopyTable {
   width: 100%;
+  min-width: 980px;
   border-collapse: collapse;
   background: #fff;
   font-size: 13px;

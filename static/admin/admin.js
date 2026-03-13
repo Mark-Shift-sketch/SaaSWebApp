@@ -191,6 +191,53 @@ window.addEventListener("load", () => {
 
 // Table filtering
 
+function parseRequestTimestamp(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return 0;
+
+  const direct = Date.parse(text);
+  if (Number.isFinite(direct)) return direct;
+
+  const normalized = Date.parse(text.replace(" ", "T"));
+  return Number.isFinite(normalized) ? normalized : 0;
+}
+
+function parseRequestIdValue(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function compareRequestRecordsAsc(a, b) {
+  const tsA = parseRequestTimestamp(a?.created_at);
+  const tsB = parseRequestTimestamp(b?.created_at);
+  if (tsA !== tsB) return tsA - tsB;
+
+  return parseRequestIdValue(a?.request_id) - parseRequestIdValue(b?.request_id);
+}
+
+function sortRequestRowsAsc(tbody) {
+  if (!tbody) return;
+
+  const rows = Array.from(tbody.querySelectorAll("tr.request-row"));
+  if (rows.length <= 1) return;
+
+  rows.sort((a, b) => {
+    const tsA = parseRequestTimestamp(a.dataset.createdAt);
+    const tsB = parseRequestTimestamp(b.dataset.createdAt);
+    if (tsA !== tsB) return tsA - tsB;
+
+    const idA = parseRequestIdValue(
+      a.dataset.requestId || (a.querySelector("td")?.textContent || "").replace(/[^0-9]/g, "")
+    );
+    const idB = parseRequestIdValue(
+      b.dataset.requestId || (b.querySelector("td")?.textContent || "").replace(/[^0-9]/g, "")
+    );
+    return idA - idB;
+  });
+
+  rows.forEach((row) => tbody.appendChild(row));
+}
+
 function filterTable() {
   const q = (document.getElementById("search-input")?.value || "")
     .toLowerCase()
@@ -202,6 +249,8 @@ function filterTable() {
 
   const tbody = document.getElementById("requests-table-body");
   if (!tbody) return;
+
+  sortRequestRowsAsc(tbody);
 
   const rows = tbody.querySelectorAll("tr.request-row");
   let visible = 0;
@@ -242,12 +291,12 @@ function renderAdminRequestRows(requests) {
   const tbody = document.getElementById("requests-table-body");
   if (!tbody) return;
 
-  const rows = Array.isArray(requests) ? requests : [];
+  const rows = (Array.isArray(requests) ? requests : []).slice().sort(compareRequestRecordsAsc);
 
   if (rows.length === 0) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="9" style="text-align: center; color: #6b7280; padding: 20px">
+        <td colspan="9" style="text-align: center; color: #000000; padding: 20px">
           No requests found.
         </td>
       </tr>
@@ -264,6 +313,8 @@ function renderAdminRequestRows(requests) {
     .map((req) => {
       const requestIdRaw = req.request_id;
       const requestId = escapeHtml(requestIdRaw);
+      const createdAtRaw = req.created_at || "";
+      const createdAtEscaped = escapeHtml(createdAtRaw);
       const email = escapeHtml(req.email || "-");
       const dept = escapeHtml(req.dept_name || "-");
       const typeName = escapeHtml(req.type_name || "-");
@@ -376,14 +427,14 @@ function renderAdminRequestRows(requests) {
         : `<span class="amount-value">${amountEscaped}</span>`;
 
       return `
-        <tr class="request-row" data-status="${statusData}">
-          <td>REQ#${requestId}</td>
+        <tr class="request-row" data-status="${statusData}" data-request-id="${requestId}" data-created-at="${createdAtEscaped}">
+          <td class="request-id-cell">REQ#${requestId}</td>
           <td>
             <div class="user-info-cell">
               <span class="user-email">${email}</span>
             </div>
           </td>
-          <td>${dept}</td>
+          <td class="dept-cell">${dept}</td>
           <td><span class="type-badge">${typeName}</span></td>
           <td>${attachmentHtml}</td>
           
@@ -457,6 +508,51 @@ function showQuickStatus(message, kind = "info") {
   node.style.display = "block";
   setTimeout(() => {
     if (node) node.style.display = "none";
+  }, 3000);
+}
+
+let __userStyleToastTimer = null;
+
+function showUserStyleToast(title, message, type = "info") {
+  let toast = document.getElementById("toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "toast";
+    toast.className = "toast";
+    toast.innerHTML = `
+      <div id="toast-icon"></div>
+      <div>
+        <p id="toast-title" class="toast-title"></p>
+        <p id="toast-message" class="toast-message"></p>
+      </div>
+    `;
+    document.body.appendChild(toast);
+  }
+
+  const titleEl = document.getElementById("toast-title");
+  const messageEl = document.getElementById("toast-message");
+
+  const palette = {
+    success: { border: "#16a34a", title: "#166534" },
+    error: { border: "#dc2626", title: "#991b1b" },
+    warning: { border: "#d97706", title: "#92400e" },
+    info: { border: "#2563eb", title: "#1e40af" },
+  };
+
+  const selected = palette[type] || palette.info;
+
+  if (titleEl) {
+    titleEl.textContent = title || "Status";
+    titleEl.style.color = selected.title;
+  }
+  if (messageEl) messageEl.textContent = message || "";
+
+  toast.style.borderLeft = `4px solid ${selected.border}`;
+  toast.className = "toast show";
+
+  if (__userStyleToastTimer) clearTimeout(__userStyleToastTimer);
+  __userStyleToastTimer = setTimeout(() => {
+    toast.classList.remove("show");
   }, 3000);
 }
 
@@ -563,6 +659,10 @@ async function requestHasSavedAnnotations(requestId) {
     if (!response.ok) return false;
 
     const data = await response.json().catch(() => ({}));
+    if (typeof data.current_actor_has_annotations === "boolean") {
+      return data.current_actor_has_annotations;
+    }
+
     const annotations = Array.isArray(data.annotations) ? data.annotations : [];
     return annotations.length > 0;
   } catch (err) {
@@ -620,17 +720,12 @@ async function updateStatus(requestId, status, message = "", hasAnnotation = fal
         }
       }
 
-      openSysPopup(
-        "Approved",
-        approvedMsg,
-        true,
-        { hideButtons: true, autoCloseMs: 3000 }
-      );
+      showUserStyleToast("System Status", approvedMsg, "success");
       return;
     }
 
     if ((status || "").toLowerCase() === "rejected") {
-      openSysPopup("Rejected", `Request ${rid} has been rejected.`, true);
+      showUserStyleToast("System Status", `Request ${rid} has been rejected.`, "error");
       return;
     }
 
@@ -732,9 +827,9 @@ async function sendBackRequest(requestId) {
   }
 }
 
-// =====================
+
 // CC Helpers + Send
-// =====================
+
 function splitEmails(raw) {
   return (raw || "")
     .split(/[\s,;]+/g)
@@ -803,9 +898,9 @@ async function sendCC() {
   }
 }
 
-// =====================
+
 // CC Modal Controls
-// =====================
+
 function openCCModal(requestId) {
   document.getElementById("cc_request_id").value = requestId;
   document.getElementById("ccModal").style.display = "flex";
@@ -824,9 +919,9 @@ function closeCCModal() {
   if (sel) Array.from(sel.options).forEach((o) => (o.selected = false));
 }
 
-// =====================
+
 // Edit Request Type Modal
-// =====================
+
 const __requestTypeSelectionOrder = new WeakMap();
 
 function _normalizeIdList(raw) {
@@ -1993,7 +2088,7 @@ async function adminMarkCompleted(requestId, btnEl) {
       throw new Error(data.error || "Failed to complete request.");
     }
 
-    openSysPopup("Success", data.message || "Completed!", false, { hideButtons: true, autoCloseMs: 3000 });
+    showUserStyleToast("Success", data.message || "Completed!", "success");
   } catch (err) {
     openSysPopup("Error", err.message || "Failed to complete request.", false);
     if (btnEl) btnEl.disabled = false;

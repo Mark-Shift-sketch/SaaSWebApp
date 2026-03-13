@@ -109,6 +109,7 @@
                 <th>Department</th>
                 <th>Role</th>
                 <th>Position</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -120,11 +121,62 @@
                 <td>{{ user.role_name }}</td>
                 <td>
                   <span class="badge">{{ user.position_name }}</span>
+                  {% if user.is_deleted %}
+                  <span class="state-icon deleted" title="Deleted">&#128465;</span>
+                  {% elif user.is_banned %}
+                  <span class="state-icon banned" title="Banned">&#128683;</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <div class="actions-cell">
+                    {% if user.is_deleted %}
+                    <span class="text-muted">Deleted</span>
+                    {% else %}
+                    <form
+                      action="{{ url_for('it_ban_user', user_id=user.user_id) }}"
+                      method="POST"
+                      class="inline-action-form"
+                      onsubmit="return confirmBanAction('{{ user.email }}', '{{ 'unban' if user.is_banned else 'ban' }}')"
+                    >
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                      <input type="hidden" name="action" value="{{ 'unban' if user.is_banned else 'ban' }}" />
+                      <button
+                        type="submit"
+                        class="icon-action-btn {{ 'btn-unban' if user.is_banned else 'btn-ban' }}"
+                        title="{{ 'Unban account' if user.is_banned else 'Ban account' }}"
+                        aria-label="{{ 'Unban account' if user.is_banned else 'Ban account' }}"
+                      >
+                        {% if user.is_banned %}
+                        &#9989;
+                        {% else %}
+                        &#128683;
+                        {% endif %}
+                      </button>
+                    </form>
+
+                    <form
+                      action="{{ url_for('it_delete_user', user_id=user.user_id) }}"
+                      method="POST"
+                      class="inline-action-form"
+                      onsubmit="return confirmDeleteAction('{{ user.email }}')"
+                    >
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                      <button
+                        type="submit"
+                        class="icon-action-btn btn-delete"
+                        title="Delete account"
+                        aria-label="Delete account"
+                      >
+                        &#128465;
+                      </button>
+                    </form>
+                    {% endif %}
+                  </div>
                 </td>
               </tr>
               {% else %}
               <tr>
-                <td colspan="5" style="text-align: center">
+                <td colspan="6" style="text-align: center">
                   No users found in database.
                 </td>
               </tr>
@@ -253,6 +305,100 @@
             </form>
           </div>
         </div>
+
+        <div class="table-container">
+          <div class="table-header">
+            <h3>User Management</h3>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>User ID</th>
+                <th>Email</th>
+                <th>Department</th>
+                <th>Role</th>
+                <th>Position</th>
+                <th>Action</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for user in users %}
+              <tr>
+                <td>#IT-{{ user.user_id }}</td>
+                <td>{{ user.email }}</td>
+                <td>{{ user.dept_name or '-' }}</td>
+                <td>{{ user.role_name or '-' }}</td>
+                <td>
+                  {{ user.position_name or '-' }}
+                  {% if user.is_deleted %}
+                  <span class="state-icon deleted" title="Deleted">&#128465;</span>
+                  {% elif user.is_banned %}
+                  <span class="state-icon banned" title="Banned">&#128683;</span>
+                  {% endif %}
+                </td>
+                <td class="actions-cell">
+                  {% if user.is_deleted %}
+                  <span class="text-muted">&#128465;</span>
+                  {% else %}
+                  <form
+                    action="{{ url_for('it_ban_user', user_id=user.user_id) }}"
+                    method="POST"
+                    class="inline-action-form"
+                    onsubmit="return confirmBanAction('{{ user.email }}', '{{ 'unban' if user.is_banned else 'ban' }}')"
+                  >
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                    <input type="hidden" name="action" value="{{ 'unban' if user.is_banned else 'ban' }}" />
+                    <button
+                      type="submit"
+                      class="icon-action-btn {{ 'btn-unban' if user.is_banned else 'btn-ban' }}"
+                      title="{{ 'Unban account' if user.is_banned else 'Ban account' }}"
+                      aria-label="{{ 'Unban account' if user.is_banned else 'Ban account' }}"
+                    >
+                      {% if user.is_banned %}
+                      &#9989;
+                      {% else %}
+                      &#128683;
+                      {% endif %}
+                    </button>
+                  </form>
+
+                  <form
+                    action="{{ url_for('it_delete_user', user_id=user.user_id) }}"
+                    method="POST"
+                    class="inline-action-form"
+                    onsubmit="return confirmDeleteAction('{{ user.email }}')"
+                  >
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                    <button
+                      type="submit"
+                      class="icon-action-btn btn-delete"
+                      title="Delete account"
+                      aria-label="Delete account"
+                    >
+                      &#128465;
+                    </button>
+                  </form>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if user.is_deleted %}
+                  <span class="badge badge-deleted">Deleted</span>
+                  {% elif user.is_banned %}
+                  <span class="badge badge-banned">Banned</span>
+                  {% else %}
+                  <span class="badge badge-active">Active</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% else %}
+              <tr>
+                <td colspan="7" style="text-align: center">No users found.</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div id="notification" class="tab-content">
@@ -292,6 +438,17 @@
         });
         document.getElementById(tabId).classList.add("active-content");
         document.getElementById("link-" + tabId).classList.add("active");
+      }
+
+      function confirmBanAction(email, action) {
+        const verb = action === "unban" ? "unban" : "ban";
+        return window.confirm(`Are you sure you want to ${verb} account ${email}?`);
+      }
+
+      function confirmDeleteAction(email) {
+        return window.confirm(
+          `Are you sure you want to delete account ${email}? This cannot be undone.`
+        );
       }
     </script>
   </body>

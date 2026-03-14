@@ -624,22 +624,22 @@ def home():
     position = session.get("position").strip()
     
     if dept == "GSD" and role in ["AssistantAdmin", "Admin"]:
-        flash("Login successful", "success")
+        flash("Login Successful", "success")
         return redirect("/gsd_dashboard")
 
     elif role in ["Dean", "Reviewer"]:
-        flash("Login successful", "success")
+        flash("Login Successful", "success")
         return redirect("/dean")
 
     elif role in ["Admin", "AssistantAdmin", "SuperAdmin"]:
-        flash("Login successful", "success")
+        flash("Login Successful", "success")
         return redirect("/admin")
 
     elif role == "IT":
-        flash("Login successful", "success")
+        flash("Login Successful", "success")
         return redirect("/IT")
     else:
-        flash("Login successful", "success")
+        flash("Login Successful", "success")
         return redirect("/udashboard")
 
 
@@ -781,7 +781,8 @@ def dean_dashboard():
 def udashboard():
     if "email" not in session:
         return redirect(url_for("login"))
-
+    if (session.get("role") or "").strip() not in ["User"]:
+        return "Forbidden", 403
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     user_id = get_user_id(session["email"])
@@ -1170,6 +1171,11 @@ def gsdh_dashboard():
     if "email" not in session:
         return redirect(url_for("login"))
 
+    dept = (session.get("dept") or "").strip()
+    role = (session.get("role") or "").strip()
+    if not (dept == "GSD" and role in ["Admin", "AssistantAdmin"]):
+        return "Forbidden", 403
+
     position_id = session.get("position_id")
     if not position_id:
         return redirect("/")
@@ -1355,12 +1361,11 @@ def admin_dashboard():
     if "email" not in session:
         return redirect("/login")
 
-    role = session.get("role")
-    user_id = session.get("user_id")
     position_id = session.get("position_id")
-
-    if role not in ["Admin", "AssistantAdmin", "SuperAdmin"]:
-        return redirect("/")
+    dept = (session.get("dept") or "").strip()
+    role = (session.get("role") or "").strip()
+    if not (dept == "Finance" and role in ["Admin", "AssistantAdmin"]):
+        return "Forbidden", 403
 
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)

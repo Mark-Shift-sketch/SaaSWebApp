@@ -42,42 +42,41 @@ import random
 from threading import Thread
 from io import BytesIO, StringIO
 from flask import send_file
-from werkzeug.middleware.proxy_fix import ProxyFix
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_argon2_hasher = None
-_argon2_verify_mismatch_error = Exception
-_argon2_invalid_hash_error = Exception
+argon2_hasher = None
+argon2_verify_mismatch_error = Exception
+argon2_invalid_hash_error = Exception
 
 try:
-    _argon2_module = importlib.import_module("argon2")
-    _argon2_exceptions = importlib.import_module("argon2.exceptions")
-    _password_hasher_cls = getattr(_argon2_module, "PasswordHasher", None)
-    if _password_hasher_cls is not None:
-        _argon2_hasher = _password_hasher_cls()
-    _argon2_verify_mismatch_error = getattr(
-        _argon2_exceptions,
+    argon2_module = importlib.import_module("argon2")
+    argon2_exceptions = importlib.import_module("argon2.exceptions")
+    password_hasher_cls = getattr(argon2_module, "PasswordHasher", None)
+    if password_hasher_cls is not None:
+        argon2_hasher = password_hasher_cls()
+    argon2_verify_mismatch_error = getattr(
+        argon2_exceptions,
         "VerifyMismatchError",
         Exception,
     )
-    _argon2_invalid_hash_error = getattr(
-        _argon2_exceptions,
+    argon2_invalid_hash_error = getattr(
+        argon2_exceptions,
         "InvalidHashError",
         Exception,
     )
 except Exception:
-    _argon2_hasher = None
+    argon2_hasher = None
 
 
 def hash_user_password(raw_password):
-    if _argon2_hasher is None:
+    if argon2_hasher is None:
         raise RuntimeError(
             "argon2-cffi is required for password hashing. Install it with: python -m pip install argon2-cffi"
         )
-    return _argon2_hasher.hash(raw_password)
+    return argon2_hasher.hash(raw_password)
 
 
 def verify_user_password(stored_hash, candidate_password):
@@ -86,11 +85,11 @@ def verify_user_password(stored_hash, candidate_password):
         return False
 
     if stored_hash.startswith("$argon2id$"):
-        if _argon2_hasher is None:
+        if argon2_hasher is None:
             return False
         try:
-            return _argon2_hasher.verify(stored_hash, candidate_password)
-        except (_argon2_verify_mismatch_error, _argon2_invalid_hash_error):
+            return argon2_hasher.verify(stored_hash, candidate_password)
+        except (argon2_verify_mismatch_error, argon2_invalid_hash_error):
             return False
         except Exception:
             return False
@@ -102,7 +101,7 @@ def verify_user_password(stored_hash, candidate_password):
 
 
 def needs_password_rehash(stored_hash):
-    if _argon2_hasher is None:
+    if argon2_hasher is None:
         return False
 
     stored_hash = str(stored_hash or "")
@@ -113,7 +112,7 @@ def needs_password_rehash(stored_hash):
         return True
 
     try:
-        return _argon2_hasher.check_needs_rehash(stored_hash)
+        return argon2_hasher.check_needs_rehash(stored_hash)
     except Exception:
         return False
 
@@ -648,7 +647,7 @@ def dean_dashboard():
     if "email" not in session:
         return redirect(url_for("login"))
 
-    if (session.get("role") or "").strip() not in ["Dean", "Program Head", "Reviewer"]:
+    if (session.get("role") or "").strip() not in ["Dean", "Reviewer"]:
         return "Forbidden", 403
 
     position_id = session.get("position_id")
@@ -800,6 +799,7 @@ def udashboard():
             SELECT
                 r.request_id,
                 rt.type_name,
+                r.wfor,
                 r.filename,
                 s.status_name,
                 r.created_at
@@ -1088,6 +1088,7 @@ def api_user_dashboard():
                 r.request_type_id,
                 rt.type_name,
                 r.filename,
+                r.wfor,
                 s.status_name,
                 r.rejection_message,
                 COALESCE(p.position_name, '-') AS current_stage,
@@ -1454,6 +1455,7 @@ def admin_dashboard():
             SELECT
             r.request_id,
             r.request_type_id,
+            r.wfor,
             r.filename,
             r.created_at,
             r.amount,
@@ -1647,6 +1649,7 @@ def api_admin_live():
             SELECT
             r.request_id,
             r.request_type_id,
+            COALESCE(r.wfor, '') AS wfor,
             r.filename,
             r.created_at,
             r.amount,
@@ -2376,6 +2379,7 @@ def create_request():
         or request.form.get("amount")
         or ""
     ).strip()
+    wfor = (request.form.get("purpose") or request.form.get("wfor") or "").strip()
     file = request.files.get("file")
 
     if not amount_raw:
@@ -2459,11 +2463,47 @@ def create_request():
             flash(msg, "danger")
             return redirect(request.referrer or "/udashboard")
 
+        if not wfor:
+            try:
+                cursor.execute(
+                    """
+                    SELECT wfor
+                    FROM request_types
+                    WHERE request_type_id = %s
+                    LIMIT 1
+                    """,
+                    (request_type_id,),
+                )
+                request_type_row = cursor.fetchone() or {}
+                wfor = (request_type_row.get("wfor") or "").strip()
+            except Exception:
+                try:
+                    cursor.execute(
+                        """
+                        SELECT `for` AS wfor
+                        FROM request_types
+                        WHERE request_type_id = %s
+                        LIMIT 1
+                        """,
+                        (request_type_id,),
+                    )
+                    request_type_row = cursor.fetchone() or {}
+                    wfor = (request_type_row.get("wfor") or "").strip()
+                except Exception:
+                    wfor = ""
+
+        if not wfor:
+            msg = "Purpose is required."
+            if request.headers.get("X-Requested-With") == "fetch":
+                return jsonify({"success": False, "message": msg}), 400
+            flash(msg, "danger")
+            return redirect(request.referrer or "/udashboard")
+
         # Insert Request
         cursor.execute("""
-            INSERT INTO requests (user_id, request_type_id, filename, attachment, amount, status_id, stage_position_id)
-            VALUES (%s, %s, %s, %s, %s, 1, %s)
-        """, (user_id, request_type_id, filename, file_blob, amount, stage_position_id))
+            INSERT INTO requests (user_id, request_type_id, wfor, filename, attachment, amount, status_id, stage_position_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 1, %s)
+        """, (user_id, request_type_id, wfor, filename, file_blob, amount, stage_position_id))
 
         request_id = cursor.lastrowid
         conn.commit()
@@ -2901,8 +2941,18 @@ def save_annotations(request_id):
                 if not text:
                     continue
                 font = int(it.get("font") or 12)
+                w = float(it.get("w") or 0)
+                h = float(it.get("h") or 0)
                 text_items.append(
-                    {"page": page, "x": x, "y": y, "text": text, "font": font}
+                    {
+                        "page": page,
+                        "x": x,
+                        "y": y,
+                        "w": w,
+                        "h": h,
+                        "text": text,
+                        "font": font,
+                    }
                 )
 
             elif t == "image":
@@ -4431,6 +4481,7 @@ def api_requests():
                     SELECT 
                         r.request_id,
                         rt.type_name,
+                        r.wfor,
                         r.filename,
                         r.amount,
                         rs.status_name,
@@ -4472,6 +4523,7 @@ def api_requests():
                 or request.form.get("amount")
                 or ""
             ).strip()
+            wfor = (request.form.get("purpose") or request.form.get("wfor") or "").strip()
 
             if not amount_raw:
                 return jsonify({"error": "Amount is required"}), 400
@@ -4525,14 +4577,47 @@ def api_requests():
 
             status_id = status_row["status_id"]
 
+            if not wfor:
+                try:
+                    cursor.execute(
+                        """
+                        SELECT wfor
+                        FROM request_types
+                        WHERE request_type_id = %s
+                        LIMIT 1
+                        """,
+                        (req_type_id,),
+                    )
+                    request_type_row = cursor.fetchone() or {}
+                    wfor = (request_type_row.get("wfor") or "").strip()
+                except Exception:
+                    try:
+                        cursor.execute(
+                            """
+                            SELECT `for` AS wfor
+                            FROM request_types
+                            WHERE request_type_id = %s
+                            LIMIT 1
+                            """,
+                            (req_type_id,),
+                        )
+                        request_type_row = cursor.fetchone() or {}
+                        wfor = (request_type_row.get("wfor") or "").strip()
+                    except Exception:
+                        wfor = ""
+
+            if not wfor:
+                return jsonify({"error": "Purpose is required"}), 400
+
             cursor.execute(
                 """
-                INSERT INTO requests (request_type_id, user_id, filename, attachment, amount, status_id, stage_position_id, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                INSERT INTO requests (request_type_id, user_id, wfor, filename, attachment, amount, status_id, stage_position_id, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
             """,
                 (
                     req_type_id,
                     user_id,
+                    wfor,
                     filename,
                     file_data,
                     amount,
@@ -5706,7 +5791,25 @@ def make_overlay_pdf(
                 continue
             font = int(item.get("font", 10) or 10)
             c.setFont("Helvetica", font)
-            c.drawString(float(item["x"]), float(item["y"]), str(item.get("text", "")))
+
+            text = str(item.get("text", ""))
+            lines = text.splitlines() or [""]
+
+            box_h = float(item.get("h") or (font * 1.6))
+            pad_x = 3.0
+            pad_top = 2.0
+
+            # Align text near the top-left of the saved text box so PDF output
+            # matches what the user sees in the browser editor.
+            start_x = float(item["x"]) + pad_x
+            start_y = float(item["y"]) + max(font, box_h - font - pad_top)
+
+            text_obj = c.beginText()
+            text_obj.setTextOrigin(start_x, start_y)
+            text_obj.setLeading(max(10.0, font * 1.2))
+            for line in lines:
+                text_obj.textLine(line)
+            c.drawText(text_obj)
 
         for item in image_items or []:
             if int(item.get("page", -1)) != page_index:

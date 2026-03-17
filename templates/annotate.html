@@ -17,7 +17,7 @@
       .topbar {
         position: sticky;
         top: 0;
-        z-index: 50;
+        z-index: 6000;
         display: flex;
         gap: 10px;
         align-items: center;
@@ -134,11 +134,16 @@
         width: 100%;
         height: 100%;
         pointer-events: none;
-        z-index: 2000;
+        z-index: 5;
       }
       .draw-layer.active {
         pointer-events: auto;
         cursor: crosshair;
+      }
+
+      #drawControls {
+        position: relative;
+        z-index: 7000;
       }
 
       .toolbar-group {
@@ -464,30 +469,50 @@
       // Coordinate conversion
       // =========================
       function cssToPdf(pageIndex, cssX, cssY, cssW, cssH) {
-        const m = pageMeta[pageIndex];
-        const vh = m.viewportHeight;
-        const x = cssX / scale;
-        const y = (vh - cssY - cssH) / scale;
-        const w = cssW / scale;
-        const h = cssH / scale;
+        const m = pageMeta[pageIndex] || {};
+        const viewportWidth = Math.max(1, Number(m.viewportWidth) || 1);
+        const viewportHeight = Math.max(1, Number(m.viewportHeight) || 1);
+        const pdfWidth =
+          Number(m.pdfWidth) || viewportWidth / Math.max(0.0001, scale);
+        const pdfHeight =
+          Number(m.pdfHeight) || viewportHeight / Math.max(0.0001, scale);
+
+        const x = (cssX / viewportWidth) * pdfWidth;
+        const yTop = (cssY / viewportHeight) * pdfHeight;
+        const w = (cssW / viewportWidth) * pdfWidth;
+        const h = (cssH / viewportHeight) * pdfHeight;
+        const y = pdfHeight - yTop - h;
         return { x, y, w, h };
       }
 
       function pdfToCss(pageIndex, x, y, w, h) {
-        const m = pageMeta[pageIndex];
-        const vh = m.viewportHeight;
-        const cssX = x * scale;
-        const cssY = vh - y * scale - h * scale;
-        const cssW = w * scale;
-        const cssH = h * scale;
+        const m = pageMeta[pageIndex] || {};
+        const viewportWidth = Math.max(1, Number(m.viewportWidth) || 1);
+        const viewportHeight = Math.max(1, Number(m.viewportHeight) || 1);
+        const pdfWidth =
+          Number(m.pdfWidth) || viewportWidth / Math.max(0.0001, scale);
+        const pdfHeight =
+          Number(m.pdfHeight) || viewportHeight / Math.max(0.0001, scale);
+
+        const cssX = (x / pdfWidth) * viewportWidth;
+        const cssW = (w / pdfWidth) * viewportWidth;
+        const cssH = (h / pdfHeight) * viewportHeight;
+        const yTop = pdfHeight - y - h;
+        const cssY = (yTop / pdfHeight) * viewportHeight;
         return { cssX, cssY, cssW, cssH };
       }
 
       function createVisiblePlacement(pageIndex, wFrac = 0.25, hPx = 60) {
-        const meta = pageMeta[pageIndex];
-        const vw = meta?.viewportWidth || 595;
-        const vh = meta?.viewportHeight || 842;
-        return { x: vw * 0.2, y: vh * 0.25, w: vw * wFrac, h: hPx };
+        const meta = pageMeta[pageIndex] || {};
+        const viewportWidth = Math.max(1, Number(meta.viewportWidth) || 595);
+        const viewportHeight = Math.max(1, Number(meta.viewportHeight) || 842);
+        const pdfWidth =
+          Number(meta.pdfWidth) || viewportWidth / Math.max(0.0001, scale);
+        const pdfHeight =
+          Number(meta.pdfHeight) || viewportHeight / Math.max(0.0001, scale);
+
+        const h = (hPx / viewportHeight) * pdfHeight;
+        return { x: pdfWidth * 0.2, y: pdfHeight * 0.25, w: pdfWidth * wFrac, h };
       }
 
       // =========================
@@ -755,6 +780,7 @@
           for (let i = 1; i <= pdfDoc.numPages; i++) {
             const page = await pdfDoc.getPage(i);
             const viewport = page.getViewport({ scale });
+            const baseViewport = page.getViewport({ scale: 1 });
 
             const wrap = document.createElement("div");
             wrap.className = "page";
@@ -782,6 +808,8 @@
             pageMeta[i - 1] = {
               viewportWidth: viewport.width,
               viewportHeight: viewport.height,
+              pdfWidth: baseViewport.width,
+              pdfHeight: baseViewport.height,
             };
 
             await page.render({ canvasContext: ctx, viewport }).promise;

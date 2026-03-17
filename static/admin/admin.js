@@ -178,6 +178,10 @@ function switchView(viewName, pushUrl = true) {
   }
   if (viewName === "notifications") loadNotifications();
   if (viewName === "settings") loadProfile();
+
+  if (viewName === "dashboard" || viewName === "notifications") {
+    runAdminLiveSyncTick();
+  }
 }
 
 window.addEventListener("load", () => {
@@ -296,7 +300,7 @@ function renderAdminRequestRows(requests) {
   if (rows.length === 0) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="9" style="text-align: center; color: #000000; padding: 20px">
+        <td colspan="10" style="text-align: center; color: #000000; padding: 20px">
           No requests found.
         </td>
       </tr>
@@ -318,6 +322,7 @@ function renderAdminRequestRows(requests) {
       const email = escapeHtml(req.email || "-");
       const dept = escapeHtml(req.dept_name || "-");
       const typeName = escapeHtml(req.type_name || "-");
+      const wfor = escapeHtml(req.wfor || req.purpose || req["for"] || "-");
       const stageName = escapeHtml(req.stage_position_name || "-");
       const statusName = String(req.status_name || "").toUpperCase().trim();
       const amount = String(req.amount || "0").toUpperCase().trim();
@@ -436,6 +441,8 @@ function renderAdminRequestRows(requests) {
           </td>
           <td class="dept-cell">${dept}</td>
           <td><span class="type-badge">${typeName}</span></td>
+          <td><span class="type-badge">${wfor || '-'}</span></td>
+
           <td>${attachmentHtml}</td>
           
           <td>
@@ -2128,20 +2135,6 @@ function isAdminModalOpen() {
 function isAdminUserBusy() {
   if (document.hidden) return true;
   if (isAdminModalOpen()) return true;
-
-  const active = document.activeElement;
-  if (active) {
-    const tag = (active.tagName || "").toUpperCase();
-    if (
-      tag === "INPUT" ||
-      tag === "TEXTAREA" ||
-      tag === "SELECT" ||
-      active.isContentEditable
-    ) {
-      return true;
-    }
-  }
-
   return false;
 }
 

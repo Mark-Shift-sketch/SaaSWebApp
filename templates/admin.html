@@ -267,6 +267,7 @@
                     <th>Email</th>
                     <th>Department</th>
                     <th>Request Type</th>
+                    <th>For</th>
                     <th>Attachment</th>
                     <th>Status</th>
                     <th>Amount</th>
@@ -292,7 +293,7 @@
                     </td>
                     <td>{{ req.dept_name }}</td>
                     <td><span class="type-badge">{{ req.type_name }}</span></td>
-
+                    <td>{{ req.wfor}}</td>
                     <td>
                       {% if req.filename %}
                       <a

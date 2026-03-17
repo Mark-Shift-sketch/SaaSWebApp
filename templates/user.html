@@ -241,6 +241,7 @@
                     <tr>
                       <th>Req ID</th>
                       <th>Type</th>
+                      <th>For</th>
                       <th>File</th>
                       <th>Status</th>
                       <th>Current Stage</th>
@@ -248,7 +249,6 @@
                         Rejection Message
                       </th>
                       <th>Submitted On</th>
-                      <th class="text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody id="requests-table-body"></tbody>
@@ -369,7 +369,8 @@
             </select>
             <label>Total Amount</label>
             <input type="number" name="amount" id="modal-amount" required min="0" step="0.01"/>
-            
+            <label>Purpose</label>
+            <input type="text" name="purpose" id="modal-purpose" required />
           </div>
 
           <!-- TEMPLATE CONTROL BOX -->

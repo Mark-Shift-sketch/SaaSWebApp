@@ -160,20 +160,21 @@ function renderRequests(filter) {
         tr.innerHTML = `
         <td>${req.request_id}</td>
         <td class="font-medium">${req.type_name || '-'}</td>
+        <td>${req.wfor || '-'}</td>
         <td>${fileCell}</td>
         <td><span class="status-badge status-${(req.status_name || '').toLowerCase()}">${req.status_name || '-'}</span></td>
         <td>${req.current_stage_label || '-'}</td>
         ${filter === 'rejected' ? `<td>${req.rejection_message || '-'}</td>` : ''}
         <td>${new Date(req.created_at).toLocaleDateString()}</td>
         <td class="text-right">
-          ${(req.status_name || '').toLowerCase() === 'pending_user'
+            ${(req.status_name || '').toLowerCase() === 'pending_user'
                 ? `<button onclick="userComplete('${req.request_id}')" class="btn-link">
-                  Confirm Complete
-              </button>`
+                    Confirm Complete
+                </button>`
                 : `<span class="text-muted">-</span>`
             }
-          </td>
-      `;
+        </td>
+        `;
         tbody.appendChild(tr);
     });
 }

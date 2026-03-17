@@ -13,11 +13,13 @@ class Homepage extends StatelessWidget {
   }
 }
 
-enum RequestStatus { pending, approved, rejected }
+enum RequestStatus { pending, approved, rejected, completed }
 
 class RequestItem {
   final String reqId;
   final String fileName;
+  final String req_type;
+  final String p;
   final String currentApprover;
   final RequestStatus status;
   final DateTime date;
@@ -26,6 +28,8 @@ class RequestItem {
   RequestItem({
     required this.reqId,
     required this.fileName,
+    required this.req_type,
+    required this.p,
     required this.currentApprover,
     required this.status,
     required this.date,
@@ -331,11 +335,10 @@ class _DashboardPageState extends State<DashboardPage> {
           (r["status_name"] ?? "PENDING").toString().trim().toUpperCase();
 
       final RequestStatus status;
-      if (statusName == "APPROVED" ||
-          statusName == "COMPLETED" ||
-          statusName == "COMPLETE" ||
-          statusName == "DONE") {
+      if (statusName == "APPROVED") {
         status = RequestStatus.approved;
+      } else if (statusName == "COMPLETED" || statusName == "COMPLETE") {
+        status = RequestStatus.completed;
       } else if (statusName == "REJECTED") {
         status = RequestStatus.rejected;
       } else {
@@ -355,6 +358,12 @@ class _DashboardPageState extends State<DashboardPage> {
       return RequestItem(
         reqId: "REQ-${r["request_id"]}",
         fileName: (r["filename"] ?? "").toString(),
+        req_type: (r["type_name"] ?? "").toString(),
+        p: ((r["wfor"] ?? "").toString().trim().isNotEmpty
+          ? (r["wfor"] ?? "").toString()
+          : ((r["filename"] ?? "").toString().trim().isNotEmpty
+            ? (r["filename"] ?? "").toString()
+            : (r["type_name"] ?? "").toString())),
         currentApprover: normalizedStage,
         status: status,
         date: createdAt,
@@ -385,6 +394,9 @@ class _DashboardPageState extends State<DashboardPage> {
     if (_filter == "Rejected") {
       return all.where((r) => r.status == RequestStatus.rejected).toList();
     }
+    if (_filter == "Completed") {
+      return all.where((r) => r.status == RequestStatus.completed).toList();
+    }
     return all;
   }
 
@@ -396,11 +408,13 @@ class _DashboardPageState extends State<DashboardPage> {
         return Colors.red;
       case RequestStatus.pending:
         return Colors.orange;
+      case RequestStatus.completed:
+        return Colors.blue;
     }
   }
 
   String _getStageDisplay(RequestItem request) {
-    if (request.status == RequestStatus.approved) return "Request Complete";
+    if (request.status == RequestStatus.completed) return "Request Complete";
     return request.currentApprover;
   }
 
@@ -440,7 +454,7 @@ class _DashboardPageState extends State<DashboardPage> {
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
-              children: ["All", "Pending", "Approved", "Rejected"]
+              children: ["All", "Pending", "Approved", "Rejected", "Completed"]
                   .map((filterType) {
                 final isSelected = _filter == filterType;
                 return Padding(
@@ -544,7 +558,9 @@ class _DashboardPageState extends State<DashboardPage> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        request.fileName,
+                        request.req_type.trim().isNotEmpty
+                            ? request.req_type
+                            : request.fileName,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -631,7 +647,11 @@ class _DashboardPageState extends State<DashboardPage> {
                     const Icon(Icons.attach_file,
                         size: 18, color: Colors.grey),
                     const SizedBox(width: 4),
-                    Text(request.fileName),
+                    Text(
+                      request.req_type.trim().isNotEmpty
+                          ? request.req_type
+                          : request.fileName,
+                    ),
                   ],
                 )),
                 DataCell(_buildStatusBadge(request.status)),

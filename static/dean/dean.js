@@ -444,8 +444,9 @@ async function requestHasSavedAnnotations(requestId) {
 
 async function updateStatus(id, status, message = null) {
     const normalizedStatus = String(status || "").trim().toUpperCase();
+    const statusLabel = normalizedStatus === "APPROVED" ? "APPROVED" : normalizedStatus || "UPDATED";
 
-    let confirmMessage = `Mark request #${id} as ${normalizedStatus || "UPDATED"}?`;
+    let confirmMessage = `Mark request #${id} as ${statusLabel}?`;
     let confirmButtonLabel =
         normalizedStatus === "APPROVED" ? "Approve" : normalizedStatus === "REJECTED" ? "Reject" : "Confirm";
 
@@ -494,7 +495,7 @@ async function updateStatus(id, status, message = null) {
 
             if (backendMsg) {
                 if (backendLower.includes("fully approved") || backendLower.includes("completed")) {
-                    approvedMsg = `Request ${rid} has been fully approved and completed.`;
+                    approvedMsg = `Request ${rid} has been fully approved.`;
                 } else if (backendLower.includes("next stage") || backendLower.includes("next approver")) {
                     approvedMsg = `Request ${rid} has been approved and moved to the next approver.`;
                 } else {

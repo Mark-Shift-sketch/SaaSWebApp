@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>COO Secure Action</title>
+		<style>
+			:root {
+				--bg: #f6f8fb;
+				--card: #ffffff;
+				--text: #0f172a;
+				--muted: #64748b;
+				--primary: #0f766e;
+				--danger: #b91c1c;
+				--ok: #166534;
+				--border: #dbe3ef;
+			}
+
+			* {
+				box-sizing: border-box;
+			}
+
+			body {
+				margin: 0;
+				font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+				background: var(--bg);
+				color: var(--text);
+			}
+
+			.page {
+				max-width: 1200px;
+				margin: 0 auto;
+				padding: 20px;
+			}
+
+			.grid {
+				display: grid;
+				grid-template-columns: 320px 1fr;
+				gap: 14px;
+			}
+
+			.queue-list {
+				display: grid;
+				gap: 8px;
+				max-height: 70vh;
+				overflow: auto;
+				padding-right: 4px;
+			}
+
+			.queue-item {
+				display: block;
+				text-decoration: none;
+				color: inherit;
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 10px;
+				background: #fff;
+			}
+
+			.queue-item.active {
+				border-color: var(--primary);
+				box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14);
+			}
+
+			.queue-title {
+				display: flex;
+				justify-content: space-between;
+				gap: 8px;
+				font-weight: 600;
+			}
+
+			.badge {
+				display: inline-block;
+				border-radius: 999px;
+				padding: 2px 8px;
+				font-size: 12px;
+				font-weight: 600;
+			}
+
+			.badge.pending {
+				background: #fff7ed;
+				color: #9a3412;
+			}
+
+			.badge.approved {
+				background: #ecfdf3;
+				color: #166534;
+			}
+
+			.badge.rejected {
+				background: #fef2f2;
+				color: #b91c1c;
+			}
+
+			.card {
+				background: var(--card);
+				border: 1px solid var(--border);
+				border-radius: 14px;
+				padding: 14px;
+			}
+
+			h1 {
+				margin: 0 0 8px;
+				font-size: 24px;
+			}
+
+			.muted {
+				color: var(--muted);
+				font-size: 13px;
+			}
+
+			.summary-grid {
+				display: grid;
+				grid-template-columns: repeat(2, minmax(170px, 1fr));
+				gap: 10px;
+				margin-top: 10px;
+			}
+
+			.summary-box {
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 10px;
+				background: #fbfdff;
+			}
+
+			.summary-box .k {
+				color: var(--muted);
+				font-size: 12px;
+			}
+
+			.summary-box .v {
+				margin-top: 3px;
+				font-weight: 600;
+				word-break: break-word;
+			}
+
+			.approve-panel {
+				margin-top: 14px;
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				padding: 12px;
+				background: #f8fafc;
+			}
+
+			.approve-row {
+				display: grid;
+				grid-template-columns: 170px 1fr;
+				gap: 10px;
+				align-items: center;
+				margin-top: 8px;
+			}
+
+			.approve-row:first-of-type {
+				margin-top: 0;
+			}
+
+			.approve-row label {
+				color: var(--muted);
+			}
+
+			input,
+			select {
+				border: 1px solid #cbd5e1;
+				border-radius: 8px;
+				padding: 8px;
+				font-size: 14px;
+			}
+
+			.actions {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 8px;
+				margin-top: 12px;
+			}
+
+			.btn {
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 8px 11px;
+				background: #fff;
+				color: #0f172a;
+				cursor: pointer;
+			}
+
+			.btn-primary {
+				border-color: #0f766e;
+				background: #0f766e;
+				color: #fff;
+			}
+
+			.btn-danger {
+				border-color: #b91c1c;
+				background: #b91c1c;
+				color: #fff;
+			}
+
+			.notice {
+				margin-top: 8px;
+				padding: 8px;
+				border-radius: 8px;
+				font-size: 13px;
+				display: none;
+			}
+
+			.notice.ok {
+				background: #ecfdf3;
+				color: var(--ok);
+				border: 1px solid #bbf7d0;
+			}
+
+			.notice.err {
+				background: #fef2f2;
+				color: var(--danger);
+				border: 1px solid #fecaca;
+			}
+
+			.error-box {
+				border: 1px solid #fecaca;
+				background: #fff1f2;
+				color: #9f1239;
+				border-radius: 10px;
+				padding: 10px;
+			}
+
+			@media (max-width: 700px) {
+				.grid {
+					grid-template-columns: 1fr;
+				}
+				.summary-grid {
+					grid-template-columns: 1fr;
+				}
+				.approve-row {
+					grid-template-columns: 1fr;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<div class="page">
+			<div class="grid">
+				<div class="card">
+					<h1 style="font-size:22px;">Pending COO Requests</h1>
+					<p class="muted">Click any request and approve/reject it from this secure link.</p>
+					{% if queue_rows %}
+					<div class="queue-list">
+						{% for row in queue_rows %}
+						{% set is_active = (selected_request_id == row.request_id) %}
+						<a class="queue-item {% if is_active %}active{% endif %}" href="{{ url_for('coo_action_page', token=token, request_id=row.request_id) }}">
+							<div class="queue-title">
+								<span>REQ#{{ row.request_id }}</span>
+								<span class="badge {% if (row.coo_status or '')|upper == 'APPROVED' %}approved{% elif (row.coo_status or '')|upper == 'REJECTED' %}rejected{% else %}pending{% endif %}">
+									{{ row.coo_status or 'PENDING' }}
+								</span>
+							</div>
+							<div class="muted">{{ row.request_type_name or 'Request' }}</div>
+							<div class="muted">Requester: {{ row.requester_email or '-' }}</div>
+						</a>
+						{% endfor %}
+					</div>
+					{% else %}
+					<p class="muted">No COO requests in queue.</p>
+					{% endif %}
+				</div>
+
+				<div class="card">
+					<h1>COO Secure Approval Link</h1>
+					<p class="muted">Use this page to approve or reject without logging in. PIN is required.</p>
+
+					{% if token_error %}
+					<div class="error-box">{{ token_error }}</div>
+					{% elif not summary %}
+					<div class="error-box">Request details are unavailable for this link.</div>
+					{% else %}
+					<p class="muted">COO email: {{ token_email or '-' }}</p>
+					<div class="summary-grid">
+					<div class="summary-box">
+						<div class="k">Request ID</div>
+						<div class="v">REQ#{{ summary.request_id }}</div>
+					</div>
+					<div class="summary-box">
+						<div class="k">Request Type</div>
+						<div class="v">{{ summary.request_type_name or 'Request' }}</div>
+					</div>
+					<div class="summary-box">
+						<div class="k">Requester</div>
+						<div class="v">{{ summary.requester_email or '-' }}</div>
+					</div>
+					<div class="summary-box">
+						<div class="k">Department</div>
+						<div class="v">{{ summary.requester_department or '-' }}</div>
+					</div>
+					<div class="summary-box">
+						<div class="k">Amount</div>
+						<div class="v">PHP {{ "{:,.2f}".format((summary.amount or 0)|float) }}</div>
+					</div>
+					<div class="summary-box">
+						<div class="k">COO Status</div>
+						<div class="v">{{ summary.coo_status or 'PENDING' }}</div>
+					</div>
+					</div>
+
+					<div class="approve-panel">
+					<div class="approve-row">
+						<label for="authMethod">Authentication</label>
+						<select id="authMethod">
+							<option value="pin" selected>PIN</option>
+							<option value="fingerprint">Fingerprint</option>
+						</select>
+					</div>
+					<div class="approve-row" id="pinRow">
+						<label for="cooPin">COO PIN</label>
+						<input type="password" id="cooPin" maxlength="4" inputmode="numeric" placeholder="Enter 4-digit PIN" />
+					</div>
+					<div class="approve-row">
+						<label for="cooRejectReason">Reject Reason</label>
+						<input type="text" id="cooRejectReason" placeholder="Optional reason for rejection" />
+					</div>
+					<p id="authHint" class="muted" style="display:none; margin: 8px 0 0;">Fingerprint approval is not configured yet. Please use PIN.</p>
+					<div class="actions">
+						<button class="btn btn-primary" id="approveBtn" type="button">Approve Request</button>
+						<button class="btn btn-danger" id="rejectBtn" type="button">Reject Request</button>
+					</div>
+					<div id="actionNotice" class="notice"></div>
+					</div>
+					{% endif %}
+				</div>
+			</div>
+			</div>
+		</div>
+
+		{% if not token_error and summary %}
+		<script>
+			(function () {
+				const token = {{ token|tojson }};
+				const requestId = {{ (summary.request_id if summary else 0)|tojson }};
+				const authMethodEl = document.getElementById("authMethod");
+				const pinRowEl = document.getElementById("pinRow");
+				const pinEl = document.getElementById("cooPin");
+				const hintEl = document.getElementById("authHint");
+				const btnEl = document.getElementById("approveBtn");
+				const rejectBtnEl = document.getElementById("rejectBtn");
+				const rejectReasonEl = document.getElementById("cooRejectReason");
+				const noticeEl = document.getElementById("actionNotice");
+
+				function setNotice(text, ok) {
+					noticeEl.style.display = "block";
+					noticeEl.className = "notice " + (ok ? "ok" : "err");
+					noticeEl.textContent = text;
+				}
+
+				function handleAuthMethodChange() {
+					const method = String(authMethodEl.value || "pin").toLowerCase();
+					if (method === "fingerprint") {
+						pinRowEl.style.display = "none";
+						hintEl.style.display = "block";
+					} else {
+						pinRowEl.style.display = "grid";
+						hintEl.style.display = "none";
+					}
+					noticeEl.style.display = "none";
+				}
+
+				authMethodEl.addEventListener("change", handleAuthMethodChange);
+				handleAuthMethodChange();
+
+				async function submitDecision(endpoint, successFallback, includeReason) {
+					const authMethod = String(authMethodEl.value || "pin").toLowerCase();
+					const pin = String(pinEl.value || "").trim();
+					const reason = String(rejectReasonEl?.value || "").trim();
+
+					if (authMethod === "pin" && !/^\d{4}$/.test(pin)) {
+						setNotice("Please enter your 4-digit PIN.", false);
+						return;
+					}
+
+					btnEl.disabled = true;
+					rejectBtnEl.disabled = true;
+					noticeEl.style.display = "none";
+
+					try {
+						const res = await fetch(`/api/coo-action/${encodeURIComponent(token)}/${endpoint}`, {
+							method: "POST",
+							headers: {
+								"Content-Type": "application/json",
+							},
+							body: JSON.stringify({
+								request_id: requestId,
+								auth_method: authMethod,
+								pin: pin,
+								reason: includeReason ? reason : "",
+							}),
+						});
+
+						const data = await res.json().catch(() => ({}));
+						if (!res.ok || data.success === false) {
+							setNotice(data.error || "Failed to process COO action.", false);
+							return;
+						}
+
+						const sent = Number(data?.email?.sent || 0);
+						const total = Number(data?.email?.recipients || 0);
+						let successText = data.message || successFallback;
+						if (total > 0) {
+							successText += ` Email sent: ${sent}/${total}.`;
+						}
+						setNotice(successText, true);
+						setTimeout(() => {
+							window.location.reload();
+						}, 900);
+					} catch (err) {
+						setNotice("Network error. Please try again.", false);
+					} finally {
+						btnEl.disabled = false;
+						rejectBtnEl.disabled = false;
+					}
+				}
+
+				btnEl.addEventListener("click", function () {
+					submitDecision("approve", "COO special approval completed.", false);
+				});
+
+				rejectBtnEl.addEventListener("click", function () {
+					submitDecision("reject", "COO special rejection completed.", true);
+				});
+			})();
+		</script>
+		{% endif %}
+	</body>
+</html>

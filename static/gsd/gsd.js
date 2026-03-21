@@ -886,7 +886,7 @@ async function updateStatus(requestId, status, message = "") {
 
             if (backendMsg) {
                 if (backendLower.includes("fully approved") || backendLower.includes("completed")) {
-                    approvedMsg = `Request ${rid} has been fully approved and completed.`;
+                    approvedMsg = `Request ${rid} has been fully approved.`;
                 } else if (backendLower.includes("next stage") || backendLower.includes("next approver")) {
                     approvedMsg = `Request ${rid} has been approved and moved to the next approver.`;
                 } else {

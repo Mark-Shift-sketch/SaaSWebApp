@@ -252,42 +252,6 @@
           </div>
 
           <div class="form-card">
-            <h3>Add Department</h3>
-            <br />
-            <form action="{{ url_for('create_dept') }}" method="POST">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-              <div class="form-group">
-                <label>Department Name</label>
-                <input
-                  type="text"
-                  name="dept_name"
-                  placeholder="e.g., Marketing"
-                  required
-                />
-              </div>
-              <button type="submit" class="btn-primary">Add Department</button>
-            </form>
-          </div>
-
-          <div class="form-card">
-            <h3>Add Role</h3>
-            <br />
-            <form action="{{ url_for('create_role') }}" method="POST">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-              <div class="form-group">
-                <label>Role Name</label>
-                <input
-                  type="text"
-                  name="role_name"
-                  placeholder="e.g., Guest, Auditor"
-                  required
-                />
-              </div>
-              <button type="submit" class="btn-primary">Add Role</button>
-            </form>
-          </div>
-
-          <div class="form-card">
             <h3>Add Position</h3>
             <br />
             <form action="{{ url_for('create_position') }}" method="POST">
@@ -305,9 +269,228 @@
             </form>
           </div>
         </div>
+      </div>
 
-        
+      <div id="department" class="tab-content">
+        <header>
+          <h1 class="section-title">Department Page</h1>
+        </header>
+
+        <div class="department-top-grid">
+          <div class="form-card">
+            <h3>Add Department</h3>
+            <br />
+            <form action="{{ url_for('create_dept') }}" method="POST">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <div class="form-group">
+                <label>Department Name</label>
+                <input
+                  type="text"
+                  name="dept_name"
+                  placeholder="e.g., ICT Services"
+                  required
+                />
+              </div>
+              <button type="submit" class="btn-primary">Add Department</button>
+            </form>
+          </div>
+
+          <div class="department-overview-card">
+            <h3>Department Profiles</h3>
+            <p>
+              Open each department profile to view head assignment, member list,
+              request stats, and recent requests.
+            </p>
+          </div>
         </div>
+
+        <div class="department-profile-grid">
+          {% for dept in department_profiles %}
+          <details class="department-profile-card">
+            <summary>
+              <div>
+                <h4>{{ dept.dept_name }}</h4>
+                <small>Head: {{ dept.head.email if dept.head else 'Not Assigned' }}</small>
+              </div>
+              <span class="profile-toggle-label">Show Profile</span>
+            </summary>
+
+            <div class="department-manage-grid">
+              <form
+                class="department-manage-form"
+                action="{{ url_for('it_update_department', dept_id=dept.dept_id) }}"
+                method="POST"
+              >
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <label>Edit Department Name</label>
+                <div class="department-inline-actions">
+                  <input type="text" name="dept_name" value="{{ dept.dept_name }}" required />
+                  <button type="submit" class="btn-primary">Save Name</button>
+                </div>
+              </form>
+
+              <form
+                class="department-manage-form"
+                action="{{ url_for('it_set_department_head', dept_id=dept.dept_id) }}"
+                method="POST"
+              >
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <label>Change Department Head</label>
+                <div class="department-inline-actions">
+                  <select name="head_user_id">
+                    <option value="">No Assigned Head</option>
+                    {% for member in dept.members %}
+                    <option
+                      value="{{ member.user_id }}"
+                      {% if dept.head and member.user_id == dept.head.user_id %}selected{% endif %}
+                    >
+                      {{ member.display_name }} - {{ member.role_name }} - {{ member.position_name }}
+                    </option>
+                    {% endfor %}
+                  </select>
+                  <button type="submit" class="btn-primary">Save Head</button>
+                </div>
+                <small class="head-rule-note">
+                  Head assignment: explicit selected head is prioritized. If no explicit head is selected,
+                  the system auto-picks by position keywords (Head/Manager/Director/Dean/Chair/Chief), then first member.
+                </small>
+              </form>
+
+              <form
+                class="department-manage-form"
+                action="{{ url_for('it_add_department_member', dept_id=dept.dept_id) }}"
+                method="POST"
+              >
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <label>Add / Reassign User To Department</label>
+                <div class="department-inline-actions">
+                  <select name="user_id" required>
+                    <option value="" selected disabled>Select user to add</option>
+                    {% for user in dept.available_users %}
+                    <option value="{{ user.user_id }}">
+                      {{ user.display_name }} - {{ user.role_name }} - {{ user.position_name }}
+                      [{{ user.current_dept_name }}]
+                    </option>
+                    {% endfor %}
+                  </select>
+                  <button type="submit" class="btn-primary">Add User</button>
+                </div>
+              </form>
+
+              <form
+                class="department-manage-form department-delete-form"
+                action="{{ url_for('it_delete_department', dept_id=dept.dept_id) }}"
+                method="POST"
+                onsubmit="return confirmDeleteDepartment('{{ dept.dept_name }}', {{ dept.members_count }})"
+              >
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <label>Delete Department</label>
+                <button type="submit" class="icon-action-btn btn-delete">Delete Department</button>
+              </form>
+            </div>
+
+            <div class="department-stats-row">
+              <div class="department-stat-box">
+                <span>Members</span>
+                <strong>{{ dept.members_count }}</strong>
+              </div>
+              <div class="department-stat-box">
+                <span>Requests</span>
+                <strong>{{ dept.total_requests }}</strong>
+              </div>
+              <div class="department-stat-box">
+                <span>Pending</span>
+                <strong>{{ dept.pending_requests }}</strong>
+              </div>
+              <div class="department-stat-box">
+                <span>Approved</span>
+                <strong>{{ dept.approved_requests }}</strong>
+              </div>
+            </div>
+
+            <div class="department-details-grid">
+              <div class="department-panel">
+                <h5>Head</h5>
+                {% if dept.head %}
+                <p><strong>{{ dept.head.email }}</strong></p>
+                <p>{{ dept.head.position_name }} | {{ dept.head.role_name }}</p>
+                {% else %}
+                <p>No department head assigned yet.</p>
+                {% endif %}
+              </div>
+
+              <div class="department-panel">
+                <h5>Members</h5>
+                <ul class="member-list">
+                  {% for member in dept.members %}
+                  <li>
+                    <div class="member-meta">
+                      <span>{{ member.display_name }}</span>
+                      <small>{{ member.role_name }} | {{ member.position_name }}</small>
+                    </div>
+                    <form
+                      action="{{ url_for('it_remove_department_member', dept_id=dept.dept_id) }}"
+                      method="POST"
+                      class="inline-action-form"
+                      onsubmit="return confirmRemoveMember('{{ member.email }}', '{{ dept.dept_name }}')"
+                    >
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                      <input type="hidden" name="user_id" value="{{ member.user_id }}">
+                      <button type="submit" class="icon-action-btn btn-delete" title="Remove from department">
+                        Remove
+                      </button>
+                    </form>
+                  </li>
+                  {% else %}
+                  <li>
+                    <span>No members found.</span>
+                  </li>
+                  {% endfor %}
+                </ul>
+              </div>
+            </div>
+
+            <div class="department-panel recent-requests-panel">
+              <h5>Recent Requests</h5>
+              <div class="table-container dept-requests-table-wrap">
+                <table class="dept-requests-table">
+                  <thead>
+                    <tr>
+                      <th>Request ID</th>
+                      <th>Type</th>
+                      <th>Requester</th>
+                      <th>Status</th>
+                      <th>Date</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for req in dept.recent_requests %}
+                    <tr>
+                      <td>#{{ req.request_id }}</td>
+                      <td>{{ req.request_type_name }}</td>
+                      <td>{{ req.requester_email }}</td>
+                      <td><span class="badge">{{ req.status_name }}</span></td>
+                      <td>{{ req.created_at }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                      <td colspan="5" style="text-align: center">
+                        No recent requests for this department.
+                      </td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+          {% else %}
+          <div class="department-overview-card">
+            <p>No departments found yet. Add your first department to begin.</p>
+          </div>
+          {% endfor %}
+        </div>
+
       </div>
 
       <div id="notification" class="tab-content">
@@ -357,6 +540,24 @@
       function confirmDeleteAction(email) {
         return window.confirm(
           `Are you sure you want to delete account ${email}? This cannot be undone.`
+        );
+      }
+
+      function confirmDeleteDepartment(deptName, membersCount) {
+        const count = Number(membersCount || 0);
+        if (count > 0) {
+          return window.confirm(
+            `Department ${deptName} still has ${count} member(s). Delete will fail until users are reassigned. Continue anyway?`
+          );
+        }
+        return window.confirm(
+          `Are you sure you want to delete department ${deptName}? This action cannot be undone.`
+        );
+      }
+
+      function confirmRemoveMember(email, deptName) {
+        return window.confirm(
+          `Remove ${email} from department ${deptName}? User will become unassigned.`
         );
       }
     </script>

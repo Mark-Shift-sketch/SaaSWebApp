@@ -176,6 +176,9 @@ function switchView(viewName, pushUrl = true) {
   if (viewName === "reports") {
     requestAnimationFrame(() => loadreports());
   }
+  if (viewName === "budgetreports") {
+    requestAnimationFrame(() => loadBudgetReports());
+  }
   if (viewName === "notifications") loadNotifications();
   if (viewName === "settings") loadProfile();
 
@@ -343,20 +346,19 @@ function renderAdminRequestRows(requests) {
         String(req.stage_position_id).trim() === ""
       );
 
-      let attachmentHtml = '<span class="text-muted">No file</span>';
-      if (req.filename) {
-        attachmentHtml = `
-          <a href="/download_attachment/${requestId}" target="_blank" class="file-link">
-            <i class="fa-solid fa-paperclip"></i>View File
-          </a>
-        `;
-      }
+      const hasFilename = String(req.filename || "").trim().length > 0;
+      let attachmentHtml = `
+        <a href="/request_submission/${requestId}" target="_blank" class="file-link">
+          <i class="fa-solid fa-paperclip"></i>View Submission
+        </a>
+        ${hasFilename ? `<div class="text-muted" style="font-size:12px; margin-top:4px;">${escapeHtml(req.filename)}</div>` : ""}
+      `;
 
       let actionHtml = '<span class="text-muted">-</span>';
       if (canAct) {
         actionHtml = `
           <div class="action-group">
-            <button class="btn-icon btn-approve" title="Approve" onclick="openApproveModal('${requestId}', ${hasAnnotation ? "true" : "false"})">
+            <button class="btn-icon btn-approve" title="Mark As Completed" onclick="openApproveModal('${requestId}', ${hasAnnotation ? "true" : "false"})">
               <i class="fa-solid fa-check"></i>
             </button>
             <button class="btn-icon btn-reject" title="Reject" onclick="openRejectModal('${requestId}')">
@@ -458,6 +460,10 @@ function renderAdminRequestRows(requests) {
     .join("");
 
   filterTable();
+
+  if (getActiveAdminView() === "budgetreports") {
+    requestAnimationFrame(() => loadBudgetReports());
+  }
 }
 
 function applyAdminLiveCounts(counts) {
@@ -689,7 +695,7 @@ async function updateStatus(requestId, status, message = "", hasAnnotation = fal
       }
 
       if (!hasSignedOrEdited) {
-        if (!confirm("You didn't sign the file. Are you sure you want to approve?")) {
+        if (!confirm("You didn't sign the file. Are you sure you want to approve this request?")) {
           return;
         }
       }
@@ -719,7 +725,7 @@ async function updateStatus(requestId, status, message = "", hasAnnotation = fal
 
       if (backendMsg) {
         if (backendLower.includes("fully approved") || backendLower.includes("completed")) {
-          approvedMsg = `Request ${rid} has been fully approved and completed.`;
+          approvedMsg = `Request ${rid} has been fully approved.`;
         } else if (backendLower.includes("next stage") || backendLower.includes("next approver")) {
           approvedMsg = `Request ${rid} has been approved and moved to the next approver.`;
         } else {
@@ -1043,6 +1049,484 @@ function _wireRequestTypeFormOrdering() {
   }
 }
 
+const requestTypeFormBuilderState = {
+  total_formula: "",
+  blocks: [],
+};
+
+const REQUEST_FORM_BUILDER_DRAFT_KEY = "__requestTypeFormBuilderDraftV1";
+
+function getAddRequestTypeForm() {
+  return document.querySelector('form[action="/add_request_type"]');
+}
+
+function getSelectedAddTemplateMode() {
+  const form = getAddRequestTypeForm();
+  if (!form) return "FILLABLE";
+  const checked = form.querySelector('input[name="template_mode"]:checked');
+  return String(checked?.value || "FILLABLE").toUpperCase();
+}
+
+function createDefaultRequestFormBlock(type) {
+  const stamp = `${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+  if (type === "heading") {
+    return {
+      id: `heading_${stamp}`,
+      type: "heading",
+      text: "Section Heading",
+    };
+  }
+
+  if (type === "text") {
+    return {
+      id: `text_${stamp}`,
+      type: "text",
+      label: "Text Field",
+      placeholder: "",
+      required: false,
+    };
+  }
+
+  if (type === "textarea") {
+    return {
+      id: `textarea_${stamp}`,
+      type: "textarea",
+      label: "Long Text",
+      placeholder: "",
+      required: false,
+    };
+  }
+
+  if (type === "number") {
+    return {
+      id: `number_${stamp}`,
+      type: "number",
+      label: "Amount Field",
+      placeholder: "0.00",
+      required: false,
+      include_in_total: true,
+    };
+  }
+
+  if (type === "shape") {
+    return {
+      id: `shape_${stamp}`,
+      type: "shape",
+      shape: "line",
+      text: "",
+    };
+  }
+
+  return {
+    id: `table_${stamp}`,
+    type: "table",
+    label: "Particulars",
+    required: true,
+    min_rows: 1,
+    sum_column_key: "amount",
+    columns: [
+      { key: "item", label: "Item", type: "text" },
+      { key: "amount", label: "Amount", type: "number" },
+    ],
+  };
+}
+
+function syncRequestTypeFormSchemaHiddenInput() {
+  const hidden = document.getElementById("form_schema_json");
+  const schema = {
+    version: 1,
+    total_formula: String(requestTypeFormBuilderState.total_formula || "").trim(),
+    blocks: requestTypeFormBuilderState.blocks,
+  };
+
+  if (hidden) {
+    hidden.value = JSON.stringify(schema);
+  }
+
+  const summary = document.getElementById("requestFormBuilderSummary");
+  if (summary) {
+    const totalBlocks = Array.isArray(requestTypeFormBuilderState.blocks)
+      ? requestTypeFormBuilderState.blocks.length
+      : 0;
+    const tableBlocks = (requestTypeFormBuilderState.blocks || []).filter(
+      (block) => String(block?.type || "").toLowerCase() === "table"
+    ).length;
+
+    if (totalBlocks === 0) {
+      summary.textContent = "No form elements yet.";
+    } else {
+      summary.textContent = `${totalBlocks} block(s) configured, ${tableBlocks} table block(s).`;
+    }
+  }
+}
+
+function getCurrentRequestTypeFormBuilderSchema() {
+  return {
+    version: 1,
+    total_formula: String(requestTypeFormBuilderState.total_formula || "").trim(),
+    blocks: JSON.parse(JSON.stringify(requestTypeFormBuilderState.blocks || [])),
+  };
+}
+
+function applyRequestTypeFormBuilderSchema(schema) {
+  if (!schema || typeof schema !== "object") return false;
+  const blocks = Array.isArray(schema.blocks) ? schema.blocks : [];
+  if (!blocks.length) return false;
+
+  requestTypeFormBuilderState.total_formula = String(schema.total_formula || "").trim();
+  requestTypeFormBuilderState.blocks = JSON.parse(JSON.stringify(blocks));
+  renderRequestFormBuilder();
+  return true;
+}
+
+function openRequestFormBuilderTab() {
+  try {
+    localStorage.setItem(
+      REQUEST_FORM_BUILDER_DRAFT_KEY,
+      JSON.stringify(getCurrentRequestTypeFormBuilderSchema())
+    );
+  } catch (err) {
+    console.warn("Failed to cache builder draft before opening tab", err);
+  }
+
+  const win = window.open("/request-type-form-builder", "_blank");
+  if (!win) {
+    openSysPopup(
+      "Popup Blocked",
+      "Please allow popups for this site to open the form builder tab.",
+      false
+    );
+  }
+}
+
+function toggleAddRequestTypeTemplateUI() {
+  const mode = getSelectedAddTemplateMode();
+  const builderSection = document.getElementById("fillableBuilderSection");
+  const uploadSection = document.getElementById("templateUploadSection");
+  const uploadHint = document.getElementById("templateUploadHint");
+  const fileInput = document.querySelector('form[action="/add_request_type"] input[name="template_file"]');
+
+  if (builderSection) builderSection.style.display = mode === "FILLABLE" ? "block" : "none";
+  if (uploadSection) uploadSection.style.display = "block";
+  if (fileInput) fileInput.required = mode === "DOWNLOAD" || mode === "FILLABLE";
+
+  if (uploadHint) {
+    if (mode === "DOWNLOAD") {
+      uploadHint.textContent = "Upload a PDF template file. This is required in Download mode.";
+    } else {
+      uploadHint.textContent = "Upload a fillable PDF template. The system will use its fields as the user form.";
+    }
+  }
+}
+
+function addRequestFormBlock(type) {
+  requestTypeFormBuilderState.blocks.push(createDefaultRequestFormBlock(type));
+  renderRequestFormBuilder();
+}
+
+function removeRequestFormBlock(index) {
+  requestTypeFormBuilderState.blocks.splice(index, 1);
+  renderRequestFormBuilder();
+}
+
+function updateRequestFormBlock(index, key, value) {
+  const block = requestTypeFormBuilderState.blocks[index];
+  if (!block) return;
+
+  if (key === "required" || key === "include_in_total") {
+    block[key] = value === true || value === "true";
+  } else if (key === "min_rows") {
+    const n = Number(value);
+    block[key] = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.floor(n))) : 0;
+  } else {
+    block[key] = value;
+  }
+
+  renderRequestFormBuilder();
+}
+
+function addRequestFormTableColumn(blockIndex) {
+  const block = requestTypeFormBuilderState.blocks[blockIndex];
+  if (!block || block.type !== "table") return;
+
+  const next = (block.columns?.length || 0) + 1;
+  const col = {
+    key: `column_${next}`,
+    label: `Column ${next}`,
+    type: "text",
+  };
+
+  block.columns = Array.isArray(block.columns) ? block.columns : [];
+  block.columns.push(col);
+  renderRequestFormBuilder();
+}
+
+function removeRequestFormTableColumn(blockIndex, columnIndex) {
+  const block = requestTypeFormBuilderState.blocks[blockIndex];
+  if (!block || block.type !== "table" || !Array.isArray(block.columns)) return;
+  block.columns.splice(columnIndex, 1);
+  if (block.columns.length === 0) {
+    block.columns.push({ key: "item", label: "Item", type: "text" });
+    block.columns.push({ key: "amount", label: "Amount", type: "number" });
+  }
+  renderRequestFormBuilder();
+}
+
+function updateRequestFormTableColumn(blockIndex, columnIndex, key, value) {
+  const block = requestTypeFormBuilderState.blocks[blockIndex];
+  if (!block || block.type !== "table" || !Array.isArray(block.columns)) return;
+  const column = block.columns[columnIndex];
+  if (!column) return;
+
+  if (key === "type") {
+    column.type = value === "number" ? "number" : "text";
+  } else {
+    column[key] = value;
+  }
+
+  renderRequestFormBuilder();
+}
+
+function renderRequestFormBuilder() {
+  const canvas = document.getElementById("requestTypeFormBuilderCanvas");
+  if (!canvas) return;
+
+  const formulaPanel = `
+    <div class="request-form-builder-item" style="margin-bottom:10px">
+      <div class="request-form-builder-item-header">
+        <strong>TOTAL FORMULA</strong>
+        <span style="font-size:12px;color:#64748b">Use block ids, e.g. particulars + transport_amount</span>
+      </div>
+      <label class="form-label">Formula (optional)</label>
+      <input
+        type="text"
+        class="form-control"
+        value="${escapeHtml(requestTypeFormBuilderState.total_formula || "")}" 
+        placeholder="particulars + allowance_amount"
+        onchange="requestTypeFormBuilderState.total_formula=this.value; syncRequestTypeFormSchemaHiddenInput();"
+      />
+      <p class="form-hint" style="margin-top:8px">Supported operators: +, -, *, /, parentheses. Table sum variables use table block id or tableid_sumcolumn.</p>
+    </div>
+  `;
+
+  if (requestTypeFormBuilderState.blocks.length === 0) {
+    canvas.innerHTML = `${formulaPanel}<div class="request-form-builder-empty">No form elements yet. Use + buttons above to build your representative form.</div>`;
+    syncRequestTypeFormSchemaHiddenInput();
+    return;
+  }
+
+  canvas.innerHTML =
+    formulaPanel +
+    requestTypeFormBuilderState.blocks
+    .map((block, index) => {
+      const type = String(block.type || "").toLowerCase();
+
+      const header = `
+        <div class="request-form-builder-item-header">
+          <strong>${escapeHtml(type.toUpperCase())}</strong>
+          <button type="button" class="btn-secondary" onclick="removeRequestFormBlock(${index})">Remove</button>
+        </div>
+      `;
+
+      if (type === "heading") {
+        return `
+          <div class="request-form-builder-item">
+            ${header}
+            <label class="form-label">Heading Text</label>
+            <input
+              type="text"
+              class="form-control"
+              value="${escapeHtml(block.text || "")}" 
+              onchange="updateRequestFormBlock(${index}, 'text', this.value)"
+            />
+          </div>
+        `;
+      }
+
+      if (type === "shape") {
+        return `
+          <div class="request-form-builder-item">
+            ${header}
+            <label class="form-label">Shape Type</label>
+            <select class="form-control" onchange="updateRequestFormBlock(${index}, 'shape', this.value)">
+              <option value="line" ${block.shape === "line" ? "selected" : ""}>Line</option>
+              <option value="box" ${block.shape === "box" ? "selected" : ""}>Box</option>
+            </select>
+            <label class="form-label" style="margin-top:8px">Text (optional)</label>
+            <input
+              type="text"
+              class="form-control"
+              value="${escapeHtml(block.text || "")}" 
+              onchange="updateRequestFormBlock(${index}, 'text', this.value)"
+            />
+          </div>
+        `;
+      }
+
+      if (type === "table") {
+        const columns = Array.isArray(block.columns) ? block.columns : [];
+        const columnsHtml = columns
+          .map(
+            (column, colIndex) => `
+              <div class="request-form-builder-table-column">
+                <input
+                  type="text"
+                  class="form-control"
+                  placeholder="Column key"
+                  value="${escapeHtml(column.key || "")}" 
+                  onchange="updateRequestFormTableColumn(${index}, ${colIndex}, 'key', this.value)"
+                />
+                <input
+                  type="text"
+                  class="form-control"
+                  placeholder="Column label"
+                  value="${escapeHtml(column.label || "")}" 
+                  onchange="updateRequestFormTableColumn(${index}, ${colIndex}, 'label', this.value)"
+                />
+                <select class="form-control" onchange="updateRequestFormTableColumn(${index}, ${colIndex}, 'type', this.value)">
+                  <option value="text" ${column.type === "text" ? "selected" : ""}>Text</option>
+                  <option value="number" ${column.type === "number" ? "selected" : ""}>Number</option>
+                </select>
+                <button type="button" class="btn-secondary" onclick="removeRequestFormTableColumn(${index}, ${colIndex})">Remove</button>
+              </div>
+            `
+          )
+          .join("");
+
+        return `
+          <div class="request-form-builder-item">
+            ${header}
+            <label class="form-label">Table Label</label>
+            <input
+              type="text"
+              class="form-control"
+              value="${escapeHtml(block.label || "")}" 
+              onchange="updateRequestFormBlock(${index}, 'label', this.value)"
+            />
+
+            <div class="request-form-builder-grid-2">
+              <label class="request-form-builder-check">
+                <input
+                  type="checkbox"
+                  ${block.required ? "checked" : ""}
+                  onchange="updateRequestFormBlock(${index}, 'required', this.checked)"
+                /> Required
+              </label>
+              <div>
+                <label class="form-label">Minimum Rows</label>
+                <input
+                  type="number"
+                  class="form-control"
+                  min="0"
+                  value="${escapeHtml(String(block.min_rows ?? 0))}"
+                  onchange="updateRequestFormBlock(${index}, 'min_rows', this.value)"
+                />
+              </div>
+            </div>
+
+            <label class="form-label" style="margin-top:8px">Sum Column Key (for auto-total)</label>
+            <input
+              type="text"
+              class="form-control"
+              value="${escapeHtml(block.sum_column_key || "")}" 
+              onchange="updateRequestFormBlock(${index}, 'sum_column_key', this.value)"
+            />
+
+            <div class="request-form-builder-table-columns">
+              <div class="request-form-builder-table-columns-head">
+                <strong>Columns</strong>
+                <button type="button" class="btn-secondary" onclick="addRequestFormTableColumn(${index})">+ Column</button>
+              </div>
+              ${columnsHtml}
+            </div>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="request-form-builder-item">
+          ${header}
+          <label class="form-label">Label</label>
+          <input
+            type="text"
+            class="form-control"
+            value="${escapeHtml(block.label || "")}" 
+            onchange="updateRequestFormBlock(${index}, 'label', this.value)"
+          />
+          <label class="form-label" style="margin-top:8px">Placeholder</label>
+          <input
+            type="text"
+            class="form-control"
+            value="${escapeHtml(block.placeholder || "")}" 
+            onchange="updateRequestFormBlock(${index}, 'placeholder', this.value)"
+          />
+          <div class="request-form-builder-grid-2" style="margin-top:8px">
+            <label class="request-form-builder-check">
+              <input
+                type="checkbox"
+                ${block.required ? "checked" : ""}
+                onchange="updateRequestFormBlock(${index}, 'required', this.checked)"
+              /> Required
+            </label>
+            ${type === "number"
+              ? `<label class="request-form-builder-check">
+                   <input
+                     type="checkbox"
+                     ${block.include_in_total ? "checked" : ""}
+                     onchange="updateRequestFormBlock(${index}, 'include_in_total', this.checked)"
+                   /> Include in Total
+                 </label>`
+              : "<span></span>"}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  syncRequestTypeFormSchemaHiddenInput();
+}
+
+function _initRequestTypeFormBuilder() {
+  const form = getAddRequestTypeForm();
+  if (!form || form.dataset.formBuilderInit === "1") return;
+  form.dataset.formBuilderInit = "1";
+
+  const modeInputs = form.querySelectorAll('input[name="template_mode"]');
+  const typeNameInput = form.querySelector('input[name="type_name"]');
+  modeInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      toggleAddRequestTypeTemplateUI();
+      syncRequestTypeFormSchemaHiddenInput();
+    });
+  });
+
+  if (requestTypeFormBuilderState.blocks.length === 0) {
+    requestTypeFormBuilderState.total_formula = "";
+    requestTypeFormBuilderState.blocks = [
+      createDefaultRequestFormBlock("heading"),
+      createDefaultRequestFormBlock("text"),
+      createDefaultRequestFormBlock("table"),
+    ];
+  }
+
+  form.addEventListener("submit", (e) => {
+    const mode = getSelectedAddTemplateMode();
+
+    // Always submit in current tab.
+    form.removeAttribute("target");
+    form.removeAttribute("rel");
+
+    if (mode === "FILLABLE") return;
+
+    const hidden = document.getElementById("form_schema_json");
+    if (hidden) hidden.value = "";
+  });
+
+  toggleAddRequestTypeTemplateUI();
+  renderRequestFormBuilder();
+}
+
 function openEditModal(typeId, typeName, reviewerIds, approverIds) {
   document.getElementById("edit_type_id").value = typeId;
   document.getElementById("edit_type_name").value = typeName;
@@ -1072,6 +1556,31 @@ function confirmDelete(typeId, typeName) {
 
 let __lineChart = null;
 let __pieChart = null;
+let __budgetLineChart = null;
+
+const BUDGET_MONTH_LABELS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+const budgetReportState = {
+  initialized: false,
+  totalBudget: 100000,
+  studentTotalCost: 0,
+  departmentTotalCost: 0,
+  studentDepartmentTotalCost: 0,
+  records: [],
+};
 
 const REPORT_PIE_COLORS = [
   "#2563eb",
@@ -1129,6 +1638,275 @@ const pieValuePlugin = {
     ctx.restore();
   },
 };
+
+function parseMoneyValue(value) {
+  const cleaned = String(value || "").replace(/[^0-9.-]/g, "");
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatPhp(value) {
+  const safe = Number.isFinite(Number(value)) ? Number(value) : 0;
+  return `PHP ${safe.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function normalizeBudgetRecords(records) {
+  return (Array.isArray(records) ? records : []).map((record) => {
+    const month = Number(record?.month);
+    const category = String(record?.category || "Uncategorized").trim() || "Uncategorized";
+    const amount = parseMoneyValue(record?.amount);
+    return {
+      month: Number.isFinite(month) ? month : -1,
+      category,
+      amount,
+    };
+  });
+}
+
+function getBudgetMonthlyTotals(records) {
+  const monthly = Array.from({ length: 12 }, () => 0);
+  normalizeBudgetRecords(records).forEach((record) => {
+    if (!Number.isFinite(record.month) || record.month < 0 || record.month > 11) return;
+    monthly[record.month] += Number.isFinite(record.amount) ? record.amount : 0;
+  });
+  return monthly;
+}
+
+async function fetchBudgetOverviewData() {
+  const res = await fetch("/api/budget/overview", {
+    method: "GET",
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok || data.success === false) {
+    throw new Error(data.error || data.message || "Failed to load budget overview");
+  }
+
+  const monthlyTotalsRaw = Array.isArray(data.monthly_totals) ? data.monthly_totals : [];
+  const monthlyTotals = Array.from({ length: 12 }, (_, i) => {
+    const value = Number(monthlyTotalsRaw[i]);
+    return Number.isFinite(value) ? value : 0;
+  });
+
+  const records = normalizeBudgetRecords(data.records);
+  let totalBudget = parseMoneyValue(data.total_budget);
+  if (!Number.isFinite(totalBudget) || totalBudget <= 0) {
+    totalBudget = 100000;
+  }
+  const totalCost = parseMoneyValue(data.total_cost);
+  const studentTotalCost = parseMoneyValue(data.student_total_cost);
+  const departmentTotalCost = parseMoneyValue(data.department_total_cost);
+  const studentDepartmentTotalCost = Number.isFinite(Number(data.student_department_total_cost))
+    ? parseMoneyValue(data.student_department_total_cost)
+    : studentTotalCost + departmentTotalCost;
+
+  return {
+    totalBudget,
+    totalCost,
+    studentTotalCost,
+    departmentTotalCost,
+    studentDepartmentTotalCost,
+    records,
+    monthlyTotals,
+  };
+}
+
+function renderBudgetOverviewCards(totalBudget, studentTotalCost, departmentTotalCost, studentDepartmentTotalCost) {
+  const totalCostEl = document.getElementById("budgetTotalCost");
+  const departmentRemainingEl = document.getElementById("budgetDepartmentRemaining");
+  const studentRemainingEl = document.getElementById("budgetStudentRemaining");
+
+  const departmentRemaining = Math.max(0, parseMoneyValue(totalBudget) - parseMoneyValue(departmentTotalCost));
+  const studentRemaining = Math.max(0, parseMoneyValue(totalBudget) - parseMoneyValue(studentTotalCost));
+
+  if (totalCostEl) totalCostEl.textContent = formatPhp(studentDepartmentTotalCost);
+  if (departmentRemainingEl) departmentRemainingEl.textContent = formatPhp(departmentRemaining);
+  if (studentRemainingEl) studentRemainingEl.textContent = formatPhp(studentRemaining);
+}
+
+function renderBudgetLineChart(monthlyTotals) {
+  const canvas = document.getElementById("budgetLineChart");
+  if (!canvas || typeof Chart === "undefined") return;
+
+  if (__budgetLineChart) __budgetLineChart.destroy();
+
+  __budgetLineChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels: BUDGET_MONTH_LABELS,
+      datasets: [
+        {
+          label: "Total Cost",
+          data: monthlyTotals,
+          borderColor: "#0f766e",
+          backgroundColor: "rgba(15, 118, 110, 0.14)",
+          borderWidth: 2,
+          tension: 0.3,
+          fill: true,
+          pointRadius: 3,
+          pointHoverRadius: 5,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        y: {
+          min: 0,
+          max: 100000,
+          ticks: {
+            stepSize: 10000,
+            callback(value) {
+              const n = Number(value);
+              return `PHP ${Number.isFinite(n) ? n.toLocaleString("en-PH") : "0"}`;
+            },
+          },
+        },
+      },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label(context) {
+              return `Total Cost: ${formatPhp(context.parsed?.y || 0)}`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+function populateBudgetCategoryFilter(records) {
+  const select = document.getElementById("budgetBreakdownCategory");
+  if (!select) return;
+
+  const previous = select.value || "all";
+  const categories = Array.from(
+    new Set((records || []).map((record) => String(record.category || "").trim()).filter(Boolean))
+  ).sort((a, b) => a.localeCompare(b));
+
+  select.innerHTML = `
+    <option value="all">All Categories</option>
+    ${categories
+      .map((category) => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`)
+      .join("")}
+  `;
+
+  if (previous === "all" || categories.includes(previous)) {
+    select.value = previous;
+  } else {
+    select.value = "all";
+  }
+}
+
+function renderBudgetBreakdownTable(records) {
+  const tbody = document.getElementById("budgetBreakdownBody");
+  const rangeEl = document.getElementById("budgetBreakdownRange");
+  const monthEl = document.getElementById("budgetBreakdownMonth");
+  const categoryEl = document.getElementById("budgetBreakdownCategory");
+
+  if (!tbody || !rangeEl || !monthEl || !categoryEl) return;
+
+  const monthIndex = Number(monthEl.value);
+  const selectedMonth = Number.isFinite(monthIndex) && monthIndex >= 0 && monthIndex <= 11
+    ? monthIndex
+    : new Date().getMonth();
+  const selectedCategory = String(categoryEl.value || "all").trim();
+
+  const filtered = (records || []).filter((record) => {
+    const sameMonth = record.month === selectedMonth;
+    const categoryMatch = selectedCategory === "all" || record.category === selectedCategory;
+    return sameMonth && categoryMatch;
+  });
+
+  const totalsByCategory = new Map();
+  filtered.forEach((record) => {
+    const key = record.category || "Uncategorized";
+    totalsByCategory.set(key, (totalsByCategory.get(key) || 0) + (Number(record.amount) || 0));
+  });
+
+  const rows = Array.from(totalsByCategory.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([category, total]) => `
+      <tr>
+        <td>${escapeHtml(category)}</td>
+        <td>${BUDGET_MONTH_LABELS[selectedMonth]}</td>
+        <td>${formatPhp(total)}</td>
+      </tr>
+    `)
+    .join("");
+
+  if (!rows) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="3" style="text-align:center;color:#6b7280;padding:20px">
+          No budget records for the selected filter.
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  tbody.innerHTML = rows;
+}
+
+function handleBudgetFilterChange() {
+  const rangeEl = document.getElementById("budgetBreakdownRange");
+  const monthEl = document.getElementById("budgetBreakdownMonth");
+  if (!rangeEl || !monthEl) return;
+
+  const currentMonth = new Date().getMonth();
+  const range = String(rangeEl.value || "this_month");
+
+  if (range === "this_month") {
+    monthEl.disabled = true;
+    monthEl.value = String(currentMonth);
+  } else {
+    monthEl.disabled = false;
+    if (!monthEl.value) monthEl.value = String(currentMonth);
+  }
+
+  renderBudgetBreakdownTable(budgetReportState.records);
+}
+
+async function loadBudgetReports() {
+  const view = document.getElementById("view-budgetreports");
+  if (!view) return;
+
+  const monthEl = document.getElementById("budgetBreakdownMonth");
+
+  if (!budgetReportState.initialized) {
+    budgetReportState.initialized = true;
+
+    if (monthEl) monthEl.value = String(new Date().getMonth());
+  }
+
+  try {
+    const overview = await fetchBudgetOverviewData();
+
+    budgetReportState.totalBudget = overview.totalBudget;
+    budgetReportState.studentTotalCost = overview.studentTotalCost;
+    budgetReportState.departmentTotalCost = overview.departmentTotalCost;
+    budgetReportState.studentDepartmentTotalCost = overview.studentDepartmentTotalCost;
+    budgetReportState.records = overview.records;
+
+    renderBudgetOverviewCards(
+      budgetReportState.totalBudget,
+      budgetReportState.studentTotalCost,
+      budgetReportState.departmentTotalCost,
+      budgetReportState.studentDepartmentTotalCost
+    );
+    renderBudgetLineChart(overview.monthlyTotals);
+    populateBudgetCategoryFilter(budgetReportState.records);
+    handleBudgetFilterChange();
+  } catch (err) {
+    console.error("Budget reports load error:", err);
+    openSysPopup("Error", err.message || "Failed to load budget reports.", false);
+  }
+}
 
 async function loadreports() {
   const lineCanvas = document.getElementById("monthlyLineChart");
@@ -1919,6 +2697,7 @@ document.addEventListener("keydown", (e) => {
 
 document.addEventListener("DOMContentLoaded", () => {
   _wireRequestTypeFormOrdering();
+  _initRequestTypeFormBuilder();
 });
 
 

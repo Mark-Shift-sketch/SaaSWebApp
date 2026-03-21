@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Request Submission Details</title>
+    <style>
+      :root {
+        --bg: #f5f7fb;
+        --card: #ffffff;
+        --ink: #111827;
+        --muted: #6b7280;
+        --line: #d1d5db;
+        --accent: #0f766e;
+        --accent-soft: #ccfbf1;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+
+      .page {
+        max-width: 1100px;
+        margin: 24px auto;
+        padding: 0 16px 24px;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0 0 10px;
+      }
+
+      h1 {
+        font-size: 24px;
+      }
+
+      h2 {
+        font-size: 19px;
+      }
+
+      h3 {
+        font-size: 16px;
+      }
+
+      .meta-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px;
+      }
+
+      .meta-item {
+        background: #f9fafb;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 10px;
+      }
+
+      .meta-label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px;
+      }
+
+      .field-item {
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 10px;
+        background: #ffffff;
+      }
+
+      .field-label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        margin-top: 8px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 520px;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid #e5e7eb;
+        text-align: left;
+        padding: 9px 10px;
+        font-size: 14px;
+      }
+
+      th {
+        background: #f9fafb;
+        color: #111827;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      .note {
+        color: var(--muted);
+        margin: 0;
+      }
+
+      .callout {
+        background: var(--accent-soft);
+        border: 1px solid #5eead4;
+        color: #134e4a;
+        border-radius: 8px;
+        padding: 10px;
+        font-size: 14px;
+      }
+
+      .link-row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 10px;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        text-decoration: none;
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #ffffff;
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .btn.secondary {
+        background: #ffffff;
+        color: #0f766e;
+        border-color: #0f766e;
+      }
+
+      .preview {
+        width: 100%;
+        min-height: 620px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #ffffff;
+      }
+
+      pre {
+        margin: 0;
+        padding: 10px;
+        background: #0b1220;
+        color: #e5e7eb;
+        border-radius: 8px;
+        overflow: auto;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="card">
+        <h1>Request Submission</h1>
+        <div class="meta-grid">
+          <div class="meta-item">
+            <span class="meta-label">Request ID</span>
+            <strong>REQ#{{ request_id }}</strong>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">Request Type</span>
+            <strong>{{ request_type_name }}</strong>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">Requester Email</span>
+            <strong>{{ request_email or '-' }}</strong>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">Purpose</span>
+            <strong>{{ request_purpose or '-' }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Filled Form Data</h2>
+        {% if has_form_data %}
+        {% if field_entries %}
+        <h3>Fields</h3>
+        <div class="field-grid">
+          {% for field in field_entries %}
+          <div class="field-item">
+            <span class="field-label">{{ field.label }}</span>
+            <strong>{{ field.value }}</strong>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if table_sections %}
+        {% for section in table_sections %}
+        <div style="margin-top: 14px">
+          <h3>{{ section.name }}</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  {% for col in section.columns %}
+                  <th>{{ col }}</th>
+                  {% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in section.rows %}
+                <tr>
+                  {% for cell in row %}
+                  <td>{{ cell }}</td>
+                  {% endfor %}
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+        {% elif raw_form_json %}
+        <p class="note" style="margin-bottom: 8px">
+          Submitted form payload exists but could not be structured, so raw JSON is shown:
+        </p>
+        <pre>{{ raw_form_json }}</pre>
+        {% else %}
+        <p class="callout">No filled form data was submitted for this request.</p>
+        {% endif %}
+      </div>
+
+      <div class="card">
+        <h2>Filled Template PDF</h2>
+        {% if has_attachment %}
+        <div class="link-row">
+          {% if show_annotate_action %}
+          <a href="{{ annotate_url }}" target="_blank" class="btn">{{ annotate_button_label }}</a>
+          {% endif %}
+          <a href="{{ attachment_view_url }}" target="_blank" class="btn">Open Filled Template</a>
+          <a href="{{ attachment_download_url }}" class="btn secondary">Download {{ attachment_filename or 'PDF' }}</a>
+        </div>
+        <p class="note">Use Open Filled Template to view the actual template with submitted inputs.</p>
+        {% else %}
+        <p class="callout">No template file is available for this request.</p>
+        {% endif %}
+      </div>
+    </div>
+  </body>
+</html>

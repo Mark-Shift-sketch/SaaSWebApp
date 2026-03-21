@@ -48,9 +48,12 @@
       <nav id="mobileNavMenu" class="mobile-nav-menu">
         <a onclick="switchView('dashboard'); closeMobileMenu();">Dashboard</a>
 
-        {% if session['role'] == 'AssistantAdmin' and session['dept'] == "Finance" %}
+        {% if session['role'] == 'AssistantAdmin' and session['dept'] == "Finance"%}
         <a onclick="switchView('requests'); closeMobileMenu();">Request Type Management</a>
         {% endif %}
+        {% if (session.get('role') == 'AssistantAdmin' and session.get('position') == "SBO" and (session.get('dept') or '')|trim) or (session.get('role') == 'SBO' and (session.get('dept') or '')|trim) %}
+          <a onclick="switchView('budgetreports'); closeMobileMenu();">Budget Reports</a>
+          {% endif %}
 
         <a onclick="switchView('reports'); closeMobileMenu();">Reports</a>
         <a onclick="switchView('notifications'); closeMobileMenu();">
@@ -103,6 +106,20 @@
             <span>Reports</span>
           </div>
         </a>
+
+        {% if (session.get('role') == 'AssistantAdmin' and session.get('position') == "SBO" and (session.get('dept') or '')|trim) or (session.get('role') == "SBO" and (session.get('dept') or '')|trim) %}
+          <a
+          id="nav-budgetreports"
+          class="nav-item"
+          onclick="switchView('budgetreports')"
+        >
+          <div class="nav-item-content">
+            <i class="fa-solid fa-wallet"></i>
+            <span>Budget Reports</span>
+          </div>
+        </a>
+          
+          {% endif %}
 
         <a
           id="nav-notifications"
@@ -295,16 +312,16 @@
                     <td><span class="type-badge">{{ req.type_name }}</span></td>
                     <td>{{ req.wfor}}</td>
                     <td>
-                      {% if req.filename %}
                       <a
-                        href="/download_attachment/{{ req.request_id }}"
+                        href="/request_submission/{{ req.request_id }}"
                         target="_blank"
                         class="file-link"
-                      ><i class="fa-solid fa-paperclip"></i>View File
-                        
+                      ><i class="fa-solid fa-paperclip"></i>View Submission
                       </a>
-                      {% else %}
-                      <span class="text-muted">No file</span>
+                      {% if req.filename %}
+                      <div class="text-muted" style="font-size: 12px; margin-top: 4px">
+                        {{ req.filename }}
+                      </div>
                       {% endif %}
                     </td>
 
@@ -639,18 +656,37 @@
                 
 
                   <label style="display: flex; gap: 8px; align-items: center">
+                    <input type="radio" name="template_mode" value="FILLABLE" checked />
+                    Fillable PDF Template
+                  </label>
+
+                  <label style="display: flex; gap: 8px; align-items: center">
                     <input type="radio" name="template_mode" value="DOWNLOAD" />
                     Download PDF Template
                   </label>
                 </div>
               </div>
 
-              <div class="form-group" style="grid-column: span 2">
+              <div class="form-group" id="fillableBuilderSection" style="grid-column: span 2">
+                <label class="form-label">Fillable PDF Mapping</label>
+                <p class="form-hint">
+                  Representative uploads a fillable PDF. The system reads the PDF form fields and users fill that exact uploaded form.
+                  If needed, set a total formula using the PDF field names (example: Qty * Price).
+                </p>
+
+                <label style="display:flex; gap:8px; align-items:center; margin:8px 0 6px;">
+                  <input type="checkbox" name="map_fields_now" />
+                  Open GUI Field Mapper after creating this request type
+                </label>
+
+              </div>
+
+              <div class="form-group" id="templateUploadSection" style="grid-column: span 2">
                 <label class="form-label"
-                  >Upload Template Form (Optional)</label
+                  >Upload Template Form (PDF)</label
                 >
-                <p style="font-size: 12px; color: gray; margin-bottom: 5px">
-                  Upload a PDF file for users.
+                <p id="templateUploadHint" style="font-size: 12px; color: gray; margin-bottom: 5px">
+                  Upload the exact PDF template form. In Fillable mode, PDF must contain fillable fields.
                 </p>
                 <input
                   type="file"
@@ -714,6 +750,14 @@
 
                     <td class="text-right">
                       <div class="action-group">
+                        <button
+                          class="action-icon-btn"
+                          onclick="window.open('/request-type-field-mapper/{{ type.request_type_id }}', '_blank')"
+                          title="Map Fields"
+                        >
+                          <i class="fa-solid fa-table-cells-large"></i>
+                        </button>
+
                         <button
                           class="action-icon-btn"
                           onclick="openEditModal('{{ type.request_type_id }}', '{{ type.type_name }}', '{{ type.reviewer_ids }}', '{{ type.approver_ids }}')"
@@ -806,6 +850,95 @@
 </div>
 </div>
 </div>
+
+      <div id="view-budgetreports" class="view-section" style="display:none">
+        <header class="top-header">
+          <div class="header-title">
+            <h2>Budget Overview</h2>
+          </div>
+
+          <div class="header-actions">
+            <div class="date-widget">
+              <i class="fa-regular fa-calendar" style="margin-right: 8px"></i>
+              <span class="current-date-display"></span>
+            </div>
+          </div>
+        </header>
+
+        <div class="content-scroll custom-scrollbar">
+          <div class="budget-overview-grid">
+            <div class="report-card budget-summary-card">
+              <h3>Total Cost for Student and Department</h3>
+              <p id="budgetTotalCost">PHP 0.00</p>
+            </div>
+
+            <div class="report-card budget-summary-card">
+              <h3>Department Remaining Balance</h3>
+              <p id="budgetDepartmentRemaining">PHP 0.00</p>
+            </div>
+
+            <div class="report-card budget-summary-card">
+              <h3>Student Remaining Balance</h3>
+              <p id="budgetStudentRemaining">PHP 0.00</p>
+            </div>
+
+          </div>
+
+          <div class="chart-card budget-chart-card">
+            <h3>Monthly Budget Cost Trend</h3>
+            <canvas id="budgetLineChart"></canvas>
+          </div>
+
+          <div class="card-container budget-breakdown-card">
+            <div class="table-header budget-breakdown-header">
+              <div class="section-title"><h3>Budget Breakdown</h3></div>
+
+              <div class="budget-breakdown-filters">
+                <select id="budgetBreakdownRange" class="filter-select" onchange="handleBudgetFilterChange()">
+                  <option value="this_month">This Month</option>
+                  <option value="month_of">Month Of</option>
+                </select>
+
+                <select id="budgetBreakdownMonth" class="filter-select" onchange="handleBudgetFilterChange()">
+                  <option value="0">Jan</option>
+                  <option value="1">Feb</option>
+                  <option value="2">Mar</option>
+                  <option value="3">Apr</option>
+                  <option value="4">May</option>
+                  <option value="5">Jun</option>
+                  <option value="6">Jul</option>
+                  <option value="7">Aug</option>
+                  <option value="8">Sep</option>
+                  <option value="9">Oct</option>
+                  <option value="10">Nov</option>
+                  <option value="11">Dec</option>
+                </select>
+
+                <select id="budgetBreakdownCategory" class="filter-select" onchange="handleBudgetFilterChange()">
+                  <option value="all">All Categories</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Category</th>
+                    <th>Month</th>
+                    <th>Total Cost</th>
+                  </tr>
+                </thead>
+                <tbody id="budgetBreakdownBody">
+                  <tr>
+                    <td colspan="3" style="text-align:center;color:#6b7280;padding:20px">Loading...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
 
   <!-- REPORT EXPORT MODAL -->
   <div id="reportExportModal" class="modal-overlay">

@@ -8,7 +8,7 @@
 
     <script src="{{ url_for('static', filename='vendor/lucide.min.js') }}"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='user/user.css') }}?v=20260312a" />
-    <script src="{{ url_for('static', filename='user/user.js') }}?v=20260312a"></script>
+    <script src="{{ url_for('static', filename='user/user.js') }}?v=20260320c"></script>
     <script src="{{ url_for('static', filename='user/sweetalert.js') }}"></script>
     <script src="{{ url_for('static', filename='alltoast/toast.js') }}"></script>
   </head>
@@ -249,6 +249,8 @@
                         Rejection Message
                       </th>
                       <th>Submitted On</th>
+                      <th>Action</th>
+                      
                     </tr>
                   </thead>
                   <tbody id="requests-table-body"></tbody>
@@ -345,6 +347,7 @@
           action="/create_request"
           method="POST"
           enctype="multipart/form-data"
+          data-can-request-budget="{{ 1 if can_request_budget else 0 }}"
         >
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <div class="form-group">
@@ -361,6 +364,7 @@
                 value="{{ type.request_type_id }}"
                 data-has-template="{{ 'yes' if type.template_filename else 'no' }}"
                 data-template-mode="{{ (type.template_mode or '')|upper }}"
+                data-has-form-schema="{{ 'yes' if type.has_form_schema else 'no' }}"
               >
                 {{ type.type_name }}
               </option>
@@ -370,7 +374,33 @@
             <label>Total Amount</label>
             <input type="number" name="amount" id="modal-amount" required min="0" step="0.01"/>
             <label>Purpose</label>
-            <input type="text" name="purpose" id="modal-purpose" required />
+            <input
+              type="text"
+              name="purpose"
+              id="modal-purpose"
+              placeholder="Enter request purpose"
+              required
+            />
+            {% if can_request_budget %}
+            <label>Request Budget</label>
+            <select name="request_budget" id="modal-request-budget" required>
+              <option value="" selected disabled>Select request budget...</option>
+              <option value="Department Budget">Department Budget</option>
+              <option value="Student Budget">Student Budget</option>
+            </select>
+            <label>Target Department</label>
+            <input
+              type="text"
+              value="{{ session.get('dept') or 'No department assigned' }}"
+              readonly
+            />
+            <input
+              type="hidden"
+              name="request_department"
+              id="modal-request-department"
+              value="{{ session.get('dept') or '' }}"
+            />
+            {% endif %}
           </div>
 
           <!-- TEMPLATE CONTROL BOX -->
@@ -410,6 +440,16 @@
                 Download Template
               </a>
 
+              <button
+                type="button"
+                id="btnFillForm"
+                class="btn-submit"
+                style="padding: 8px 12px; display: none"
+                onclick="openTemplateForm()"
+              >
+                Fill Form
+              </button>
+
               <span
                 id="templateFilledBadge"
                 style="display: none; font-weight: 600"
@@ -427,8 +467,8 @@
           <input type="hidden" name="template_total" id="template_total" />
 
           <div class="form-group">
-            <label>Upload Document</label>
-            <input type="file" name="file" accept=".pdf" required/>
+            <label>Upload Document (Optional PDF)</label>
+            <input type="file" name="file" accept=".pdf"/>
           </div>
 
           <div class="modal-actions">
@@ -460,127 +500,61 @@
 
     <!-- TEMPLATE FORM MODAL (FILLABLE) -->
     <div id="template-form-modal" class="modal">
-      <div class="modal-content" style="max-width: 900px">
-        <h3>Request Form</h3>
+      <div class="modal-content" style="max-width: 1100px">
+        <h3 id="template-form-title">Request Form</h3>
 
-        <div
-          style="
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
-          "
-        >
-          <div class="form-group">
-            <label>Name</label>
-            <input
-              type="text"
-              id="tf_name"
-              placeholder="Enter name"
-              class="form-control"
-            />
-          </div>
-
-          <div class="form-group">
-            <label>Date Needed</label>
-            <input type="date" id="tf_date_needed" class="form-control" />
-          </div>
-
-          <div class="form-group">
-            <label>Requesting Department</label>
-            <input type="text" id="tf_dept" class="form-control" readonly />
-          </div>
-
-          <div class="form-group">
-            <label>Disbursement Type</label>
-            <select id="tf_disbursement" class="form-control">
-              <option value="">Select…</option>
-              <option value="payment">Payment</option>
-              <option value="reimbursement">Reimbursement</option>
-              <option value="cash-advance">Cash Advance</option>
-            </select>
-          </div>
-        </div>
-
-        <div
-          style="
-            margin-top: 14px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-          "
-        >
-          <h4 style="margin: 0">Particulars</h4>
+        <div class="template-copy-toolbar">
+          <label for="template-copy-source" class="text-muted">Copy source:</label>
+          <select id="template-copy-source" class="form-control" style="max-width:220px">
+            <option value="current">Current Draft</option>
+          </select>
+          <label for="template-copy-page" class="text-muted">Template page:</label>
+          <select id="template-copy-page" class="form-control" style="max-width:180px">
+            <option value="1">Template Page 1</option>
+          </select>
           <button
             type="button"
+            onclick="addTemplateFormCopy()"
             class="btn-submit"
-            style="padding: 8px 12px"
-            onclick="addParticularRow()"
+            style="background:#1f2937"
           >
-            + Add Row
+            Copy Selected Page
           </button>
+          <button
+            type="button"
+            onclick="removeLastTemplateFormCopy()"
+            class="btn-cancel"
+          >
+            Remove Last Copy
+          </button>
+          <span id="template-copy-indicator" class="text-muted" style="margin-left:auto">Copies added: 0</span>
         </div>
 
-        <div style="margin-top: 10px; overflow: auto">
-          <table style="width: 100%; border-collapse: collapse">
-            <thead>
-              <tr>
-                <th
-                  style="
-                    border: 1px solid #e5e7eb;
-                    padding: 10px;
-                    background: #f9fafb;
-                  "
-                >
-                  Particulars
-                </th>
-                <th
-                  style="
-                    border: 1px solid #e5e7eb;
-                    padding: 10px;
-                    background: #f9fafb;
-                    width: 180px;
-                  "
-                >
-                  Amount
-                </th>
-                <th
-                  style="
-                    border: 1px solid #e5e7eb;
-                    padding: 10px;
-                    background: #f9fafb;
-                    width: 90px;
-                  "
-                >
-                  Action
-                </th>
-              </tr>
-            </thead>
-            <tbody id="tf_body"></tbody>
-            <tfoot>
-              <tr>
-                <td
-                  style="
-                    border: 1px solid #e5e7eb;
-                    padding: 10px;
-                    text-align: right;
-                    font-weight: 700;
-                  "
-                >
-                  TOTAL
-                </td>
-                <td
-                  style="
-                    border: 1px solid #e5e7eb;
-                    padding: 10px;
-                    font-weight: 700;
-                  "
-                >
-                  ₱ <span id="tf_total">0.00</span>
-                </td>
-                <td style="border: 1px solid #e5e7eb; padding: 10px"></td>
-              </tr>
-            </tfoot>
-          </table>
+        <div class="template-modal-layout">
+          <div class="template-modal-left-pane">
+            <h4 class="template-modal-preview-title">Template Cell Editor</h4>
+            <div class="template-modal-editor-pane">
+              <div id="template-form-render-root"></div>
+
+              <div style="margin-top: 14px; text-align: right; font-weight: 700">
+                Total: ₱ <span id="tf_total">0.00</span>
+              </div>
+            </div>
+
+            <h4 class="template-modal-preview-title">Input Preview</h4>
+            <div id="template-input-preview" class="template-input-preview-box">
+              <p class="text-muted">Start filling the form to preview your input here.</p>
+            </div>
+          </div>
+
+          <div class="template-modal-right-pane">
+            <h4 class="template-modal-preview-title">Template Preview</h4>
+            <iframe
+              id="template-form-pdf-preview"
+              class="template-modal-pdf-preview"
+              title="Template PDF Preview"
+            ></iframe>
+          </div>
         </div>
 
         <div class="modal-actions">

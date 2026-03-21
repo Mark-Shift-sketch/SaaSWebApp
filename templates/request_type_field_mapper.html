@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content="{{ csrf_token() }}" />
+    <title>Field Mapper - {{ request_type_name }}</title>
+    <script src="{{ url_for('static', filename='pdf.min.js') }}?v=20260318"></script>
+    <style>
+      :root {
+        --bg: #f4f6fb;
+        --panel: #ffffff;
+        --line: #d7deeb;
+        --ink: #1e293b;
+        --muted: #64748b;
+        --accent: #0f766e;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 2000;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        background: #0f172a;
+        color: #f8fafc;
+      }
+      .topbar h1 {
+        margin: 0;
+        font-size: 16px;
+      }
+      .topbar p {
+        margin: 3px 0 0;
+        font-size: 12px;
+        color: #cbd5e1;
+      }
+      .btn {
+        border: none;
+        border-radius: 8px;
+        padding: 8px 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn-primary { background: #14b8a6; color: #06271f; }
+      .btn-secondary { background: #1f2937; color: #f8fafc; }
+      .layout {
+        display: grid;
+        grid-template-columns: 360px 1fr;
+        gap: 12px;
+        height: calc(100vh - 56px);
+        padding: 12px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .sidebar {
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+      .sidebar-head {
+        padding: 12px;
+        border-bottom: 1px solid var(--line);
+      }
+      .sidebar-head .hint {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .list {
+        overflow: auto;
+        padding: 10px;
+        display: grid;
+        gap: 10px;
+      }
+      .item {
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 10px;
+      }
+      .item.active {
+        border-color: #14b8a6;
+        box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.18);
+      }
+      .item h4 {
+        margin: 0 0 8px;
+        font-size: 13px;
+      }
+      .field {
+        margin-bottom: 8px;
+      }
+      .field label {
+        display: block;
+        font-size: 11px;
+        color: var(--muted);
+        margin-bottom: 3px;
+      }
+      .field input,
+      .field select {
+        width: 100%;
+        border: 1px solid #cfd8e3;
+        border-radius: 7px;
+        padding: 6px 7px;
+        font-size: 12px;
+      }
+      .grid2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .pdf-wrap {
+        overflow: auto;
+        padding: 12px;
+        height: 100%;
+      }
+      .pdf-page {
+        position: relative;
+        width: fit-content;
+        margin: 0 auto 12px;
+        border-radius: 10px;
+        box-shadow: 0 8px 18px rgba(0,0,0,.1);
+        overflow: hidden;
+        background: #fff;
+      }
+      .pdf-overlay {
+        position: absolute;
+        inset: 0;
+      }
+      .map-box {
+        position: absolute;
+        border: 2px dashed #0f766e;
+        background: rgba(20, 184, 166, .12);
+        color: #0f172a;
+        font-size: 11px;
+        padding: 2px 4px;
+        cursor: move;
+        user-select: none;
+      }
+      .map-box.active {
+        border-color: #0ea5e9;
+        background: rgba(14, 165, 233, .14);
+      }
+      .map-box .resize {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        right: -7px;
+        bottom: -7px;
+        border-radius: 999px;
+        background: #0f766e;
+        border: 1px solid #fff;
+        cursor: nwse-resize;
+      }
+      .status {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .sidebar-tools {
+        margin-top: 8px;
+        display: grid;
+        gap: 8px;
+      }
+      .sidebar-tools label {
+        display: block;
+        font-size: 11px;
+        color: var(--muted);
+        margin-bottom: 3px;
+      }
+      .sidebar-tools input {
+        width: 100%;
+        border: 1px solid #cfd8e3;
+        border-radius: 7px;
+        padding: 6px 7px;
+        font-size: 12px;
+      }
+      .quick-add-row {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .quick-add-row .btn {
+        padding: 7px 8px;
+        font-size: 12px;
+      }
+      @media (max-width: 980px) {
+        .layout { grid-template-columns: 1fr; height: auto; }
+        .pdf-wrap { min-height: 60vh; }
+        .quick-add-row { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body data-request-type-id="{{ request_type_id }}">
+    <div class="topbar">
+      <div>
+        <h1>Field Mapper: {{ request_type_name }}</h1>
+        <p>Drag boxes on the PDF where each user field should be placed. Save to apply mapping.</p>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button class="btn btn-secondary" type="button" onclick="window.open('/download_template/{{ request_type_id }}?inline=1','_blank')">Open PDF</button>
+        <button class="btn btn-primary" type="button" id="saveMappingBtn">Save Mapping</button>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="panel sidebar">
+        <div class="sidebar-head">
+          <strong>Form Fields</strong>
+          <div class="hint">Use the panel below to tweak PDF field name and placement.</div>
+          <div class="sidebar-tools">
+            <div>
+              <label for="totalFormulaInput">Total Formula (optional)</label>
+              <input id="totalFormulaInput" type="text" placeholder="Qty * Price" />
+            </div>
+            <div class="quick-add-row">
+              <button class="btn btn-secondary" id="addTextFieldBtn" type="button">+ Text</button>
+              <button class="btn btn-secondary" id="addTextareaFieldBtn" type="button">+ Textarea</button>
+              <button class="btn btn-secondary" id="addNumberFieldBtn" type="button">+ Number</button>
+              <button class="btn btn-secondary" id="addDateFieldBtn" type="button">+ Date</button>
+            </div>
+          </div>
+          <div id="mapperStatus" class="status" style="margin-top:6px;">Loading...</div>
+        </div>
+        <div id="fieldList" class="list"></div>
+      </div>
+
+      <div class="panel">
+        <div id="pdfPages" class="pdf-wrap"></div>
+      </div>
+    </div>
+
+    <datalist id="pdfFieldNames"></datalist>
+
+    <script src="{{ url_for('static', filename='admin/request_type_field_mapper.js') }}?v=20260320"></script>
+  </body>
+</html>

@@ -230,17 +230,17 @@
                     <td>{{ reqs.dept_name }}</td>
 
                     <td>
-                      {% if reqs.filename %}
                       <a
-                        href="/download_attachment/{{ reqs.request_id }}"
+                        href="/request_submission/{{ reqs.request_id }}"
                         target="_blank"
                         class="file-link"
                       >
-                        <i class="fa-solid fa-paperclip"></i> {{ reqs.filename
-                        }}
+                        <i class="fa-solid fa-paperclip"></i> View Submission
                       </a>
-                      {% else %}
-                      <span class="text-muted">No file</span>
+                      {% if reqs.filename %}
+                      <div class="text-muted" style="font-size: 12px; margin-top: 4px">
+                        {{ reqs.filename }}
+                      </div>
                       {% endif %}
                     </td>
 

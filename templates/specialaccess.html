@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta name="csrf-token" content="{{ csrf_token() }}" />
+		<title>COO Special Access</title>
+		<style>
+			:root {
+				--bg: #f6f8fb;
+				--card: #ffffff;
+				--text: #0f172a;
+				--muted: #64748b;
+				--primary: #0f766e;
+				--danger: #b91c1c;
+				--ok: #166534;
+				--border: #dbe3ef;
+			}
+
+			* {
+				box-sizing: border-box;
+			}
+
+			body {
+				margin: 0;
+				font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+				background: var(--bg);
+				color: var(--text);
+			}
+
+			.page {
+				max-width: 1200px;
+				margin: 0 auto;
+				padding: 20px;
+			}
+
+			.header {
+				display: flex;
+				justify-content: space-between;
+				align-items: center;
+				gap: 12px;
+				margin-bottom: 16px;
+			}
+
+			.header h1 {
+				margin: 0;
+				font-size: 24px;
+			}
+
+			.header p {
+				margin: 4px 0 0;
+				color: var(--muted);
+			}
+
+			.logout {
+				text-decoration: none;
+				border: 1px solid var(--border);
+				background: #fff;
+				color: #0f172a;
+				border-radius: 10px;
+				padding: 8px 12px;
+			}
+
+			.grid {
+				display: grid;
+				grid-template-columns: 330px 1fr;
+				gap: 14px;
+			}
+
+			.card {
+				background: var(--card);
+				border: 1px solid var(--border);
+				border-radius: 14px;
+				padding: 14px;
+			}
+
+			.card h2 {
+				margin: 0 0 10px;
+				font-size: 18px;
+			}
+
+			.queue-list {
+				display: grid;
+				gap: 8px;
+				max-height: 75vh;
+				overflow: auto;
+				padding-right: 4px;
+			}
+
+			.queue-item {
+				display: block;
+				text-decoration: none;
+				color: inherit;
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 10px;
+				background: #fff;
+			}
+
+			.queue-item.active {
+				border-color: var(--primary);
+				box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14);
+			}
+
+			.queue-title {
+				display: flex;
+				justify-content: space-between;
+				gap: 8px;
+				font-weight: 600;
+			}
+
+			.badge {
+				display: inline-block;
+				border-radius: 999px;
+				padding: 2px 8px;
+				font-size: 12px;
+				font-weight: 600;
+			}
+
+			.badge.pending {
+				background: #fff7ed;
+				color: #9a3412;
+			}
+
+			.badge.approved {
+				background: #ecfdf3;
+				color: #166534;
+			}
+
+			.badge.rejected {
+				background: #fef2f2;
+				color: #b91c1c;
+			}
+
+			.muted {
+				color: var(--muted);
+				font-size: 13px;
+			}
+
+			.summary-grid {
+				display: grid;
+				grid-template-columns: repeat(2, minmax(170px, 1fr));
+				gap: 10px;
+			}
+
+			.summary-box {
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 10px;
+				background: #fbfdff;
+			}
+
+			.summary-box .k {
+				color: var(--muted);
+				font-size: 12px;
+			}
+
+			.summary-box .v {
+				margin-top: 3px;
+				font-weight: 600;
+				word-break: break-word;
+			}
+
+			.section {
+				margin-top: 14px;
+			}
+
+			.section h3 {
+				margin: 0 0 8px;
+				font-size: 15px;
+			}
+
+			.chips {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 6px;
+			}
+
+			.chip {
+				padding: 6px 9px;
+				border-radius: 999px;
+				background: #f1f5f9;
+				border: 1px solid #e2e8f0;
+				font-size: 12px;
+			}
+
+			table {
+				width: 100%;
+				border-collapse: collapse;
+				font-size: 13px;
+			}
+
+			th,
+			td {
+				border-bottom: 1px solid var(--border);
+				padding: 8px 6px;
+				text-align: left;
+			}
+
+			.actions {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 8px;
+				margin-top: 10px;
+			}
+
+			.actions a,
+			.btn {
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 8px 11px;
+				text-decoration: none;
+				background: #fff;
+				color: #0f172a;
+				cursor: pointer;
+			}
+
+			.approve-panel {
+				margin-top: 14px;
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				padding: 12px;
+				background: #f8fafc;
+			}
+
+			.approve-row {
+				display: grid;
+				grid-template-columns: 170px 1fr;
+				gap: 10px;
+				align-items: center;
+			}
+
+			.approve-row label {
+				color: var(--muted);
+			}
+
+			input,
+			select {
+				border: 1px solid #cbd5e1;
+				border-radius: 8px;
+				padding: 8px;
+				font-size: 14px;
+			}
+
+			.btn-primary {
+				border-color: #0f766e;
+				background: #0f766e;
+				color: #fff;
+			}
+
+			.btn-danger {
+				border-color: #b91c1c;
+				background: #b91c1c;
+				color: #fff;
+			}
+
+			.notice {
+				margin-top: 8px;
+				padding: 8px;
+				border-radius: 8px;
+				font-size: 13px;
+			}
+
+			.notice.ok {
+				background: #ecfdf3;
+				color: var(--ok);
+				border: 1px solid #bbf7d0;
+			}
+
+			.notice.err {
+				background: #fef2f2;
+				color: var(--danger);
+				border: 1px solid #fecaca;
+			}
+
+			@media (max-width: 1000px) {
+				.grid {
+					grid-template-columns: 1fr;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<div class="page">
+			<div class="header">
+				<div>
+					<h1>COO Special Access Approval</h1>
+					<p>Review signatures, workflow summary, and complete COO approval with PIN or fingerprint option.</p>
+				</div>
+				<a class="logout" href="/logout">Logout</a>
+			</div>
+
+			<div class="grid">
+				<div class="card">
+					<h2>Approval Queue</h2>
+					{% if queue_rows %}
+					<div class="queue-list">
+						{% for row in queue_rows %}
+						{% set is_active = (selected_request_id == row.request_id) %}
+						<a class="queue-item {% if is_active %}active{% endif %}" href="{{ url_for('special_access_dashboard', request_id=row.request_id) }}">
+							<div class="queue-title">
+								<span>REQ#{{ row.request_id }}</span>
+								<span class="badge {% if (row.coo_status or '')|upper == 'APPROVED' %}approved{% elif (row.coo_status or '')|upper == 'REJECTED' %}rejected{% else %}pending{% endif %}">
+									{{ row.coo_status or 'PENDING' }}
+								</span>
+							</div>
+							<div class="muted">{{ row.type_name or 'Request' }}</div>
+							<div class="muted">Requester: {{ row.requester_email or '-' }}</div>
+							<div class="muted">Department: {{ row.dept_name or '-' }}</div>
+						</a>
+						{% endfor %}
+					</div>
+					{% else %}
+					<p class="muted">No COO special approvals in queue.</p>
+					{% endif %}
+				</div>
+
+				<div class="card">
+					{% if selected_summary %}
+					<h2>REQ#{{ selected_summary.request_id }} Summary</h2>
+					<div class="summary-grid">
+						<div class="summary-box">
+							<div class="k">Requested By</div>
+							<div class="v">{{ selected_summary.requester_email or '-' }}</div>
+						</div>
+						<div class="summary-box">
+							<div class="k">Department</div>
+							<div class="v">{{ selected_summary.requester_department or '-' }}</div>
+						</div>
+						<div class="summary-box">
+							<div class="k">Request Type</div>
+							<div class="v">{{ selected_summary.request_type_name or 'Request' }}</div>
+						</div>
+						<div class="summary-box">
+							<div class="k">Amount</div>
+							<div class="v">PHP {{ "{:,.2f}".format((selected_summary.amount or 0)|float) }}</div>
+						</div>
+						<div class="summary-box">
+							<div class="k">Request Budget</div>
+							<div class="v">{{ selected_summary.request_budget or '-' }}</div>
+						</div>
+						<div class="summary-box">
+							<div class="k">Current Request Status</div>
+							<div class="v">{{ selected_summary.request_status or '-' }}</div>
+						</div>
+						<div class="summary-box">
+							<div class="k">COO Approval Status</div>
+							<div class="v">{{ selected_summary.coo_status or 'PENDING' }}</div>
+						</div>
+						<div class="summary-box">
+							<div class="k">COO Approved By</div>
+							<div class="v">{{ selected_summary.coo_approved_by or '-' }}</div>
+						</div>
+					</div>
+
+					<div class="actions">
+						<a href="{{ url_for('download_attachment', request_id=selected_summary.request_id) }}" target="_blank">View Signed PDF</a>
+						<a href="{{ url_for('request_submission', request_id=selected_summary.request_id) }}" target="_blank">View Request Submission</a>
+						<a href="{{ url_for('annotate_page', request_id=selected_summary.request_id) }}" target="_blank">Open Annotation Viewer</a>
+					</div>
+
+					<div class="section">
+						<h3>Configured Reviewers</h3>
+						{% if reviewers %}
+						<div class="chips">
+							{% for item in reviewers %}
+							<span class="chip">{{ item.order_no }}. {{ item.position_name }}</span>
+							{% endfor %}
+						</div>
+						{% else %}
+						<p class="muted">No reviewer positions configured.</p>
+						{% endif %}
+					</div>
+
+					<div class="section">
+						<h3>Configured Approvers</h3>
+						{% if approvers %}
+						<div class="chips">
+							{% for item in approvers %}
+							<span class="chip">{{ item.order_no }}. {{ item.position_name }}</span>
+							{% endfor %}
+						</div>
+						{% else %}
+						<p class="muted">No approver positions configured.</p>
+						{% endif %}
+					</div>
+
+					<div class="section">
+						<h3>Action History (Reviewer/Approver)</h3>
+						{% if action_history %}
+						<table>
+							<thead>
+								<tr>
+									<th>Action</th>
+									<th>Actor</th>
+									<th>Position</th>
+									<th>Date</th>
+								</tr>
+							</thead>
+							<tbody>
+								{% for item in action_history %}
+								<tr>
+									<td>{{ item.action or '-' }}</td>
+									<td>{{ item.actor_email or '-' }}</td>
+									<td>{{ item.actor_position or '-' }}</td>
+									<td>{{ item.created_at or '-' }}</td>
+								</tr>
+								{% endfor %}
+							</tbody>
+						</table>
+						{% else %}
+						<p class="muted">No action history found.</p>
+						{% endif %}
+					</div>
+
+					<div class="section">
+						<h3>Captured Signatures / Annotations</h3>
+						{% if signature_entries %}
+						<table>
+							<thead>
+								<tr>
+									<th>Type</th>
+									<th>Actor</th>
+									<th>Page</th>
+								</tr>
+							</thead>
+							<tbody>
+								{% for sign in signature_entries %}
+								<tr>
+									<td>{{ sign.type }}</td>
+									<td>{{ sign.actor_email }}</td>
+									<td>{% if sign.page is not none %}{{ sign.page + 1 }}{% else %}-{% endif %}</td>
+								</tr>
+								{% endfor %}
+							</tbody>
+						</table>
+						{% else %}
+						<p class="muted">No signature/annotation records found yet for this request.</p>
+						{% endif %}
+					</div>
+
+					<div class="approve-panel">
+						<h3 style="margin: 0 0 10px">COO Final Approval</h3>
+						<div class="approve-row">
+							<label for="authMethod">Authentication</label>
+							<select id="authMethod">
+								<option value="pin" selected>PIN</option>
+								<option value="fingerprint">Fingerprint</option>
+							</select>
+						</div>
+						<div class="approve-row" id="pinRow" style="margin-top: 8px;">
+							<label for="cooPin">COO PIN</label>
+							<input type="password" id="cooPin" maxlength="4" inputmode="numeric" placeholder="Enter 4-digit PIN" />
+						</div>
+						<div class="approve-row" style="margin-top: 8px;">
+							<label for="cooRejectReason">Reject Reason</label>
+							<input type="text" id="cooRejectReason" placeholder="Optional reason for rejection" />
+						</div>
+						<p id="authHint" class="muted" style="margin: 8px 0 0; display:none;">Fingerprint approval is currently not configured in this environment. Use PIN.</p>
+						<div class="actions" style="margin-top: 12px;">
+							<button class="btn btn-primary" id="approveBtn" type="button">Approve Request</button>
+							<button class="btn btn-danger" id="rejectBtn" type="button">Reject Request</button>
+							<button class="btn" id="resendBtn" type="button">Resend COO Email Link</button>
+						</div>
+						<div id="approveNotice" class="notice" style="display:none;"></div>
+					</div>
+					{% else %}
+					<h2>Request Summary</h2>
+					<p class="muted">No request selected.</p>
+					{% endif %}
+				</div>
+			</div>
+		</div>
+
+		{% if selected_summary %}
+		<script>
+			(function () {
+				const requestId = {{ selected_summary.request_id|tojson }};
+				const authMethodEl = document.getElementById("authMethod");
+				const pinRowEl = document.getElementById("pinRow");
+				const pinEl = document.getElementById("cooPin");
+				const hintEl = document.getElementById("authHint");
+				const btnEl = document.getElementById("approveBtn");
+				const rejectBtnEl = document.getElementById("rejectBtn");
+				const resendBtnEl = document.getElementById("resendBtn");
+				const rejectReasonEl = document.getElementById("cooRejectReason");
+				const noticeEl = document.getElementById("approveNotice");
+				const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
+
+				function setNotice(text, ok) {
+					noticeEl.style.display = "block";
+					noticeEl.className = "notice " + (ok ? "ok" : "err");
+					noticeEl.textContent = text;
+				}
+
+				function handleAuthMethodChange() {
+					const method = String(authMethodEl.value || "pin").toLowerCase();
+					if (method === "fingerprint") {
+						pinRowEl.style.display = "none";
+						hintEl.style.display = "block";
+					} else {
+						pinRowEl.style.display = "grid";
+						hintEl.style.display = "none";
+					}
+					noticeEl.style.display = "none";
+				}
+
+				authMethodEl.addEventListener("change", handleAuthMethodChange);
+				handleAuthMethodChange();
+
+				async function submitDecision(endpoint, successFallback, includeReason) {
+					const authMethod = String(authMethodEl.value || "pin").toLowerCase();
+					const pin = String(pinEl.value || "").trim();
+					const reason = String(rejectReasonEl?.value || "").trim();
+
+					if (authMethod === "pin" && !/^\d{4}$/.test(pin)) {
+						setNotice("Please enter your 4-digit PIN.", false);
+						return;
+					}
+
+					btnEl.disabled = true;
+					rejectBtnEl.disabled = true;
+					noticeEl.style.display = "none";
+
+					try {
+						const res = await fetch(`/api/specialaccess/request/${requestId}/${endpoint}`, {
+							method: "POST",
+							credentials: "same-origin",
+							headers: {
+								"Content-Type": "application/json",
+								...(csrf ? { "X-CSRFToken": csrf } : {}),
+							},
+							body: JSON.stringify({
+								auth_method: authMethod,
+								pin: pin,
+								reason: includeReason ? reason : "",
+							}),
+						});
+
+						const data = await res.json().catch(() => ({}));
+						if (!res.ok || data.success === false) {
+							setNotice(data.error || "Failed to approve request.", false);
+							return;
+						}
+
+						const sent = Number(data?.email?.sent || 0);
+						const total = Number(data?.email?.recipients || 0);
+						const invalidCount = Number(data?.email?.invalid_recipients_count || 0);
+						let successText = data.message || successFallback;
+						if (total > 0) {
+							successText += ` Email sent: ${sent}/${total}.`;
+						}
+						if (invalidCount > 0) {
+							successText += ` Skipped invalid email(s): ${invalidCount}.`;
+						}
+						setNotice(successText, true);
+						setTimeout(() => {
+							window.location.reload();
+						}, 900);
+					} catch (err) {
+						setNotice("Network error. Please try again.", false);
+					} finally {
+						btnEl.disabled = false;
+						rejectBtnEl.disabled = false;
+					}
+				}
+
+				btnEl.addEventListener("click", function () {
+					submitDecision("approve", "COO special approval completed.", false);
+				});
+
+				rejectBtnEl.addEventListener("click", function () {
+					submitDecision("reject", "COO special rejection completed.", true);
+				});
+
+				resendBtnEl.addEventListener("click", async function () {
+					resendBtnEl.disabled = true;
+					noticeEl.style.display = "none";
+
+					try {
+						const res = await fetch(`/api/specialaccess/request/${requestId}/resend-email`, {
+							method: "POST",
+							credentials: "same-origin",
+							headers: {
+								"Content-Type": "application/json",
+								...(csrf ? { "X-CSRFToken": csrf } : {}),
+							},
+							body: JSON.stringify({}),
+						});
+
+						const data = await res.json().catch(() => ({}));
+						if (!res.ok || data.success === false) {
+							setNotice(data.error || "Failed to resend COO email link.", false);
+							return;
+						}
+
+						setNotice(data.message || "COO email link resent.", true);
+					} catch (err) {
+						setNotice("Network error. Please try again.", false);
+					} finally {
+						resendBtnEl.disabled = false;
+					}
+				});
+			})();
+		</script>
+		{% endif %}
+	</body>
+</html>

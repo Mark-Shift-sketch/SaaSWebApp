@@ -298,16 +298,17 @@
                     <td><span class="type-badge">{{ req.type_name }}</span></td>
 
                     <td>
-                      {% if req.filename %}
                       <a
-                        href="/download_attachment/{{ req.request_id }}"
+                        href="/request_submission/{{ req.request_id }}"
                         target="_blank"
                         class="file-link"
                       >
-                        <i class="fa-solid fa-paperclip"></i> {{ req.filename }}
+                        <i class="fa-solid fa-paperclip"></i> View Submission
                       </a>
-                      {% else %}
-                      <span class="text-muted">No file</span>
+                      {% if req.filename %}
+                      <div class="text-muted" style="font-size: 12px; margin-top: 4px">
+                        {{ req.filename }}
+                      </div>
                       {% endif %}
                     </td>
 

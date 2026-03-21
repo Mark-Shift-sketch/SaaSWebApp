@@ -85,6 +85,9 @@
         outline: 2px dashed #2563eb;
         outline-offset: 2px;
       }
+      .item.locked {
+        opacity: 0.94;
+      }
 
       .item .handle {
         position: absolute;
@@ -176,6 +179,9 @@
   <body data-request-id="{{ request_id }}">
     <script>
       window.IS_SIGNED = {{ 'true' if is_signed else 'false' }};
+      window.CURRENT_ACTOR_USER_ID = {{ session.get('user_id')|tojson }};
+      window.CURRENT_ACTOR_POSITION_ID = {{ session.get('position_id')|tojson }};
+      window.CURRENT_ACTOR_EMAIL = {{ session.get('email')|tojson }};
     </script>
 
     <div class="topbar">
@@ -407,8 +413,69 @@
         });
       }
 
+      async function makeSignatureTransparentDataUrl(
+        dataUrl,
+        maxW = 1400,
+        maxH = 900,
+        whiteThreshold = 245,
+      ) {
+        return await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            let w = img.width;
+            let h = img.height;
+            const s = Math.min(maxW / Math.max(1, w), maxH / Math.max(1, h), 1);
+            w = Math.max(1, Math.round(w * s));
+            h = Math.max(1, Math.round(h * s));
+
+            const c = document.createElement("canvas");
+            c.width = w;
+            c.height = h;
+            const ctx = c.getContext("2d", { willReadFrequently: true });
+            ctx.clearRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+
+            const imageData = ctx.getImageData(0, 0, w, h);
+            const d = imageData.data;
+
+            for (let i = 0; i < d.length; i += 4) {
+              const r = d[i];
+              const g = d[i + 1];
+              const b = d[i + 2];
+              const a = d[i + 3];
+              if (a === 0) continue;
+
+              const isNearWhite = r >= whiteThreshold && g >= whiteThreshold && b >= whiteThreshold;
+              if (isNearWhite) {
+                d[i + 3] = 0;
+              }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+            resolve(c.toDataURL("image/png"));
+          };
+          img.onerror = reject;
+          img.src = dataUrl;
+        });
+      }
+
       const REQUEST_ID = Number(document.body.dataset.requestId || 0);
       const PDF_URL = `/download_attachment/${REQUEST_ID}`;
+
+      function toIntOrNull(v) {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      }
+
+      function normalizeEmail(v) {
+        return (v || "").toString().trim().toLowerCase() || null;
+      }
+
+      const CURRENT_ACTOR = {
+        userId: toIntOrNull(window.CURRENT_ACTOR_USER_ID),
+        positionId: toIntOrNull(window.CURRENT_ACTOR_POSITION_ID),
+        email: normalizeEmail(window.CURRENT_ACTOR_EMAIL),
+      };
 
       pdfjsLib.GlobalWorkerOptions.workerSrc =
         "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
@@ -419,6 +486,39 @@
       const pageMeta = [];
       let objects = [];
       let selectedEl = null;
+
+      function actorOwnsObject(obj) {
+        if (!obj || typeof obj !== "object") return false;
+
+        const annUserId = toIntOrNull(obj.actor_user_id);
+        if (CURRENT_ACTOR.userId !== null && annUserId !== null) {
+          return CURRENT_ACTOR.userId === annUserId;
+        }
+
+        const annPositionId = toIntOrNull(obj.actor_position_id);
+        if (CURRENT_ACTOR.positionId !== null && annPositionId !== null) {
+          return CURRENT_ACTOR.positionId === annPositionId;
+        }
+
+        const annEmail = normalizeEmail(obj.actor_email);
+        if (CURRENT_ACTOR.email && annEmail) {
+          return CURRENT_ACTOR.email === annEmail;
+        }
+
+        return false;
+      }
+
+      function canEditObjectData(obj) {
+        if (window.IS_SIGNED) return false;
+        return actorOwnsObject(obj);
+      }
+
+      function canEditElement(el) {
+        const id = el?.dataset?.id;
+        if (!id) return false;
+        const obj = objects.find((o) => String(o.id) === String(id));
+        return canEditObjectData(obj);
+      }
 
       // =========================
       // Selection (FIXED!)
@@ -437,14 +537,14 @@
       document.addEventListener("keydown", (e) => {
         if (e.key === "Escape") deselect();
 
-        if (e.key === "Delete" && selectedEl && !window.IS_SIGNED) {
+        if (e.key === "Delete" && selectedEl && canEditElement(selectedEl)) {
           const id = selectedEl.dataset.id;
           objects = objects.filter((o) => o.id !== id);
           selectedEl.remove();
           selectedEl = null;
         }
 
-        if (!selectedEl || window.IS_SIGNED) return;
+        if (!selectedEl || !canEditElement(selectedEl)) return;
         if (document.activeElement && document.activeElement.isContentEditable)
           return;
         if (DRAW_MODE) return;
@@ -526,7 +626,7 @@
         let dragging = false;
 
         el.addEventListener("pointerdown", (e) => {
-          if (window.IS_SIGNED) return;
+          if (!canEditElement(el)) return;
           if (DRAW_MODE) return;
           if (e.target.classList.contains("handle")) return;
 
@@ -590,7 +690,7 @@
           origH = 0;
 
         handle.addEventListener("pointerdown", (e) => {
-          if (window.IS_SIGNED) return;
+          if (!canEditElement(el)) return;
           if (DRAW_MODE) return;
           e.stopPropagation();
           select(el);
@@ -644,6 +744,9 @@
         const el = document.createElement("div");
         el.className = "item";
         el.dataset.id = obj.id;
+        const isEditable = canEditObjectData(obj);
+        el.dataset.editable = isEditable ? "1" : "0";
+        if (!isEditable) el.classList.add("locked");
 
         const { cssX, cssY, cssW, cssH } = pdfToCss(
           obj.page,
@@ -663,19 +766,19 @@
 
           const editor = document.createElement("div");
           editor.className = "text-editor";
-          editor.contentEditable = window.IS_SIGNED ? "false" : "true";
+          editor.contentEditable = isEditable ? "true" : "false";
           editor.innerText = obj.text || "";
           el.appendChild(editor);
 
           editor.addEventListener("click", (e) => e.stopPropagation());
 
           editor.addEventListener("input", () => {
-            if (window.IS_SIGNED) return;
+            if (!isEditable) return;
             const found = objects.find((o) => o.id === obj.id);
             if (found) found.text = editor.innerText;
           });
 
-          if (!window.IS_SIGNED) makeResizable(el);
+          if (isEditable) makeResizable(el);
         } else {
           const img = document.createElement("img");
           img.src = obj.imageDataUrl;
@@ -686,15 +789,19 @@
 
           el.style.width = cssW + "px";
           el.style.height = cssH + "px";
-          if (!window.IS_SIGNED) makeResizable(el);
+          if (isEditable) makeResizable(el);
         }
 
         el.addEventListener("click", (e) => {
           e.stopPropagation();
+          if (!isEditable) {
+            deselect();
+            return;
+          }
           select(el);
         });
 
-        makeDraggable(el);
+        if (isEditable) makeDraggable(el);
         overlay.appendChild(el);
       }
 
@@ -709,6 +816,11 @@
           if (!res.ok)
             throw new Error("Annotations endpoint returned " + res.status);
           const data = await res.json();
+
+          CURRENT_ACTOR.userId = toIntOrNull(data.actor_user_id);
+          CURRENT_ACTOR.positionId = toIntOrNull(data.actor_position_id);
+          CURRENT_ACTOR.email = normalizeEmail(data.actor_email) || CURRENT_ACTOR.email;
+
           objects = (data.annotations || []).map((o) => ({ ...o }));
           objects.forEach(renderObject);
         } catch (err) {
@@ -841,6 +953,9 @@
           w: 140,
           h: 24,
           text: "Double-click to edit",
+          actor_user_id: CURRENT_ACTOR.userId,
+          actor_position_id: CURRENT_ACTOR.positionId,
+          actor_email: CURRENT_ACTOR.email,
         };
 
         objects.push(obj);
@@ -874,6 +989,9 @@
             w: place.w,
             h: place.h,
             imageDataUrl: compressed,
+            actor_user_id: CURRENT_ACTOR.userId,
+            actor_position_id: CURRENT_ACTOR.positionId,
+            actor_email: CURRENT_ACTOR.email,
           };
 
           objects.push(obj);
@@ -910,8 +1028,6 @@
 
       function clearSigCanvas() {
         sigCtx.clearRect(0, 0, sigCanvas.width, sigCanvas.height);
-        sigCtx.fillStyle = "#fff";
-        sigCtx.fillRect(0, 0, sigCanvas.width, sigCanvas.height);
         sigCtx.strokeStyle = "#111827";
         sigCtx.lineWidth = 3;
         sigCtx.lineCap = "round";
@@ -980,7 +1096,11 @@
           const place = createVisiblePlacement(pageIndex, 0.25, 60);
 
           const raw = sigCanvas.toDataURL("image/png");
-          const compressed = await compressImageDataUrl(raw, 900, 400, 0.85);
+          const transparentSig = await makeSignatureTransparentDataUrl(
+            raw,
+            900,
+            400,
+          );
 
           const obj = {
             id: uid(),
@@ -990,7 +1110,10 @@
             y: place.y,
             w: place.w,
             h: place.h,
-            imageDataUrl: compressed,
+            imageDataUrl: transparentSig,
+            actor_user_id: CURRENT_ACTOR.userId,
+            actor_position_id: CURRENT_ACTOR.positionId,
+            actor_email: CURRENT_ACTOR.email,
           };
 
           objects.push(obj);
@@ -1193,6 +1316,9 @@
           w,
           h,
           imageDataUrl: pngDataUrl,
+          actor_user_id: CURRENT_ACTOR.userId,
+          actor_position_id: CURRENT_ACTOR.positionId,
+          actor_email: CURRENT_ACTOR.email,
         };
 
         clearDrawLayer();

@@ -7264,6 +7264,9 @@ def get_annotations(request_id):
                 "annotations": annotations,
                 "has_annotations": len(annotations) > 0,
                 "current_actor_has_annotations": current_actor_has_annotations,
+                "actor_user_id": actor_user_id,
+                "actor_position_id": actor_position_id,
+                "actor_email": (session.get("email") or "").strip().lower() or None,
             }
         )
     finally:
@@ -7300,12 +7303,42 @@ def save_annotations(request_id):
     if len(annotations) > 200:
         return jsonify({"error": "Too many items"}), 400
 
+    def _normalize_optional_int(value):
+        try:
+            return int(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    def _annotation_owned_by_actor(ann):
+        if not isinstance(ann, dict):
+            return False
+
+        ann_user_id = _normalize_optional_int(ann.get("actor_user_id"))
+        if actor_user_id is not None and ann_user_id is not None:
+            return ann_user_id == actor_user_id
+
+        ann_position_id = _normalize_optional_int(ann.get("actor_position_id"))
+        if actor_position_id is not None and ann_position_id is not None:
+            return ann_position_id == actor_position_id
+
+        ann_email = (ann.get("actor_email") or "").strip().lower()
+        if actor_email and ann_email:
+            return ann_email == actor_email
+
+        return False
+
     normalized_annotations = []
     for item in annotations:
         if not isinstance(item, dict):
             continue
 
         ann = dict(item)
+        ann_id = ann.get("id")
+        if ann_id in (None, ""):
+            ann["id"] = f"ann-{int(time.time() * 1000)}-{len(normalized_annotations)}"
+        else:
+            ann["id"] = str(ann_id)
+
         if ann.get("actor_user_id") in (None, ""):
             ann["actor_user_id"] = actor_user_id
         if ann.get("actor_position_id") in (None, ""):
@@ -7320,11 +7353,80 @@ def save_annotations(request_id):
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     try:
+        cur.execute(
+            "SELECT annotations_json FROM request_annotations WHERE request_id=%s",
+            (request_id,),
+        )
+        existing_row = cur.fetchone()
+        existing_annotations = []
+        if existing_row and existing_row.get("annotations_json"):
+            try:
+                parsed = json.loads(existing_row["annotations_json"])
+                if isinstance(parsed, list):
+                    existing_annotations = [a for a in parsed if isinstance(a, dict)]
+            except Exception:
+                existing_annotations = []
+
+        incoming_by_id = {}
+        incoming_in_order = []
+        for ann in annotations:
+            ann_id = str(ann.get("id") or "")
+            if not ann_id:
+                continue
+            incoming_by_id[ann_id] = ann
+            incoming_in_order.append(ann_id)
+
+        annotations_to_save = []
+        protected_ids = set()
+
+        for existing in existing_annotations:
+            existing_id = existing.get("id")
+            existing_id = str(existing_id) if existing_id not in (None, "") else None
+            editable_by_actor = _annotation_owned_by_actor(existing)
+
+            if not editable_by_actor:
+                annotations_to_save.append(existing)
+                if existing_id:
+                    protected_ids.add(existing_id)
+                continue
+
+            if existing_id and existing_id in incoming_by_id:
+                updated = dict(incoming_by_id.pop(existing_id))
+                updated["actor_user_id"] = existing.get("actor_user_id")
+                updated["actor_position_id"] = existing.get("actor_position_id")
+                updated["actor_email"] = existing.get("actor_email")
+                annotations_to_save.append(updated)
+            # If an owned annotation is omitted by the actor, treat it as deleted.
+
+        seen_new_ids = set()
+        for ann_id in incoming_in_order:
+            if ann_id in seen_new_ids:
+                continue
+            seen_new_ids.add(ann_id)
+
+            ann = incoming_by_id.get(ann_id)
+            if not ann:
+                continue
+            if ann_id in protected_ids:
+                continue
+
+            ann_to_add = dict(ann)
+            ann_to_add["actor_user_id"] = actor_user_id
+            ann_to_add["actor_position_id"] = actor_position_id
+            ann_to_add["actor_email"] = actor_email
+            annotations_to_save.append(ann_to_add)
+
+        if len(annotations_to_save) > 200:
+            return jsonify({"error": "Too many items"}), 400
+
         # Load base PDF
         template_pdf_bytes, _ = _load_template_pdf_bytes_for_request(cur, request_id)
         if not template_pdf_bytes:
             return jsonify({"error": "Original PDF not found"}), 404
-        if not any(data.get("x") is not None and data.get("y") is not None for data in annotations):
+        if annotations_to_save and not any(
+            data.get("x") is not None and data.get("y") is not None
+            for data in annotations_to_save
+        ):
             return jsonify({"error": "Invalid annotation coordinates"}), 400
 
         # Ensure annotations row exists
@@ -7340,7 +7442,7 @@ def save_annotations(request_id):
         text_items = []
         image_items = []
 
-        for it in annotations:
+        for it in annotations_to_save:
             t = (it.get("type") or "").strip().lower()
             page = int(it.get("page") or 0)
             x = float(it.get("x") or 0)
@@ -7393,7 +7495,7 @@ def save_annotations(request_id):
             SET annotations_json=%s, signed_pdf=%s
             WHERE request_id=%s
         """,
-            (json.dumps(annotations), signed_pdf, request_id),
+            (json.dumps(annotations_to_save), signed_pdf, request_id),
         )
 
         conn.commit()

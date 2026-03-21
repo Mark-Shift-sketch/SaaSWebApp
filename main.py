@@ -229,6 +229,46 @@ def is_storage_full_exception(exc):
     )
 
 
+def get_request_ip_address():
+    forwarded_for = (request.headers.get("X-Forwarded-For") or "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    return (request.remote_addr or "Unknown").strip()
+
+
+def get_request_device_info():
+    ua = (request.headers.get("User-Agent") or "Unknown Device").strip()
+    # Keep auth activity entries compact.
+    return ua[:255]
+
+
+def log_auth_activity(action_title, email):
+    email = (email or "Unknown").strip().lower()
+    ip_address = get_request_ip_address()
+    device = get_request_device_info()
+    description = f"Email: {email} | Where: {ip_address} | Device: {device}"
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "INSERT INTO activity_logs (title, description) VALUES (%s, %s)",
+            (action_title, description),
+        )
+        conn.commit()
+    except Exception:
+        if conn:
+            conn.rollback()
+        logger.exception("Failed to write auth activity log")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
 @app.errorhandler(RequestEntityTooLarge)
 def handle_large_file(e):
     msg = "File too large. Maximum allowed size is 20MB."
@@ -8184,6 +8224,117 @@ def it_dashboard():
         cursor.execute("SELECT * FROM activity_logs ORDER BY created_at ASC LIMIT 15")
         notifications = cursor.fetchall()
 
+        cursor.execute(
+            """
+            SELECT title, description, created_at
+            FROM activity_logs
+            WHERE
+                LOWER(COALESCE(title, '')) IN ('login', 'log in', 'sign up', 'signup', 'logout', 'log out')
+                OR LOWER(COALESCE(description, '')) REGEXP 'login|log in|sign up|signup|logout|log out'
+            ORDER BY created_at DESC
+            LIMIT 200
+            """
+        )
+        auth_log_rows = cursor.fetchall() or []
+
+        activity_logs = []
+        for row in auth_log_rows:
+            title = (row.get("title") or "").strip()
+            title_lower = title.lower()
+
+            if "sign" in title_lower and "up" in title_lower:
+                action_type = "Sign Up"
+            elif "log" in title_lower and "out" in title_lower:
+                action_type = "Logout"
+            else:
+                action_type = "Login"
+
+            created_at = row.get("created_at")
+            if hasattr(created_at, "strftime"):
+                event_date = created_at.strftime("%Y-%m-%d")
+                event_time = created_at.strftime("%I:%M:%S %p")
+            else:
+                created_at_text = str(created_at or "")
+                created_parts = created_at_text.split(" ", 1)
+                event_date = created_parts[0] if created_parts and created_parts[0] else "N/A"
+                event_time = created_parts[1] if len(created_parts) > 1 else "N/A"
+
+            description = row.get("description") or ""
+            email_match = re.search(r"Email\s*:\s*([^|]+)", description, flags=re.IGNORECASE)
+            where_match = re.search(r"(?:Where|Location|IP)\s*:\s*([^|]+)", description, flags=re.IGNORECASE)
+            device_match = re.search(r"Device\s*:\s*([^|]+)", description, flags=re.IGNORECASE)
+
+            activity_logs.append(
+                {
+                    "action_type": action_type,
+                    "email": (email_match.group(1).strip() if email_match else "N/A"),
+                    "event_date": event_date,
+                    "event_time": event_time,
+                    "location": (where_match.group(1).strip() if where_match else "N/A"),
+                    "device": (device_match.group(1).strip() if device_match else "N/A"),
+                }
+            )
+
+        cursor.execute(
+            """
+            SELECT
+                r.request_id,
+                COALESCE(sub.email, 'Unknown') AS submitted_by,
+                r.created_at AS submitted_at,
+                COALESCE(ra.action, '') AS action_name,
+                COALESCE(ra.actor_email, 'Unknown') AS action_by,
+                ra.created_at AS action_at
+            FROM request_actions ra
+            INNER JOIN requests r ON r.request_id = ra.request_id
+            LEFT JOIN users sub ON sub.user_id = r.user_id
+            WHERE
+                LOWER(COALESCE(ra.action, '')) LIKE '%approv%'
+                OR LOWER(COALESCE(ra.action, '')) LIKE '%reject%'
+            ORDER BY ra.created_at DESC, ra.request_id DESC
+            LIMIT 500
+            """
+        )
+        audit_rows = cursor.fetchall() or []
+
+        audit_trails = []
+        for row in audit_rows:
+            submitted_at = row.get("submitted_at")
+            action_at = row.get("action_at")
+            action_name = (row.get("action_name") or "").strip().lower()
+            is_rejected = "reject" in action_name
+            is_approved = not is_rejected
+            action_status = "Rejected" if is_rejected else "Approved"
+
+            if hasattr(action_at, "strftime"):
+                action_month = action_at.strftime("%Y-%m")
+                action_timestamp = action_at.strftime("%Y-%m-%d %I:%M:%S %p")
+            else:
+                action_timestamp = str(action_at) if action_at else "N/A"
+                action_month = action_timestamp[:7] if len(action_timestamp) >= 7 else ""
+
+            audit_trails.append(
+                {
+                    "request_id": row.get("request_id"),
+                    "action_status": action_status,
+                    "action_month": action_month,
+                    "action_timestamp": action_timestamp,
+                    "submitted_by": row.get("submitted_by") or "N/A",
+                    "submitted_at": submitted_at.strftime("%Y-%m-%d %I:%M:%S %p") if hasattr(submitted_at, "strftime") else (str(submitted_at) if submitted_at else "N/A"),
+                    "approved_by": (row.get("action_by") if is_approved else "N/A") or "N/A",
+                    "approved_at": (
+                        action_at.strftime("%Y-%m-%d %I:%M:%S %p")
+                        if is_approved and hasattr(action_at, "strftime")
+                        else (str(action_at) if is_approved and action_at else "N/A")
+                    ),
+                    "rejected_by": (row.get("action_by") if is_rejected else "N/A") or "N/A",
+                    "rejected_at": (
+                        action_at.strftime("%Y-%m-%d %I:%M:%S %p")
+                        if is_rejected and hasattr(action_at, "strftime")
+                        else (str(action_at) if is_rejected and action_at else "N/A")
+                    ),
+                }
+            )
+
         return render_template(
             "IT.html",
             users=users,
@@ -8194,6 +8345,8 @@ def it_dashboard():
             roles=roles,
             positions=positions,
             notifications=notifications,
+            activity_logs=activity_logs,
+            audit_trails=audit_trails,
         )
     finally:
         cursor.close()
@@ -10741,6 +10894,8 @@ def signup():
             created_user_id = cursor.lastrowid
             conn.commit()
 
+            log_auth_activity("Sign Up", e)
+
             session["email"] = e
             session["user_id"] = created_user_id
             session["dept"] = dept_name
@@ -10818,6 +10973,8 @@ def login():
                 session["position"] = user["position_name"]
                 session["position_id"] = user["position_id"]
                 session["dept"] = user["dept_name"]
+
+                log_auth_activity("Login", user["email"])
                 return redirect("/")
             
             else:
@@ -11286,6 +11443,9 @@ def mobile_notifications():
 
 @app.route("/logout")
 def logout():
+    active_email = session.get("email")
+    if active_email:
+        log_auth_activity("Logout", active_email)
     session.clear()
     return redirect("/login")
 

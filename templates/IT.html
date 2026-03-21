@@ -41,6 +41,16 @@
           >
         </li>
         <li>
+          <a onclick="showTab('activity')" id="link-activity"
+            >Activity Logs</a
+          >
+        </li>
+        <li>
+          <a onclick="showTab('audit')" id="link-audit"
+            >Audit Trails</a
+          >
+        </li>
+        <li>
           <a onclick="showTab('department')" id="link-department"
             >Departments</a
           >
@@ -516,6 +526,136 @@
           {% endfor %}
         </div>
       </div>
+
+      <div id="activity" class="tab-content">
+        <header>
+          <h1 class="section-title">Activity Logs</h1>
+        </header>
+
+        <div class="table-container">
+          <div class="table-header">
+            <h3>Login, Signup, and Logout History</h3>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>Who's (Email)</th>
+                <th>Date</th>
+                <th>Time</th>
+                <th>Where</th>
+                <th>Device</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% set auth_activity = namespace(found=false) %}
+              {% for log in activity_logs %}
+              {% set action = (log.action_type or '') | lower %}
+              {% if action in ['login', 'log in', 'signup', 'sign up', 'logout', 'log out'] %}
+              {% set auth_activity.found = true %}
+              <tr>
+                <td>{{ log.action_type or 'Unknown' }}</td>
+                <td>{{ log.email or 'N/A' }}</td>
+                <td>{{ log.event_date or 'N/A' }}</td>
+                <td>{{ log.event_time or 'N/A' }}</td>
+                <td>{{ log.location or log.ip_address or 'N/A' }}</td>
+                <td>{{ log.device or log.user_agent or 'N/A' }}</td>
+              </tr>
+              {% endif %}
+              {% endfor %}
+              {% if not auth_activity.found %}
+              <tr>
+                <td colspan="6" style="text-align: center">
+                  No login, signup, or logout activity logs found.
+                </td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="audit" class="tab-content">
+        <header>
+          <h1 class="section-title">Audit Trails</h1>
+        </header>
+
+        <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-bottom: 12px;">
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="audit-search-req">Search by Req ID</label>
+            <input
+              id="audit-search-req"
+              type="text"
+              placeholder="e.g., 214"
+              oninput="filterAuditTrails()"
+            />
+          </div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="audit-filter-status">Filter by Status</label>
+            <select id="audit-filter-status" onchange="filterAuditTrails()">
+              <option value="">All Status</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="audit-filter-month">Filter by Month</label>
+            <input id="audit-filter-month" type="month" onchange="filterAuditTrails()" />
+          </div>
+        </div>
+
+        <div class="table-container">
+          <div class="table-header">
+            <h3>Audit Trail (Requests)</h3>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Request ID</th>
+                <th>Status</th>
+                <th>Who Submitted</th>
+                <th>Who Approved</th>
+                <th>Who Rejected</th>
+                <th>Submitted Timestamp</th>
+                <th>Approved Timestamp</th>
+                <th>Rejected Timestamp</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if audit_trails %}
+              {% for audit in audit_trails %}
+              <tr>
+                <td
+                  class="audit-request-id"
+                  data-request-id="{{ audit.request_id }}"
+                  data-status="{{ (audit.action_status or '') | lower }}"
+                  data-month="{{ audit.action_month or '' }}"
+                >#{{ audit.request_id }}</td>
+                <td>{{ audit.action_status or 'N/A' }}</td>
+                <td>{{ audit.submitted_by or 'N/A' }}</td>
+                <td>{{ audit.approved_by or 'N/A' }}</td>
+                <td>{{ audit.rejected_by or 'N/A' }}</td>
+                <td>{{ audit.submitted_at or 'N/A' }}</td>
+                <td>{{ audit.approved_at or 'N/A' }}</td>
+                <td>{{ audit.rejected_at or 'N/A' }}</td>
+              </tr>
+              {% endfor %}
+              <tr id="audit-no-match-row" style="display: none;">
+                <td colspan="8" style="text-align: center">
+                  No matching audit trail records.
+                </td>
+              </tr>
+              {% else %}
+              <tr>
+                <td colspan="8" style="text-align: center">
+                  No request audit trail records found.
+                </td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </main>
 
     <script>
@@ -559,6 +699,43 @@
         return window.confirm(
           `Remove ${email} from department ${deptName}? User will become unassigned.`
         );
+      }
+
+      function filterAuditTrails() {
+        const reqInput = (document.getElementById("audit-search-req")?.value || "")
+          .trim()
+          .replace("#", "")
+          .toLowerCase();
+        const statusValue = (document.getElementById("audit-filter-status")?.value || "")
+          .trim()
+          .toLowerCase();
+        const monthValue = (document.getElementById("audit-filter-month")?.value || "").trim();
+
+        const requestCells = document.querySelectorAll("td.audit-request-id");
+        const noMatchRow = document.getElementById("audit-no-match-row");
+
+        let visibleCount = 0;
+
+        requestCells.forEach((cell) => {
+          const row = cell.closest("tr");
+          if (!row) return;
+
+          const requestId = (cell.dataset.requestId || "").toLowerCase();
+          const status = (cell.dataset.status || "").toLowerCase();
+          const month = (cell.dataset.month || "").trim();
+
+          const reqMatch = !reqInput || requestId.includes(reqInput);
+          const statusMatch = !statusValue || status === statusValue;
+          const monthMatch = !monthValue || month === monthValue;
+
+          const show = reqMatch && statusMatch && monthMatch;
+          row.style.display = show ? "" : "none";
+          if (show) visibleCount += 1;
+        });
+
+        if (noMatchRow) {
+          noMatchRow.style.display = visibleCount === 0 && requestCells.length > 0 ? "" : "none";
+        }
       }
     </script>
   </body>

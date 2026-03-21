@@ -7,8 +7,8 @@
     <title>User Dashboard</title>
 
     <script src="{{ url_for('static', filename='vendor/lucide.min.js') }}"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='user/user.css') }}?v=20260312a" />
-    <script src="{{ url_for('static', filename='user/user.js') }}?v=20260320c"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='user/user.css') }}?v=20260321d" />
+    <script src="{{ url_for('static', filename='user/user.js') }}?v=20260321a"></script>
     <script src="{{ url_for('static', filename='user/sweetalert.js') }}"></script>
     <script src="{{ url_for('static', filename='alltoast/toast.js') }}"></script>
   </head>
@@ -261,6 +261,34 @@
 
           <!-- FIXED HISTORY SECTION -->
           <div id="section-history" class="section hidden fade-in">
+            <div class="table-controls" style="margin-bottom: 12px;">
+              <div class="table-title">
+                <h2>Request History</h2>
+              </div>
+              <div class="table-actions" style="display:flex; gap:10px; flex-wrap:wrap;">
+                <input
+                  type="text"
+                  id="history-search-req"
+                  placeholder="Search Req ID..."
+                  oninput="applyHistoryFilters()"
+                />
+                <select id="history-filter-status" onchange="applyHistoryFilters()">
+                  <option value="all">All Status</option>
+                  <option value="rejected">Rejected</option>
+                  <option value="approved">Approved</option>
+                  <option value="completed">Completed</option>
+                </select>
+                <input id="history-filter-date" type="date" onchange="applyHistoryFilters()" />
+                <input id="history-filter-month" type="month" onchange="applyHistoryFilters()" />
+                <select id="history-sort" onchange="applyHistoryFilters()">
+                  <option value="date_desc">Sort: Date (Newest)</option>
+                  <option value="date_asc">Sort: Date (Oldest)</option>
+                  <option value="req_desc">Sort: Req ID (High-Low)</option>
+                  <option value="req_asc">Sort: Req ID (Low-High)</option>
+                </select>
+              </div>
+            </div>
+
             <table>
               <thead>
                 <tr>
@@ -274,14 +302,26 @@
 
               <tbody id="history-table-body">
                 {% for reqs in all_request %}
-                <tr>
+                {% set status_lower = (reqs.status_name or '') | lower %}
+                {% if 'pending' not in status_lower %}
+                <tr
+                  data-req-id="{{ reqs.request_id }}"
+                  data-status="{{ status_lower }}"
+                  data-date="{{ (reqs.created_at|string)[:10] }}"
+                  data-month="{{ (reqs.created_at|string)[:7] }}"
+                  data-ts="{{ reqs.created_at }}"
+                >
                   <td>{{ reqs.request_id }}</td>
                   <td>{{ reqs.type_name }}</td>
                   <td>{{ reqs.filename }}</td>
                   <td>{{ reqs.status_name }}</td>
                   <td>{{ reqs.created_at }}</td>
                 </tr>
+                {% endif %}
                 {% endfor %}
+                <tr id="history-no-match-row" style="display:none;">
+                  <td colspan="5" class="text-center text-muted">No matching history records found.</td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -299,6 +339,11 @@
           </div>
 
           <div id="section-settings" class="section hidden fade-in">
+            <div style="max-width: 220px; margin-bottom: 12px;">
+              <button type="button" id="dark-mode-toggle" class="theme-toggle" onclick="toggleDarkMode()">
+                Dark Mode
+              </button>
+            </div>
             <div class="settings-grid">
               <div class="card">
                 <h2 class="card-title">
@@ -575,5 +620,26 @@
         </div>
       </div>
     </div>
+    <script>
+      function applyDarkModeState(isDark) {
+        document.body.classList.toggle("dark-mode", Boolean(isDark));
+        const toggle = document.getElementById("dark-mode-toggle");
+        if (toggle) {
+          toggle.textContent = isDark ? "Light Mode" : "Dark Mode";
+        }
+      }
+
+      function toggleDarkMode() {
+        const current = localStorage.getItem("dashboard_theme") === "dark";
+        const next = !current;
+        localStorage.setItem("dashboard_theme", next ? "dark" : "light");
+        applyDarkModeState(next);
+      }
+
+      (function initDarkMode() {
+        const saved = localStorage.getItem("dashboard_theme");
+        applyDarkModeState(saved === "dark");
+      })();
+    </script>
   </body>
 </html>

@@ -7,7 +7,7 @@
     <title>Dean Dashboard</title>
 
     <link rel="stylesheet" href="/static/admin/admin.css" />
-    <link rel="stylesheet" href="/static/user/user.css" />
+    <link rel="stylesheet" href="/static/user/user.css?v=20260321d" />
     <link
       rel="stylesheet"
       href="{{ url_for('static', filename='fonts/css/all.min.css') }}"
@@ -344,6 +344,11 @@
   </header>
 
   <div class="content-scroll custom-scrollbar">
+    <div style="max-width: 220px; margin-bottom: 12px;">
+      <button type="button" id="dark-mode-toggle" class="theme-toggle" onclick="toggleDarkMode()">
+        Dark Mode
+      </button>
+    </div>
     <div class="card-container">
       <div class="table-header">
         <div class="table-title">
@@ -378,6 +383,27 @@
     </main>
     <script>
       window.CURRENT_USER_EMAIL = {{ (session.get('email') or '')|tojson }};
+    </script>
+    <script>
+      function applyDarkModeState(isDark) {
+        document.body.classList.toggle("dark-mode", Boolean(isDark));
+        const toggle = document.getElementById("dark-mode-toggle");
+        if (toggle) {
+          toggle.textContent = isDark ? "Light Mode" : "Dark Mode";
+        }
+      }
+
+      function toggleDarkMode() {
+        const current = localStorage.getItem("dashboard_theme") === "dark";
+        const next = !current;
+        localStorage.setItem("dashboard_theme", next ? "dark" : "light");
+        applyDarkModeState(next);
+      }
+
+      (function initDarkMode() {
+        const saved = localStorage.getItem("dashboard_theme");
+        applyDarkModeState(saved === "dark");
+      })();
     </script>
     <script src="/static/dean/dean.js"></script>
   </body>

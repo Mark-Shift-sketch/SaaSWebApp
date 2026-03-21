@@ -260,6 +260,57 @@ body {
   background: #e2e8f0;
 }
 
+.theme-toggle {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: #f1f5f9;
+  color: var(--text);
+  border-radius: 0.5rem;
+  font-weight: 600;
+  padding: 0.65rem 0.75rem;
+  cursor: pointer;
+  margin-bottom: 0.6rem;
+}
+
+body.dark-mode {
+  --bg: #0b1220;
+  --surface: #111a2b;
+  --text: #e5edf8;
+  --text-muted: #9fb0c9;
+  --border: #25314a;
+}
+
+body.dark-mode .sidebar-nav a:hover,
+body.dark-mode .sidebar-nav a.active {
+  background: #1b2740;
+}
+
+body.dark-mode .mobile-menu a,
+body.dark-mode .card,
+body.dark-mode .requests-table-wrapper,
+body.dark-mode .table-container,
+body.dark-mode .modal-content,
+body.dark-mode table,
+body.dark-mode th,
+body.dark-mode td,
+body.dark-mode .top-bar,
+body.dark-mode .sidebar,
+body.dark-mode .mobile-header,
+body.dark-mode .mobile-menu {
+  background-color: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+body.dark-mode input,
+body.dark-mode select,
+body.dark-mode textarea,
+body.dark-mode .btn-link {
+  background: #0f1729;
+  color: var(--text);
+  border-color: var(--border);
+}
+
 .profile-text p:first-child {
   font-weight: 600;
   font-size: 0.875rem;

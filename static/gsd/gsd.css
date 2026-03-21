@@ -257,3 +257,28 @@
   outline: none;
   background: #fff;
 }
+
+body.dark-mode #shipmentTable,
+body.dark-mode #sendCopyTable,
+body.dark-mode #shipmentTable thead th,
+body.dark-mode #sendCopyTable thead th,
+body.dark-mode #shipmentTable tbody td,
+body.dark-mode #sendCopyTable tbody td,
+body.dark-mode .modal-window,
+body.dark-mode .modal-topbar,
+body.dark-mode .sc-tabs,
+body.dark-mode .sc-tab,
+body.dark-mode #shipmentTable .tbl-in,
+body.dark-mode #sendCopyTable .tbl-in,
+body.dark-mode .send-grid input,
+body.dark-mode .send-grid select,
+body.dark-mode .sendcopy-top input,
+body.dark-mode .sendcopy-grid input {
+  background: #111a2b;
+  color: #e5edf8;
+  border-color: #2f3c58;
+}
+
+body.dark-mode #shipmentTable tbody tr:hover {
+  background: #1a2640;
+}

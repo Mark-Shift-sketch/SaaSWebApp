@@ -16,7 +16,80 @@ document.addEventListener('DOMContentLoaded', () => {
     bindNewRequestSubmitHandler();
     initTemplateEditorMessageBridge();
     initTemplateEditorTabFromQuery();
+    applyHistoryFilters();
 });
+
+function parseHistoryTimeValue(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return 0;
+
+    const direct = Date.parse(text);
+    if (Number.isFinite(direct)) return direct;
+
+    const normalized = Date.parse(text.replace(' ', 'T'));
+    return Number.isFinite(normalized) ? normalized : 0;
+}
+
+function applyHistoryFilters() {
+    const tbody = document.getElementById('history-table-body');
+    if (!tbody) return;
+
+    const reqQuery = String(document.getElementById('history-search-req')?.value || '')
+        .trim()
+        .replace('#', '')
+        .toLowerCase();
+    const statusFilter = String(document.getElementById('history-filter-status')?.value || 'all')
+        .trim()
+        .toLowerCase();
+    const dateFilter = String(document.getElementById('history-filter-date')?.value || '').trim();
+    const monthFilter = String(document.getElementById('history-filter-month')?.value || '').trim();
+    const sortFilter = String(document.getElementById('history-sort')?.value || 'date_desc').trim().toLowerCase();
+
+    const dataRows = Array.from(tbody.querySelectorAll('tr')).filter(
+        (row) => row.id !== 'history-no-match-row' && row.dataset && row.dataset.reqId
+    );
+
+    const matches = dataRows.filter((row) => {
+        const reqId = String(row.dataset.reqId || '').toLowerCase();
+        const status = String(row.dataset.status || '').toLowerCase();
+        const date = String(row.dataset.date || '').trim();
+        const month = String(row.dataset.month || '').trim();
+
+        const reqMatch = !reqQuery || reqId.includes(reqQuery);
+        const statusMatch = statusFilter === 'all' || status === statusFilter;
+        const dateMatch = !dateFilter || date === dateFilter;
+        const monthMatch = !monthFilter || month === monthFilter;
+
+        return reqMatch && statusMatch && dateMatch && monthMatch;
+    });
+
+    matches.sort((a, b) => {
+        const reqA = Number(a.dataset.reqId || 0);
+        const reqB = Number(b.dataset.reqId || 0);
+        const tsA = parseHistoryTimeValue(a.dataset.ts || a.dataset.date || '');
+        const tsB = parseHistoryTimeValue(b.dataset.ts || b.dataset.date || '');
+
+        if (sortFilter === 'date_asc') return tsA - tsB || reqA - reqB;
+        if (sortFilter === 'req_asc') return reqA - reqB || tsA - tsB;
+        if (sortFilter === 'req_desc') return reqB - reqA || tsB - tsA;
+        return tsB - tsA || reqB - reqA;
+    });
+
+    dataRows.forEach((row) => {
+        row.style.display = 'none';
+    });
+
+    matches.forEach((row) => {
+        row.style.display = '';
+        tbody.appendChild(row);
+    });
+
+    const noMatchRow = document.getElementById('history-no-match-row');
+    if (noMatchRow) {
+        noMatchRow.style.display = matches.length === 0 ? '' : 'none';
+        tbody.appendChild(noMatchRow);
+    }
+}
 
 function ensureCompletedFilterUI() {
     const cardsGrid = document.querySelector('#section-dashboard .cards-grid');

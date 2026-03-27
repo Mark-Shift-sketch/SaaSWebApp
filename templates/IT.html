@@ -93,6 +93,7 @@
       <div id="dashboard" class="tab-content active-content">
         <header>
           <h1 class="section-title">Dashboard Overview</h1>
+          <p class="subtitle">Organization: {{ company_name or 'Organization' }}</p>
         </header>
 
         <div class="stats-grid">
@@ -198,6 +199,7 @@
       <div id="account" class="tab-content">
         <header>
           <h1 class="section-title">Account & System Management</h1>
+          <p class="subtitle">Organization: {{ company_name or 'Organization' }}</p>
         </header>
 
         <div class="form-grid">
@@ -277,6 +279,74 @@
               </div>
               <button type="submit" class="btn-primary">Add Position</button>
             </form>
+          </div>
+
+          <div class="form-card">
+            <h3>Create Role</h3>
+            <br />
+            <form action="{{ url_for('create_role') }}" method="POST">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <div class="form-group">
+                <label>Role Name</label>
+                <input type="text" name="role_name" placeholder="e.g., FinanceManager" required />
+              </div>
+              <div class="form-group">
+                <label>Initial Permissions</label>
+                {% for perm_key, perm_label in tenant_permission_catalog or [] %}
+                <label style="display:block; margin-bottom:6px; font-weight:500; color:#334155;">
+                  <input type="checkbox" name="permissions" value="{{ perm_key }}" style="margin-right:8px;" />
+                  {{ perm_label }}
+                </label>
+                {% endfor %}
+              </div>
+              <button type="submit" class="btn-primary">Create Role</button>
+            </form>
+          </div>
+
+          <div class="form-card" style="grid-column: 1 / -1;">
+            <h3>Role Permissions</h3>
+            <br />
+            <div class="table-container" style="margin-top:0; padding:0; box-shadow:none;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Role</th>
+                    <th>Permissions</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for role in roles %}
+                  <tr>
+                    <td>{{ role.role_name }}</td>
+                    <td>
+                      <form action="{{ url_for('it_update_role_permissions', role_id=role.role_id) }}" method="POST" class="role-permission-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        {% for perm_key, perm_label in tenant_permission_catalog or [] %}
+                        <label style="display:inline-flex; align-items:center; margin-right:16px; margin-bottom:8px; color:#334155;">
+                          <input
+                            type="checkbox"
+                            name="permissions"
+                            value="{{ perm_key }}"
+                            {% if role_permission_map and role_permission_map.get(role.role_id) and perm_key in role_permission_map.get(role.role_id) %}checked{% endif %}
+                            style="margin-right:6px;"
+                          />
+                          {{ perm_label }}
+                        </label>
+                        {% endfor %}
+                        <button type="submit" class="btn-primary" style="margin-top:8px; width:auto;">Save</button>
+                      </form>
+                    </td>
+                    <td></td>
+                  </tr>
+                  {% else %}
+                  <tr>
+                    <td colspan="3" style="text-align:center;">No roles found for this organization.</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
@@ -505,7 +575,7 @@
 
       <div id="notification" class="tab-content">
         <header>
-          <h1 class="section-title">Activity Logs & Notifications</h1>
+          <h1 class="section-title">Notifications</h1>
         </header>
 
         <div class="notification-list">

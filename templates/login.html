@@ -1,57 +1,114 @@
 <!DOCTYPE html>
 <html>
-    <head>
-        <meta name="csrf-token" content="{{ csrf_token() }}">
-        <meta charset="utf-8">
-        <meta http-equiv="X-UA-Compatible" content="IE=edge">
-        <title>login</title>
-        <meta name="description" content="">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <link rel="stylesheet" href="/static/login.css">
-        <script src="/static/login.js"></script>
-
-    </head>
-        <body>
-    <div class="container">
-        <div class="logo-side">
-            <img class="logo" src="/static/PHINMAEd_Logo.png" alt="Logo">
-            <h1>PHINMA COC</h1>
-            <p>Cagayan de ORO College</p>
-        </div>
-
-        <div class="form-side">
-            <p class="log">Login</p>
-
-            {% if message %}
-                <p class="em">{{ message }}</p>
-            {% endif %}
-
-            <form action="/login" method="post">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-
-                <input type="text" name="email" placeholder="Email" required>
-
-                <div class="icon">
-                    <input type="password" id="loginp" name="pass" placeholder="Password" required>
-                    <i id="lT" class="TP" onclick="TTP('loginp', 'lT')">
-                        <img src="/static/eye.png" alt="show Password">
-                    </i>
+<head>
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>Login</title>
+    <meta name="description" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/login.css">
+    <script src="/static/login.js"></script>
+</head>
+<body>
+    <div class="page-shell">
+        <div class="container">
+            <aside class="logo-side">
+                <div class="brand-content">
+                    <img class="logo" src="/static/PHINMAEd_Logo.png" alt="PHINMA COC Logo">
+                    <h1>PHINMA COC</h1>
+                    <p class="campus">Cagayan de Oro College</p>
+                    <div class="accent-line"></div>
+                    <p class="portal">Finance Department Portal</p>
                 </div>
+                <p class="values">Excellence · Integrity · Professionalism</p>
+            </aside>
 
-                <a href="/forgot-password" class="forgot">Forgot password?</a>
+            <section class="form-side">
+                <h2 class="title">Welcome Back</h2>
+                <p class="subtitle">Sign in to access the Finance Portal</p>
+                <div class="heading-line"></div>
 
-                <button type="submit" name="login">Log In</button>
+                {% if message %}
+                    <p class="em">{{ message }}</p>
+                {% endif %}
 
-                <div class="sign">
-                    <p>
-                        Don't have an account yet?
-                        <a href="{{ url_for('signup') }}" class="a">Sign Up</a>
-                    </p>
-                </div>
-            </form>
+                <form action="/login" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                    <label for="email" class="field-label">Email Address</label>
+                    <div class="input-wrap">
+                        <span class="input-icon">&#9993;</span>
+                        <input id="email" type="text" name="email" placeholder="name@phinmaed.com" required>
+                    </div>
+                    <small id="loginEmailHelper" class="security-note" style="display:block;margin-top:-8px;margin-bottom:10px;">Use your @phinmaed.com email.</small>
+
+                    <label for="loginp" class="field-label">Password</label>
+                    <div class="input-wrap icon">
+                        <span class="input-icon">&#128274;</span>
+                        <input type="password" id="loginp" name="pass" placeholder="Enter your password" required>
+                        <i id="lT" class="TP" onclick="TTP('loginp', 'lT')">
+                            <img src="/static/eye.png" alt="Show Password">
+                        </i>
+                    </div>
+
+                    <a href="/forgot-password" class="forgot">Forgot Password?</a>
+
+                    <button type="submit" name="login">Sign In</button>
+
+                    <div class="or-divider">
+                        <span>or</span>
+                    </div>
+
+                    <div class="signup-card">
+                        <p class="signup-title">New to the Finance Portal?</p>
+                        <p class="signup-subtitle">Create an account to get started</p>
+                        <a href="{{ url_for('signup') }}" class="create-account">Create Account</a>
+                    </div>
+
+                    <p class="security-note">Secure · Protected · PHINMA Network</p>
+                </form>
+            </section>
         </div>
     </div>
 
-</body>
+        <script>
+            document.addEventListener("DOMContentLoaded", () => {
+                const REQUIRED_EMAIL_DOMAIN = "@phinmaed.com";
+                const DOMAIN_HELPER_MESSAGE = "Please use youre phinmaed email";
+                const DEV_EXCEPTION_EMAIL = "{{ (dev_exception_email or '')|lower|e }}";
+                const form = document.querySelector('form[action="/login"]');
+                const emailInput = document.getElementById("email");
 
+                function isAllowedDomainEmail(value) {
+                    const normalized = String(value || "").trim().toLowerCase();
+                    if (DEV_EXCEPTION_EMAIL && normalized === DEV_EXCEPTION_EMAIL) {
+                        return true;
+                    }
+                    return normalized.endsWith(REQUIRED_EMAIL_DOMAIN) && normalized.length > REQUIRED_EMAIL_DOMAIN.length;
+                }
+
+                if (emailInput) {
+                    emailInput.addEventListener("input", () => {
+                        if (isAllowedDomainEmail(emailInput.value)) {
+                            emailInput.setCustomValidity("");
+                        }
+                    });
+                }
+
+                if (!form || !emailInput) return;
+
+                form.addEventListener("submit", (event) => {
+                    const emailValue = (emailInput.value || "").trim();
+                    if (!emailValue) return;
+                    if (!isAllowedDomainEmail(emailValue)) {
+                        event.preventDefault();
+                        emailInput.setCustomValidity(DOMAIN_HELPER_MESSAGE);
+                        emailInput.reportValidity();
+                        emailInput.focus();
+                    }
+                });
+            });
+        </script>
+</body>
 </html>

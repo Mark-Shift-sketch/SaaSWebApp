@@ -147,11 +147,9 @@
       </nav>
 
       <div class="sidebar-footer">
-        <div style="padding: 0 20px 10px 20px; color: #9ca3af; font-size: 12px">
-          Logged in as: <br />
-          <strong style="color: white">{{ session['role'] }}</strong><br />
-          <span style="color: #6b7280">{{ session['position'] }}</span>
-        </div>
+        <button class="footer-bug-btn" onclick="showSection('bugs')" id="nav-bugs">
+          <i data-lucide="bug"></i> Report Bug
+        </button>
         <a href="/logout" class="logout-link">
           <i
             class="fa-solid fa-arrow-right-from-bracket"

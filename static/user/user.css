@@ -167,6 +167,22 @@ body {
   color: var(--danger);
 }
 
+.sidebar-footer .footer-bug-btn:hover {
+  background: #eff6ff;
+  color: var(--primary);
+}
+
+.sidebar-footer button.active {
+  background: #eff6ff;
+  color: var(--primary);
+}
+
+#bug-description {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+}
+
 /* Mobile Header & Menu */
 .mobile-header {
   display: none;

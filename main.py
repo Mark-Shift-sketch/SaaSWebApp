@@ -13,12 +13,23 @@ from flask import (
     flash,
     jsonify,
     has_request_context,
+    has_app_context,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+try:
+    from flask_jwt_extended import (
+        JWTManager,
+        create_access_token as _jwt_create_access_token,
+        decode_token as _jwt_decode_token,
+    )
+except Exception:
+    JWTManager = None
+    _jwt_create_access_token = None
+    _jwt_decode_token = None
 from dotenv import load_dotenv
 from sendotp import srotp, verify, request_signup_otp, verify_signup_otp
 from config import get_connection
@@ -31,7 +42,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from reportlab.pdfgen import canvas as _rl_canvas
 from reportlab.lib.utils import ImageReader as _ImageReader
 from pypdf import PdfReader as _PdfReader, PdfWriter as _PdfWriter
-from flask import Response
+from flask import Response, stream_with_context
 
 import mysql.connector
 import requests
@@ -51,6 +62,21 @@ from flask import send_file
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+ALLOWED_EMAIL_DOMAIN = "phinmaed.com"
+ALLOWED_EMAIL_SUFFIX = f"@{ALLOWED_EMAIL_DOMAIN}"
+EMAIL_DOMAIN_HELPER_MESSAGE = "Please use youre phinmaed email"
+DEV_EXCEPTION_EMAIL = str(os.environ.get("DEV_EMAIL") or os.environ.get("name") or "").strip().lower()
+
+
+def is_allowed_system_email(email):
+    normalized_email = str(email or "").strip().lower()
+    if DEV_EXCEPTION_EMAIL and normalized_email == DEV_EXCEPTION_EMAIL:
+        return True
+    if "@" not in normalized_email:
+        return False
+    local_part, domain = normalized_email.rsplit("@", 1)
+    return bool(local_part) and domain == ALLOWED_EMAIL_DOMAIN
 
 argon2_hasher = None
 argon2_verify_mismatch_error = Exception
@@ -150,6 +176,14 @@ if not SECRET_KEY:
 app.secret_key = SECRET_KEY
 serializer = URLSafeTimedSerializer(app.secret_key)
 
+# JWT setup (used for API bearer tokens). Falls back to serializer tokens if unavailable.
+JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", SECRET_KEY)
+app.config["JWT_SECRET_KEY"] = JWT_SECRET_KEY
+app.config["JWT_ALGORITHM"] = os.environ.get("JWT_ALGORITHM", "HS256")
+_jwt_expires_seconds = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRES_SECONDS", str(60 * 60 * 24 * 7)))
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = datetime.timedelta(seconds=_jwt_expires_seconds)
+jwt_manager = JWTManager(app) if JWTManager is not None else None
+
 # Session cookie hardening
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
@@ -200,11 +234,27 @@ CORS(
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024 # 20 MB file upload
 # Allowed Upload Types 
 ALLOWED_EXTENSIONS = {"pdf"}
+ALLOWED_BUG_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif"}
+ALLOWED_BUG_IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+MAX_BUG_IMAGE_BYTES = 5 * 1024 * 1024
 
 
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def allowed_bug_image(filename, mimetype=""):
+    cleaned_name = str(filename or "").strip().lower()
+    cleaned_mime = str(mimetype or "").strip().lower()
+    if not cleaned_name or "." not in cleaned_name:
+        return False
+    ext = cleaned_name.rsplit(".", 1)[1]
+    if ext not in ALLOWED_BUG_IMAGE_EXTENSIONS:
+        return False
+    if cleaned_mime and cleaned_mime not in ALLOWED_BUG_IMAGE_MIMES:
+        return False
+    return True
 
 
 def is_storage_full_exception(exc):
@@ -287,12 +337,63 @@ if CSRFError is not None:
 
 
 def create_token(email):
+    if _jwt_create_access_token is not None and has_app_context():
+        return _jwt_create_access_token(identity=str(email or "").strip().lower())
     return serializer.dumps({"email": email})
 
 
-def verify_token(token, max_age=60 * 60 * 24 * 7):
+def create_token_with_claims(email, company_id=None, role=None):
+    normalized_email = str(email or "").strip().lower()
+    normalized_company_id = int(company_id or 0) if str(company_id or "").strip() else 0
+    normalized_role = str(role or "").strip()
+
+    if _jwt_create_access_token is not None and has_app_context():
+        additional_claims = {
+            "email": normalized_email,
+            "company_id": normalized_company_id,
+            "role": normalized_role,
+        }
+        return _jwt_create_access_token(identity=normalized_email, additional_claims=additional_claims)
+
+    return serializer.dumps(
+        {
+            "email": normalized_email,
+            "company_id": normalized_company_id,
+            "role": normalized_role,
+        }
+    )
+
+
+def verify_token_payload(token, max_age=60 * 60 * 24 * 7):
+    if _jwt_decode_token is not None:
+        try:
+            payload = _jwt_decode_token(token, allow_expired=False)
+            email = str(payload.get("email") or payload.get("sub") or "").strip().lower()
+            if not email:
+                raise BadSignature("Invalid token payload")
+            return {
+                "email": email,
+                "company_id": int(payload.get("company_id") or 0),
+                "role": str(payload.get("role") or "").strip(),
+            }
+        except Exception:
+            # Backward-compatible fallback for old serializer tokens.
+            pass
+
     data = serializer.loads(token, max_age=max_age)
-    return data["email"]
+    email = str(data.get("email") or "").strip().lower()
+    if not email:
+        raise BadSignature("Invalid token payload")
+    return {
+        "email": email,
+        "company_id": int(data.get("company_id") or 0),
+        "role": str(data.get("role") or "").strip(),
+    }
+
+
+def verify_token(token, max_age=60 * 60 * 24 * 7):
+    payload = verify_token_payload(token, max_age=max_age)
+    return payload["email"]
 
 
 def create_password_reset_token(email):
@@ -356,13 +457,15 @@ def require_token(fn):
             return jsonify({"error": "Missing token"}), 401
         token = auth.replace("Bearer ", "").strip()
         try:
-            email = verify_token(token)
+            payload = verify_token_payload(token)
         except SignatureExpired:
             return jsonify({"error": "Token expired"}), 401
         except BadSignature:
             return jsonify({"error": "Invalid token"}), 401
 
-        request.user_email = email
+        request.user_email = payload.get("email")
+        request.user_company_id = int(payload.get("company_id") or 0)
+        request.user_role = str(payload.get("role") or "").strip()
         return fn(*args, **kwargs)
 
     return wrapper
@@ -416,6 +519,155 @@ def set_security_headers(resp):
     )
     return resp
 
+
+@app.before_request
+def enforce_system_maintenance_mode():
+    path = (request.path or "").strip()
+
+    if not path:
+        return None
+    if request.method == "OPTIONS":
+        return None
+    if path.startswith("/static/") or path.startswith("/favicon"):
+        return None
+
+    maintenance_state = get_system_maintenance_state(use_cache=True)
+    if not maintenance_state.get("enabled"):
+        return None
+
+    if is_system_maintenance_bypass_user():
+        return None
+
+    allowed_prefixes = (
+        "/login",
+        "/logout",
+        "/dev",
+        "/saas-admin",
+        "/api/dev/system-maintenance",
+        "/api/saas/",
+        "/send-otp",
+        "/verify",
+        "/forgot-password",
+        "/reset-password",
+        "/signup",
+        "/company-register",
+    )
+    if any(path.startswith(prefix) for prefix in allowed_prefixes):
+        return None
+
+    reason_text = str(maintenance_state.get("reason") or "").strip()
+    if not reason_text:
+        reason_text = "System is temporarily paused for maintenance and bug fixes."
+
+    if path.startswith("/api/"):
+        response = jsonify(
+            {
+                "success": False,
+                "maintenance_mode": True,
+                "error": "System is currently under maintenance.",
+                "reason": reason_text,
+            }
+        )
+        response.status_code = 503
+        response.headers["Retry-After"] = "300"
+        return response
+
+    safe_reason = (
+        reason_text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    html = (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>System Maintenance</title>"
+        "<style>body{margin:0;font-family:Segoe UI,Tahoma,sans-serif;background:#f3f5fa;color:#1d2433;display:grid;"
+        "place-items:center;min-height:100vh;padding:24px}.card{background:#fff;border:1px solid #dfe5f0;border-radius:14px;"
+        "padding:24px;max-width:560px;box-shadow:0 10px 30px rgba(18,36,70,.10)}"
+        "h1{margin:0 0 8px;font-size:1.5rem}.muted{color:#5a667d;line-height:1.5}</style></head><body>"
+        "<section class='card'><h1>System Paused</h1>"
+        "<p class='muted'>The system is temporarily unavailable while maintenance is in progress.</p>"
+        f"<p class='muted'><strong>Reason:</strong> {safe_reason}</p>"
+        "<p class='muted'>Please try again later.</p></section></body></html>"
+    )
+    response = Response(html, status=503, mimetype="text/html")
+    response.headers["Retry-After"] = "300"
+    return response
+
+
+def _is_organization_active(company_id):
+    normalized_company_id = int(company_id or 0)
+    if normalized_company_id <= 0:
+        return True
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT COALESCE(is_active, 1) AS is_active FROM organizations WHERE company_id = %s LIMIT 1",
+            (normalized_company_id,),
+        )
+        row = cursor.fetchone() or {}
+        return int(row.get("is_active") or 0) == 1
+    except Exception:
+        logger.exception("_is_organization_active check failed")
+        return True
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@app.before_request
+def enforce_organization_pause_mode():
+    path = (request.path or "").strip()
+    if not path:
+        return None
+    if request.method == "OPTIONS":
+        return None
+    if path.startswith("/static/") or path.startswith("/favicon"):
+        return None
+
+    if "email" not in session:
+        return None
+
+    role = (session.get("role") or "").strip().lower()
+    if role in {"dev", "saasowner", "saas_owner", "platformowner", "it", "superadmin"}:
+        return None
+
+    company_id = int(session.get("company_id") or 0)
+    if company_id <= 0:
+        return None
+
+    if _is_organization_active(company_id):
+        return None
+
+    if path.startswith("/api/"):
+        return jsonify(
+            {
+                "success": False,
+                "organization_paused": True,
+                "error": "Your organization is currently paused by the platform administrator.",
+            }
+        ), 403
+
+    html = (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Organization Paused</title>"
+        "<style>body{margin:0;font-family:Segoe UI,Tahoma,sans-serif;background:#f3f5fa;color:#1d2433;display:grid;"
+        "place-items:center;min-height:100vh;padding:24px}.card{background:#fff;border:1px solid #dfe5f0;border-radius:14px;"
+        "padding:24px;max-width:560px;box-shadow:0 10px 30px rgba(18,36,70,.10)}"
+        "h1{margin:0 0 8px;font-size:1.5rem}.muted{color:#5a667d;line-height:1.5}</style></head><body>"
+        "<section class='card'><h1>Organization Paused</h1>"
+        "<p class='muted'>Your organization is temporarily paused by the platform administrator.</p>"
+        "<p class='muted'>Please contact Dev or SaaS Owner for reactivation.</p></section></body></html>"
+    )
+    return Response(html, status=403, mimetype="text/html")
+
 # Helper Functions
 def get_user_id(email):
     conn = get_connection()
@@ -431,6 +683,66 @@ def get_user_id(email):
     finally:
         cursor.close()
         conn.close()
+
+
+def get_user_id_for_company(email, company_id):
+    normalized_company_id = int(company_id or 0)
+    if normalized_company_id <= 0:
+        return get_user_id(email)
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT user_id FROM users WHERE email=%s AND company_id=%s",
+            (email, normalized_company_id),
+        )
+        user = cursor.fetchone() or {}
+        return user.get("user_id")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+_ORG_DOMAIN_COLUMN_CACHE = {"checked": False, "column": None}
+
+
+def _get_org_domain_column(cursor):
+    cached = _ORG_DOMAIN_COLUMN_CACHE.get("column") if _ORG_DOMAIN_COLUMN_CACHE.get("checked") else None
+    if cached is not None:
+        return cached
+    if _ORG_DOMAIN_COLUMN_CACHE.get("checked"):
+        return None
+
+    try:
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = 'organizations'
+              AND column_name IN ('allowed_email_domain', 'allowed_email_domains')
+            ORDER BY CASE column_name
+                        WHEN 'allowed_email_domains' THEN 1
+                        WHEN 'allowed_email_domain' THEN 2
+                        ELSE 3
+                     END
+            LIMIT 1
+        """
+        )
+        row = cursor.fetchone() or {}
+        _ORG_DOMAIN_COLUMN_CACHE["column"] = row.get("column_name")
+    except Exception:
+        _ORG_DOMAIN_COLUMN_CACHE["column"] = None
+    finally:
+        _ORG_DOMAIN_COLUMN_CACHE["checked"] = True
+
+    return _ORG_DOMAIN_COLUMN_CACHE.get("column")
+
+
+def _is_allowed_email_for_company(cursor, email, company_id=None):
+    # System-wide restriction: only @phinmaed.com emails are accepted.
+    return is_allowed_system_email(email)
 
 
 def get_effective_workflow_positions(cursor, request_id, request_type_id):
@@ -508,6 +820,296 @@ def get_effective_workflow_positions(cursor, request_id, request_type_id):
     return reviewers, approvers, workflow
 
 
+def _fetch_workflow_rows(cursor, request_id, request_type_id):
+    cursor.execute(
+        """
+        SELECT COALESCE(order_no, 0) AS order_no, position_id
+        FROM request_workflow_reviewers
+        WHERE request_id = %s
+        ORDER BY COALESCE(order_no, 0) ASC
+    """,
+        (request_id,),
+    )
+    reviewer_rows = [
+        {"order_no": int(row.get("order_no") or 0), "position_id": int(row.get("position_id") or 0)}
+        for row in (cursor.fetchall() or [])
+        if row.get("position_id") is not None
+    ]
+
+    if not reviewer_rows:
+        cursor.execute(
+            """
+            SELECT COALESCE(order_no, 0) AS order_no, position_id
+            FROM request_type_reviewers
+            WHERE request_type_id = %s
+            ORDER BY COALESCE(order_no, 0) ASC
+        """,
+            (request_type_id,),
+        )
+        reviewer_rows = [
+            {"order_no": int(row.get("order_no") or 0), "position_id": int(row.get("position_id") or 0)}
+            for row in (cursor.fetchall() or [])
+            if row.get("position_id") is not None
+        ]
+
+    cursor.execute(
+        """
+        SELECT COALESCE(order_no, 0) AS order_no, position_id
+        FROM request_workflow_approvers
+        WHERE request_id = %s
+        ORDER BY COALESCE(order_no, 0) ASC
+    """,
+        (request_id,),
+    )
+    approver_rows = [
+        {"order_no": int(row.get("order_no") or 0), "position_id": int(row.get("position_id") or 0)}
+        for row in (cursor.fetchall() or [])
+        if row.get("position_id") is not None
+    ]
+
+    if not approver_rows:
+        cursor.execute(
+            """
+            SELECT COALESCE(order_no, 0) AS order_no, position_id
+            FROM request_type_approvers
+            WHERE request_type_id = %s
+            ORDER BY COALESCE(order_no, 0) ASC
+        """,
+            (request_type_id,),
+        )
+        approver_rows = [
+            {"order_no": int(row.get("order_no") or 0), "position_id": int(row.get("position_id") or 0)}
+            for row in (cursor.fetchall() or [])
+            if row.get("position_id") is not None
+        ]
+
+    return reviewer_rows, approver_rows
+
+
+def _group_workflow_rows(rows, stage_type):
+    grouped = {}
+    for row in (rows or []):
+        order_no = int(row.get("order_no") or 0)
+        pid = int(row.get("position_id") or 0)
+        if pid <= 0:
+            continue
+        grouped.setdefault(order_no, [])
+        if pid not in grouped[order_no]:
+            grouped[order_no].append(pid)
+
+    steps = []
+    for order_no in sorted(grouped.keys()):
+        positions = grouped.get(order_no) or []
+        if not positions:
+            continue
+        steps.append({"stage_type": stage_type, "order_no": order_no, "positions": positions})
+    return steps
+
+
+def get_effective_workflow_steps(cursor, request_id, request_type_id):
+    reviewer_rows, approver_rows = _fetch_workflow_rows(cursor, request_id, request_type_id)
+    steps = []
+    steps.extend(_group_workflow_rows(reviewer_rows, "reviewer"))
+    steps.extend(_group_workflow_rows(approver_rows, "approver"))
+    return steps
+
+
+def _get_request_approved_positions(cursor, request_id):
+    cursor.execute(
+        """
+        SELECT DISTINCT actor_position_id
+        FROM request_actions
+        WHERE request_id = %s
+          AND action = 'APPROVED'
+          AND actor_position_id IS NOT NULL
+    """,
+        (request_id,),
+    )
+    return {
+        int(row.get("actor_position_id"))
+        for row in (cursor.fetchall() or [])
+        if row.get("actor_position_id") is not None
+    }
+
+
+def _get_active_workflow_step_state(steps, current_stage, approved_positions):
+    if not steps:
+        return None, []
+
+    approved = {int(x) for x in (approved_positions or set())}
+    current_stage_int = None
+    try:
+        if current_stage is not None:
+            current_stage_int = int(current_stage)
+    except (TypeError, ValueError):
+        current_stage_int = None
+
+    chosen_idx = None
+    if current_stage_int is not None:
+        for idx, step in enumerate(steps):
+            if current_stage_int in (step.get("positions") or []):
+                chosen_idx = idx
+                break
+
+    if chosen_idx is None:
+        for idx, step in enumerate(steps):
+            pending_positions = [p for p in (step.get("positions") or []) if p not in approved]
+            if pending_positions:
+                chosen_idx = idx
+                break
+
+    if chosen_idx is None:
+        return None, []
+
+    step_positions = steps[chosen_idx].get("positions") or []
+    pending_positions = [p for p in step_positions if p not in approved]
+    if pending_positions:
+        return chosen_idx, pending_positions
+
+    for idx in range(chosen_idx + 1, len(steps)):
+        next_positions = steps[idx].get("positions") or []
+        next_pending = [p for p in next_positions if p not in approved]
+        if next_pending:
+            return idx, next_pending
+
+    return None, []
+
+
+def _apply_conditional_high_value_workflow_steps(cursor, request_id, steps):
+    base_steps = [
+        {
+            "stage_type": str(step.get("stage_type") or "approver"),
+            "order_no": int(step.get("order_no") or 0),
+            "positions": [int(p) for p in (step.get("positions") or []) if int(p) > 0],
+        }
+        for step in (steps or [])
+    ]
+
+    try:
+        threshold = parse_amount_decimal(os.environ.get("HIGH_VALUE_APPROVAL_THRESHOLD", "50000"))
+    except Exception:
+        threshold = Decimal("50000")
+
+    if threshold <= 0:
+        return base_steps
+
+    cursor.execute(
+        "SELECT COALESCE(company_id, 0) AS company_id, COALESCE(amount, 0) AS amount FROM requests WHERE request_id = %s LIMIT 1",
+        (request_id,),
+    )
+    req_row = cursor.fetchone() or {}
+    company_id = int(req_row.get("company_id") or 0)
+    amount_value = parse_amount_decimal(req_row.get("amount"))
+    if company_id <= 0 or amount_value <= threshold:
+        return base_steps
+
+    names_raw = str(os.environ.get("HIGH_VALUE_APPROVER_POSITION_NAMES") or "COO,Chief Operating Officer").strip()
+    keywords = [k.strip().lower() for k in re.split(r"[,;]", names_raw) if k.strip()]
+    if not keywords:
+        return base_steps
+
+    existing_positions = {p for step in base_steps for p in (step.get("positions") or [])}
+
+    cursor.execute(
+        "SELECT position_id, position_name FROM positions WHERE company_id = %s",
+        (company_id,),
+    )
+    rows = cursor.fetchall() or []
+
+    extra_positions = []
+    for row in rows:
+        pid = int((row or {}).get("position_id") or 0)
+        pname = str((row or {}).get("position_name") or "").strip().lower()
+        if pid <= 0 or not pname or pid in existing_positions:
+            continue
+        if any(keyword in pname for keyword in keywords):
+            extra_positions.append(pid)
+
+    if extra_positions:
+        base_steps.append(
+            {
+                "stage_type": "approver",
+                "order_no": (base_steps[-1].get("order_no") if base_steps else 0) + 1,
+                "positions": extra_positions,
+            }
+        )
+
+    return base_steps
+
+
+_request_action_message_meta_cache = {"checked": False, "max_len": None}
+
+
+def _truncate_request_action_message(cursor, message):
+    text = str(message or "").strip()
+    if not text:
+        return None
+
+    cached_checked = bool(_request_action_message_meta_cache.get("checked"))
+    max_len = _request_action_message_meta_cache.get("max_len") if cached_checked else None
+
+    if not cached_checked:
+        try:
+            cursor.execute("SHOW COLUMNS FROM request_actions LIKE 'message'")
+            col = cursor.fetchone() or {}
+            col_type = str(col.get("Type") or col.get("type") or "").strip().lower()
+            m = re.search(r"\((\d+)\)", col_type)
+            _request_action_message_meta_cache["max_len"] = int(m.group(1)) if m else None
+        except Exception:
+            _request_action_message_meta_cache["max_len"] = None
+        finally:
+            _request_action_message_meta_cache["checked"] = True
+            max_len = _request_action_message_meta_cache.get("max_len")
+
+    if isinstance(max_len, int) and max_len > 0 and len(text) > max_len:
+        return text[:max_len]
+    return text
+
+
+def _apply_conditional_high_value_workflow(cursor, request_id, workflow):
+    chain = list(workflow or [])
+
+    try:
+        threshold = parse_amount_decimal(os.environ.get("HIGH_VALUE_APPROVAL_THRESHOLD", "50000"))
+    except Exception:
+        threshold = Decimal("50000")
+
+    if threshold <= 0:
+        return chain
+
+    cursor.execute(
+        "SELECT COALESCE(company_id, 0) AS company_id, COALESCE(amount, 0) AS amount FROM requests WHERE request_id = %s LIMIT 1",
+        (request_id,),
+    )
+    req_row = cursor.fetchone() or {}
+
+    company_id = int(req_row.get("company_id") or 0)
+    amount_value = parse_amount_decimal(req_row.get("amount"))
+    if company_id <= 0 or amount_value <= threshold:
+        return chain
+
+    names_raw = str(os.environ.get("HIGH_VALUE_APPROVER_POSITION_NAMES") or "COO,Chief Operating Officer").strip()
+    keywords = [k.strip().lower() for k in re.split(r"[,;]", names_raw) if k.strip()]
+    if not keywords:
+        return chain
+
+    cursor.execute(
+        "SELECT position_id, position_name FROM positions WHERE company_id = %s",
+        (company_id,),
+    )
+    rows = cursor.fetchall() or []
+
+    for row in rows:
+        pid = int((row or {}).get("position_id") or 0)
+        pname = str((row or {}).get("position_name") or "").strip().lower()
+        if pid <= 0 or not pname:
+            continue
+        if any(keyword in pname for keyword in keywords) and pid not in chain:
+            chain.append(pid)
+
+    return chain
+
+
 def apply_send_back_visibility(cursor, request_rows):
     rows = request_rows or []
 
@@ -574,19 +1176,823 @@ ADMIN_PIN_OTP_COOLDOWN_SECONDS = 60
 ADMIN_PIN_OTP_MAX_AGE_SECONDS = 60 * 10
 COO_ACTION_TOKEN_MAX_AGE_SECONDS = int(os.environ.get("COO_ACTION_TOKEN_MAX_AGE_SECONDS", str(60 * 60 * 24)))
 BUDGET_DEFAULT_TOTAL = Decimal("100000.00")
+DEFAULT_COMPANY_NAME = str(os.environ.get("DEFAULT_COMPANY_NAME") or "Default Organization").strip() or "Default Organization"
+DEFAULT_DEV_EMAIL = str(os.environ.get("DEV_EMAIL") or os.environ.get("name") or "").strip().lower()
+DEFAULT_DEV_PASSWORD = str(os.environ.get("DEV_PASSWORD") or os.environ.get("password") or "").strip()
+
+SAAS_PLAN_DEFINITIONS = {
+    "FREE": {"monthly_price": Decimal("0.00"), "seats_limit": 10, "requests_limit": 200},
+    "PRO": {"monthly_price": Decimal("49.00"), "seats_limit": 100, "requests_limit": 5000},
+    "ENTERPRISE": {"monthly_price": Decimal("199.00"), "seats_limit": 1000, "requests_limit": 100000},
+}
+
+TENANT_PERMISSION_CATALOG = [
+    ("manage_users", "Manage users"),
+    ("manage_departments", "Manage departments"),
+    ("manage_roles", "Manage roles"),
+    ("manage_request_types", "Manage request types"),
+    ("view_reports", "View reports"),
+    ("manage_budget", "Budget management"),
+    ("view_audit_logs", "View audit logs"),
+    ("view_notifications", "View notifications"),
+]
+
+DEFAULT_ROLE_PERMISSIONS = {
+    "SuperAdmin": {"manage_users", "manage_departments", "manage_roles", "manage_request_types", "view_reports", "manage_budget", "view_audit_logs", "view_notifications"},
+    "IT": {"manage_users", "manage_departments", "manage_roles", "manage_request_types", "view_reports", "manage_budget", "view_audit_logs", "view_notifications"},
+    "Admin": {"manage_users", "manage_departments", "manage_request_types", "view_reports", "manage_budget", "view_notifications"},
+    "AssistantAdmin": {"manage_users", "manage_request_types", "view_reports", "manage_budget", "view_notifications"},
+    "User": set(),
+    "Reviewer": {"view_notifications"},
+    "Dean": {"view_notifications"},
+    "SBO": {"manage_budget", "view_notifications"},
+}
 
 _admin_pin_schema_checked = False
 _user_account_control_schema_checked = False
 _budget_schema_checked = False
 _budget_request_schema_checked = False
+_department_budget_schema_checked = False
+_saas_owner_schema_checked = False
+_bug_reports_schema_checked = False
+_activity_log_schema_checked = False
+_user_saved_signature_schema_checked = False
 _coo_special_approval_schema_checked = False
 _request_type_form_schema_checked = False
 _request_form_submission_schema_checked = False
+_tenant_schema_checked = False
+_system_maintenance_schema_checked = False
+_system_maintenance_cache = {
+    "enabled": False,
+    "reason": "",
+    "updated_by": "",
+    "updated_at": "",
+    "expires_at": 0.0,
+}
+SYSTEM_MAINTENANCE_CACHE_TTL_SECONDS = 5
+
+
+def _slugify_company_name(value):
+    text = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return text or "org"
+
+
+def _table_has_column(cursor, table_name, column_name):
+    cursor.execute(f"SHOW COLUMNS FROM {table_name} LIKE %s", (column_name,))
+    return bool(cursor.fetchone())
+
+
+def _ensure_company_scoped_unique_name(cursor, table_name, name_column, company_column="company_id"):
+    cursor.execute(f"SHOW INDEX FROM {table_name}")
+    index_rows = cursor.fetchall() or []
+    target_index_name = f"uq_{table_name}_{company_column}_{name_column}".lower()
+    has_target = False
+
+    grouped = {}
+    for row in index_rows:
+        key_name = row.get("Key_name")
+        seq_in_index = int(row.get("Seq_in_index") or 0)
+        column_name = row.get("Column_name")
+        non_unique_raw = row.get("Non_unique")
+        non_unique = int(1 if non_unique_raw is None else non_unique_raw)
+        if str(key_name or "").strip().lower() == target_index_name:
+            has_target = True
+        grouped.setdefault(key_name, {"non_unique": non_unique, "columns": []})
+        grouped[key_name]["columns"].append((seq_in_index, column_name))
+
+    target_columns = [company_column, name_column]
+
+    legacy_index_name = str(name_column or "").strip().lower()
+
+    for key_name, meta in grouped.items():
+        cols = [col for _, col in sorted(meta["columns"], key=lambda item: item[0])]
+        is_unique = meta.get("non_unique", 1) == 0
+        normalized_key = str(key_name or "").strip().lower()
+
+        if is_unique and cols == target_columns:
+            has_target = True
+            continue
+
+        # Drop legacy global unique index on name only.
+        if is_unique and cols == [name_column] and normalized_key != "primary":
+            cursor.execute(f"ALTER TABLE {table_name} DROP INDEX `{key_name}`")
+            continue
+
+        # Extra guard for schemas where the legacy index key name equals the column name.
+        if is_unique and normalized_key == legacy_index_name and normalized_key != "primary":
+            try:
+                cursor.execute(f"ALTER TABLE {table_name} DROP INDEX `{key_name}`")
+            except mysql.connector.Error as exc:
+                if getattr(exc, "errno", None) != 1091:
+                    raise
+
+    if not has_target:
+        try:
+            cursor.execute(
+                f"ALTER TABLE {table_name} ADD UNIQUE KEY uq_{table_name}_{company_column}_{name_column} ({company_column}, {name_column})"
+            )
+        except mysql.connector.Error as exc:
+            # Ignore duplicate index name so startup migration remains idempotent.
+            if getattr(exc, "errno", None) != 1061:
+                raise
+
+
+def get_current_company_id():
+    raw_value = session.get("company_id")
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def ensure_session_company_context(cursor):
+    company_id = get_current_company_id()
+    if company_id > 0:
+        return company_id
+
+    email = (session.get("email") or "").strip().lower()
+    if not email:
+        return 0
+
+    cursor.execute(
+        """
+        SELECT
+            u.company_id,
+            COALESCE(o.company_name, '') AS company_name
+        FROM users u
+        LEFT JOIN organizations o ON o.company_id = u.company_id
+        WHERE LOWER(TRIM(u.email)) = %s
+        LIMIT 1
+        """,
+        (email,),
+    )
+    row = cursor.fetchone() or {}
+    try:
+        company_id = int(row.get("company_id") or 0)
+    except (TypeError, ValueError):
+        company_id = 0
+
+    if company_id > 0:
+        session["company_id"] = company_id
+        session["company_name"] = (row.get("company_name") or "").strip()
+
+    return company_id
+
+
+def ensure_default_role_permissions(cursor, company_id):
+    if int(company_id or 0) <= 0:
+        return
+
+    cursor.execute(
+        """
+        SELECT role_id, role_name
+        FROM roles
+        WHERE company_id = %s
+        """,
+        (company_id,),
+    )
+    rows = cursor.fetchall() or []
+
+    for row in rows:
+        role_id = row.get("role_id")
+        role_name = str(row.get("role_name") or "").strip()
+        if not role_id or not role_name:
+            continue
+
+        for permission_key in sorted(DEFAULT_ROLE_PERMISSIONS.get(role_name, set())):
+            cursor.execute(
+                """
+                INSERT IGNORE INTO role_permissions (role_id, permission_key)
+                VALUES (%s, %s)
+                """,
+                (role_id, permission_key),
+            )
+
+
+def ensure_dev_user_account(cursor, company_id):
+    if int(company_id or 0) <= 0:
+        return
+
+    dev_email = DEFAULT_DEV_EMAIL
+    dev_password = DEFAULT_DEV_PASSWORD
+    if not dev_email or not dev_password:
+        return
+
+    if not re.match(r"^[a-z0-9.%+_-]+@[a-z0-9.-]+\.[a-z]{2,}$", dev_email):
+        return
+
+    cursor.execute(
+        "SELECT role_id FROM roles WHERE company_id = %s AND LOWER(TRIM(role_name)) = 'dev' LIMIT 1",
+        (company_id,),
+    )
+    role_row = cursor.fetchone() or {}
+    dev_role_id = int(role_row.get("role_id") or 0)
+    if dev_role_id <= 0:
+        cursor.execute("INSERT IGNORE INTO roles (role_name, company_id) VALUES ('dev', %s)", (company_id,))
+        cursor.execute(
+            "SELECT role_id FROM roles WHERE company_id = %s AND LOWER(TRIM(role_name)) = 'dev' LIMIT 1",
+            (company_id,),
+        )
+        role_row = cursor.fetchone() or {}
+        dev_role_id = int(role_row.get("role_id") or 0)
+
+    cursor.execute(
+        "SELECT position_id FROM positions WHERE company_id = %s AND LOWER(TRIM(position_name)) = 'developer' LIMIT 1",
+        (company_id,),
+    )
+    position_row = cursor.fetchone() or {}
+    dev_position_id = int(position_row.get("position_id") or 0)
+    if dev_position_id <= 0:
+        cursor.execute(
+            "INSERT IGNORE INTO positions (position_name, company_id) VALUES ('Developer', %s)",
+            (company_id,),
+        )
+        cursor.execute(
+            "SELECT position_id FROM positions WHERE company_id = %s AND LOWER(TRIM(position_name)) = 'developer' LIMIT 1",
+            (company_id,),
+        )
+        position_row = cursor.fetchone() or {}
+        dev_position_id = int(position_row.get("position_id") or 0)
+
+    cursor.execute(
+        "SELECT dept_id FROM departments WHERE company_id = %s ORDER BY dept_id ASC LIMIT 1",
+        (company_id,),
+    )
+    dept_row = cursor.fetchone() or {}
+    dev_dept_id = int(dept_row.get("dept_id") or 0)
+    if dev_dept_id <= 0:
+        cursor.execute(
+            "INSERT INTO departments (dept_name, company_id) VALUES ('IT', %s)",
+            (company_id,),
+        )
+        dev_dept_id = int(cursor.lastrowid or 0)
+
+    if dev_role_id <= 0 or dev_position_id <= 0 or dev_dept_id <= 0:
+        return
+
+    cursor.execute(
+        "SELECT user_id, password FROM users WHERE LOWER(TRIM(email)) = %s LIMIT 1",
+        (dev_email,),
+    )
+    existing_user = cursor.fetchone() or {}
+
+    if existing_user:
+        user_id = int(existing_user.get("user_id") or 0)
+        existing_hash = str(existing_user.get("password") or "")
+        password_ok = verify_user_password(existing_hash, dev_password) if existing_hash else False
+        if password_ok:
+            cursor.execute(
+                """
+                UPDATE users
+                SET dept_id = %s, role_id = %s, position_id = %s, company_id = %s
+                WHERE user_id = %s
+                """,
+                (dev_dept_id, dev_role_id, dev_position_id, company_id, user_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE users
+                SET password = %s, dept_id = %s, role_id = %s, position_id = %s, company_id = %s
+                WHERE user_id = %s
+                """,
+                (hash_user_password(dev_password), dev_dept_id, dev_role_id, dev_position_id, company_id, user_id),
+            )
+        return
+
+    cursor.execute(
+        """
+        INSERT INTO users (email, password, dept_id, role_id, position_id, company_id)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (dev_email, hash_user_password(dev_password), dev_dept_id, dev_role_id, dev_position_id, company_id),
+    )
+
+
+def ensure_tenant_schema(cursor, conn):
+    global _tenant_schema_checked
+
+    if _tenant_schema_checked:
+        return
+
+    if not _table_has_column(cursor, "users", "company_id"):
+        cursor.execute("ALTER TABLE users ADD COLUMN company_id INT NULL")
+    if not _table_has_column(cursor, "departments", "company_id"):
+        cursor.execute("ALTER TABLE departments ADD COLUMN company_id INT NULL")
+    if not _table_has_column(cursor, "roles", "company_id"):
+        cursor.execute("ALTER TABLE roles ADD COLUMN company_id INT NULL")
+    if not _table_has_column(cursor, "positions", "company_id"):
+        cursor.execute("ALTER TABLE positions ADD COLUMN company_id INT NULL")
+    if not _table_has_column(cursor, "requests", "company_id"):
+        cursor.execute("ALTER TABLE requests ADD COLUMN company_id INT NULL")
+    if not _table_has_column(cursor, "request_types", "company_id"):
+        cursor.execute("ALTER TABLE request_types ADD COLUMN company_id INT NULL")
+
+    _ensure_company_scoped_unique_name(cursor, "departments", "dept_name")
+    _ensure_company_scoped_unique_name(cursor, "roles", "role_name")
+    _ensure_company_scoped_unique_name(cursor, "positions", "position_name")
+
+    default_slug = _slugify_company_name(DEFAULT_COMPANY_NAME)
+    cursor.execute(
+        """
+        INSERT INTO organizations (company_name, company_slug)
+        VALUES (%s, %s)
+        ON DUPLICATE KEY UPDATE company_name = VALUES(company_name)
+        """,
+        (DEFAULT_COMPANY_NAME, default_slug),
+    )
+
+    cursor.execute("SELECT company_id FROM organizations WHERE company_slug = %s LIMIT 1", (default_slug,))
+    default_org = cursor.fetchone() or {}
+    default_company_id = int(default_org.get("company_id") or 0)
+
+    if default_company_id > 0:
+        cursor.execute("UPDATE users SET company_id = %s WHERE company_id IS NULL", (default_company_id,))
+        cursor.execute("UPDATE departments SET company_id = %s WHERE company_id IS NULL", (default_company_id,))
+        cursor.execute("UPDATE roles SET company_id = %s WHERE company_id IS NULL", (default_company_id,))
+        cursor.execute("UPDATE positions SET company_id = %s WHERE company_id IS NULL", (default_company_id,))
+        cursor.execute("UPDATE request_types SET company_id = %s WHERE company_id IS NULL", (default_company_id,))
+        cursor.execute(
+            """
+            UPDATE requests r
+            JOIN users u ON u.user_id = r.user_id
+            SET r.company_id = u.company_id
+            WHERE r.company_id IS NULL
+            """
+        )
+        ensure_default_role_permissions(cursor, default_company_id)
+        ensure_dev_user_account(cursor, default_company_id)
+
+    conn.commit()
+    _tenant_schema_checked = True
+
+
+def has_role_permission(cursor, permission_key, role_id=None):
+    permission_key = str(permission_key or "").strip().lower()
+    if not permission_key:
+        return False
+
+    role_name = (session.get("role") or "").strip()
+    if role_name == "SuperAdmin":
+        return True
+
+    if role_id is None:
+        role_id = session.get("role_id")
+
+    try:
+        role_id = int(role_id)
+    except (TypeError, ValueError):
+        return False
+
+    cursor.execute(
+        """
+        SELECT 1
+        FROM role_permissions
+        WHERE role_id = %s AND permission_key = %s
+        LIMIT 1
+        """,
+        (role_id, permission_key),
+    )
+    return bool(cursor.fetchone())
+
+
+def can_manage_request_types(cursor, role=None, role_id=None):
+    return has_role_permission(cursor, "manage_request_types", role_id=role_id)
+
+
+def can_view_reports(cursor, role=None, role_id=None):
+    return has_role_permission(cursor, "view_reports", role_id=role_id)
+
+
+def can_manage_budget(cursor, role=None, role_id=None):
+    return has_role_permission(cursor, "manage_budget", role_id=role_id)
 
 
 def can_use_admin_pin(role=None):
     effective_role = (role or session.get("role") or "").strip()
     return effective_role in ALLOWED_ADMIN_PIN_ROLES
+
+
+def is_saas_owner_user():
+    role = (session.get("role") or "").strip().lower()
+    email = (session.get("email") or "").strip().lower()
+
+    if role in {"dev", "saasowner", "saas_owner", "platformowner"}:
+        return True
+    if DEFAULT_DEV_EMAIL and email == DEFAULT_DEV_EMAIL:
+        return True
+    return False
+
+
+def _normalize_plan_name(value):
+    plan = str(value or "").strip().upper()
+    if plan in SAAS_PLAN_DEFINITIONS:
+        return plan
+    return "FREE"
+
+
+def ensure_saas_owner_schema(cursor, conn):
+    global _saas_owner_schema_checked
+
+    if _saas_owner_schema_checked:
+        return
+
+    cursor.execute(
+        """
+        INSERT INTO tenant_subscriptions (company_id, plan_name, subscription_status, monthly_price, seats_limit, requests_limit)
+        SELECT o.company_id, 'FREE', 'ACTIVE', 0.00, 10, 200
+        FROM organizations o
+        LEFT JOIN tenant_subscriptions ts ON ts.company_id = o.company_id
+        WHERE ts.company_id IS NULL
+        """
+    )
+
+    conn.commit()
+    _saas_owner_schema_checked = True
+
+
+def ensure_bug_reports_schema(cursor, conn):
+    global _bug_reports_schema_checked
+
+    if _bug_reports_schema_checked:
+        return
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bug_reports (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            company_id INT NULL,
+            reporter_email VARCHAR(255) NOT NULL,
+            reporter_role VARCHAR(120) NULL,
+            description TEXT NOT NULL,
+            image_blob LONGBLOB NULL,
+            image_mime VARCHAR(120) NULL,
+            image_name VARCHAR(255) NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_bug_reports_company (company_id),
+            INDEX idx_bug_reports_created_at (created_at)
+        )
+        """
+    )
+
+    conn.commit()
+    _bug_reports_schema_checked = True
+
+
+def ensure_system_maintenance_schema(cursor, conn):
+    global _system_maintenance_schema_checked
+
+    if _system_maintenance_schema_checked:
+        return
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS system_runtime_settings (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            setting_key VARCHAR(120) NOT NULL,
+            setting_value TEXT NULL,
+            updated_by_email VARCHAR(255) NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_system_runtime_settings_key (setting_key)
+        )
+        """
+    )
+
+    conn.commit()
+    _system_maintenance_schema_checked = True
+
+
+def _normalize_maintenance_reason(value):
+    text = str(value or "").strip()
+    return text[:500]
+
+
+def _read_system_maintenance_state(cursor):
+    cursor.execute(
+        """
+        SELECT setting_value, updated_by_email, updated_at
+        FROM system_runtime_settings
+        WHERE setting_key = 'system_maintenance'
+        LIMIT 1
+        """
+    )
+    row = cursor.fetchone() or {}
+
+    payload = {}
+    raw_value = row.get("setting_value")
+    if raw_value:
+        try:
+            payload = json.loads(raw_value)
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            payload = {}
+
+    enabled = bool(payload.get("enabled"))
+    reason = _normalize_maintenance_reason(payload.get("reason"))
+    updated_by = str(row.get("updated_by_email") or "").strip()
+    updated_at_value = row.get("updated_at")
+    updated_at = ""
+    if updated_at_value is not None:
+        updated_at = str(updated_at_value)
+
+    return {
+        "enabled": enabled,
+        "reason": reason,
+        "updated_by": updated_by,
+        "updated_at": updated_at,
+    }
+
+
+def get_system_maintenance_state(use_cache=True):
+    global _system_maintenance_cache
+
+    now = time.time()
+    if use_cache and now < float(_system_maintenance_cache.get("expires_at") or 0.0):
+        return {
+            "enabled": bool(_system_maintenance_cache.get("enabled")),
+            "reason": str(_system_maintenance_cache.get("reason") or ""),
+            "updated_by": str(_system_maintenance_cache.get("updated_by") or ""),
+            "updated_at": str(_system_maintenance_cache.get("updated_at") or ""),
+        }
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        ensure_system_maintenance_schema(cursor, conn)
+        state = _read_system_maintenance_state(cursor)
+    except Exception:
+        logger.exception("get_system_maintenance_state failed")
+        state = {
+            "enabled": False,
+            "reason": "",
+            "updated_by": "",
+            "updated_at": "",
+        }
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
+
+    _system_maintenance_cache = {
+        "enabled": bool(state.get("enabled")),
+        "reason": str(state.get("reason") or ""),
+        "updated_by": str(state.get("updated_by") or ""),
+        "updated_at": str(state.get("updated_at") or ""),
+        "expires_at": now + float(SYSTEM_MAINTENANCE_CACHE_TTL_SECONDS),
+    }
+    return state
+
+
+def set_system_maintenance_state(enabled, reason, updated_by_email):
+    global _system_maintenance_cache
+
+    normalized_enabled = bool(enabled)
+    normalized_reason = _normalize_maintenance_reason(reason)
+    if normalized_enabled and not normalized_reason:
+        normalized_reason = "System is temporarily paused for maintenance and bug fixes."
+
+    payload = {
+        "enabled": normalized_enabled,
+        "reason": normalized_reason,
+    }
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_system_maintenance_schema(cursor, conn)
+        cursor.execute(
+            """
+            INSERT INTO system_runtime_settings (setting_key, setting_value, updated_by_email)
+            VALUES ('system_maintenance', %s, %s)
+            ON DUPLICATE KEY UPDATE
+                setting_value = VALUES(setting_value),
+                updated_by_email = VALUES(updated_by_email),
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                json.dumps(payload, ensure_ascii=True),
+                str(updated_by_email or "").strip() or None,
+            ),
+        )
+        conn.commit()
+        state = _read_system_maintenance_state(cursor)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+    _system_maintenance_cache = {
+        "enabled": bool(state.get("enabled")),
+        "reason": str(state.get("reason") or ""),
+        "updated_by": str(state.get("updated_by") or ""),
+        "updated_at": str(state.get("updated_at") or ""),
+        "expires_at": time.time() + float(SYSTEM_MAINTENANCE_CACHE_TTL_SECONDS),
+    }
+    return state
+
+
+def is_system_maintenance_bypass_user():
+    role = (session.get("role") or "").strip().lower()
+    email = (session.get("email") or "").strip().lower()
+
+    if role in {"dev", "saasowner", "saas_owner", "platformowner"}:
+        return True
+    if DEFAULT_DEV_EMAIL and email == DEFAULT_DEV_EMAIL:
+        return True
+    return False
+
+
+def _normalize_broadcast_title(value):
+    text = str(value or "").strip()
+    if not text:
+        text = "System Broadcast"
+    return text[:120]
+
+
+def _normalize_broadcast_message(value):
+    text = str(value or "").strip()
+    return text[:1000]
+
+
+def create_system_broadcast(title, message, actor_email=""):
+    normalized_title = _normalize_broadcast_title(title)
+    normalized_message = _normalize_broadcast_message(message)
+    if not normalized_message:
+        raise ValueError("Broadcast message cannot be empty")
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_activity_log_schema(cursor, conn)
+        cursor.execute(
+            """
+            INSERT INTO activity_logs (title, description, company_id, actor_email)
+            VALUES (%s, %s, NULL, %s)
+            """,
+            (
+                normalized_title,
+                f"BROADCAST: {normalized_message}",
+                str(actor_email or "").strip() or None,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid or 0)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _clean_broadcast_description(value):
+    text = str(value or "").strip()
+    if text.lower().startswith("broadcast:"):
+        text = text.split(":", 1)[1].strip()
+    return text
+
+
+def fetch_system_broadcast_rows(cursor, limit=50):
+    try:
+        safe_limit = int(limit or 50)
+    except (TypeError, ValueError):
+        safe_limit = 50
+    safe_limit = max(1, min(safe_limit, 500))
+
+    cursor.execute(
+        """
+        SELECT
+            CONCAT('B-', log_id) AS id,
+            title,
+            description,
+            created_at,
+            actor_email
+        FROM activity_logs
+        WHERE LOWER(COALESCE(title, '')) IN ('system broadcast', 'system announcement')
+           OR LOWER(COALESCE(description, '')) LIKE 'broadcast:%'
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (safe_limit,),
+    )
+    rows = cursor.fetchall() or []
+
+    normalized = []
+    for row in rows:
+        normalized.append(
+            {
+                "id": row.get("id"),
+                "title": _normalize_broadcast_title(row.get("title") or "System Broadcast"),
+                "description": _clean_broadcast_description(row.get("description")),
+                "created_at": row.get("created_at"),
+                "actor_email": str(row.get("actor_email") or "").strip(),
+            }
+        )
+    return normalized
+
+
+def get_company_subscription_limits(cursor, company_id):
+    normalized_company_id = int(company_id or 0)
+    if normalized_company_id <= 0:
+        return {
+            "plan_name": "FREE",
+            "subscription_status": "ACTIVE",
+            "seats_limit": int(SAAS_PLAN_DEFINITIONS["FREE"].get("seats_limit") or 0),
+            "requests_limit": int(SAAS_PLAN_DEFINITIONS["FREE"].get("requests_limit") or 0),
+        }
+
+    cursor.execute(
+        """
+        SELECT plan_name, subscription_status, seats_limit, requests_limit
+        FROM tenant_subscriptions
+        WHERE company_id = %s
+        LIMIT 1
+        """,
+        (normalized_company_id,),
+    )
+    row = cursor.fetchone() or {}
+    plan_name = _normalize_plan_name(row.get("plan_name"))
+    plan_defaults = SAAS_PLAN_DEFINITIONS.get(plan_name, SAAS_PLAN_DEFINITIONS["FREE"])
+
+    seats_limit = row.get("seats_limit")
+    requests_limit = row.get("requests_limit")
+
+    if seats_limit is None:
+        seats_limit = int(plan_defaults.get("seats_limit") or 0)
+    else:
+        seats_limit = int(seats_limit or 0)
+
+    if requests_limit is None:
+        requests_limit = int(plan_defaults.get("requests_limit") or 0)
+    else:
+        requests_limit = int(requests_limit or 0)
+
+    subscription_status = str(row.get("subscription_status") or "ACTIVE").strip().upper() or "ACTIVE"
+    return {
+        "plan_name": plan_name,
+        "subscription_status": subscription_status,
+        "seats_limit": seats_limit,
+        "requests_limit": requests_limit,
+    }
+
+
+def check_company_user_seat_capacity(cursor, company_id):
+    normalized_company_id = int(company_id or 0)
+    if normalized_company_id <= 0:
+        return False, "Invalid company context"
+
+    limits = get_company_subscription_limits(cursor, normalized_company_id)
+    status = (limits.get("subscription_status") or "ACTIVE").strip().upper()
+    if status != "ACTIVE":
+        return False, "Subscription is not active for this company"
+
+    seats_limit = int(limits.get("seats_limit") or 0)
+    if seats_limit <= 0:
+        return True, ""
+
+    cursor.execute("SELECT COUNT(*) AS count FROM users WHERE company_id = %s", (normalized_company_id,))
+    seat_count = int((cursor.fetchone() or {}).get("count") or 0)
+    if seat_count >= seats_limit:
+        return False, f"Seat limit reached for plan {limits.get('plan_name')}. Please upgrade your subscription."
+
+    return True, ""
+
+
+def check_company_request_capacity(cursor, company_id):
+    normalized_company_id = int(company_id or 0)
+    if normalized_company_id <= 0:
+        return False, "Invalid company context"
+
+    limits = get_company_subscription_limits(cursor, normalized_company_id)
+    status = (limits.get("subscription_status") or "ACTIVE").strip().upper()
+    if status != "ACTIVE":
+        return False, "Subscription is not active for this company"
+
+    requests_limit = int(limits.get("requests_limit") or 0)
+    if requests_limit <= 0:
+        return True, ""
+
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM requests
+        WHERE company_id = %s
+          AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+          AND created_at < DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH)
+        """,
+        (normalized_company_id,),
+    )
+    month_count = int((cursor.fetchone() or {}).get("count") or 0)
+    if month_count >= requests_limit:
+        return False, f"Monthly request limit reached for plan {limits.get('plan_name')}. Please upgrade your subscription."
+
+    return True, ""
 
 
 def can_use_budget_reports(role=None, position=None, dept=None):
@@ -682,23 +2088,51 @@ def ensure_user_account_control_schema(cursor, conn):
     _user_account_control_schema_checked = True
 
 
+def ensure_activity_log_schema(cursor, conn):
+    global _activity_log_schema_checked
+
+    if _activity_log_schema_checked:
+        return
+
+    if not _table_has_column(cursor, "activity_logs", "company_id"):
+        cursor.execute("ALTER TABLE activity_logs ADD COLUMN company_id INT NULL")
+
+    if not _table_has_column(cursor, "activity_logs", "actor_email"):
+        cursor.execute("ALTER TABLE activity_logs ADD COLUMN actor_email VARCHAR(255) NULL")
+
+    conn.commit()
+    _activity_log_schema_checked = True
+
+
+def ensure_user_saved_signature_schema(cursor, conn):
+    global _user_saved_signature_schema_checked
+
+    if _user_saved_signature_schema_checked:
+        return
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_saved_signatures (
+            user_id INT NOT NULL PRIMARY KEY,
+            company_id INT NULL,
+            signature_png LONGBLOB NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_user_saved_signatures_company (company_id)
+        )
+        """
+    )
+
+    conn.commit()
+    _user_saved_signature_schema_checked = True
+
+
 def ensure_budget_schema(cursor, conn):
     global _budget_schema_checked
 
     if _budget_schema_checked:
         return
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS admin_budget_totals (
-            email VARCHAR(255) NOT NULL PRIMARY KEY,
-            total_budget DECIMAL(14,2) NOT NULL DEFAULT 100000.00,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """
-    )
-    conn.commit()
+    # Table is managed externally by database migrations.
     _budget_schema_checked = True
 
 
@@ -708,44 +2142,281 @@ def ensure_budget_request_schema(cursor, conn):
     if _budget_request_schema_checked:
         return
 
+    # Tables are managed externally by database migrations.
+    _budget_request_schema_checked = True
+
+
+def ensure_department_budget_schema(cursor, conn):
+    global _department_budget_schema_checked
+
+    if _department_budget_schema_checked:
+        return
+
     cursor.execute(
         """
-        CREATE TABLE IF NOT EXISTS request_budget_metadata (
-            request_id INT NOT NULL PRIMARY KEY,
-            budget_type VARCHAR(64) NOT NULL,
-            target_department VARCHAR(255) NOT NULL,
-            created_by_email VARCHAR(255) NULL,
+        CREATE TABLE IF NOT EXISTS department_budget_allocations (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            company_id INT NOT NULL,
+            dept_name VARCHAR(255) NOT NULL,
+            allocated_budget DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            consumed_budget DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            low_balance_threshold DECIMAL(15,2) NOT NULL DEFAULT 10000.00,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_department_budget_allocations_company_dept (company_id, dept_name)
+        )
         """
     )
 
     cursor.execute(
         """
-        CREATE TABLE IF NOT EXISTS request_budget_transactions (
-            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-            request_id INT NOT NULL,
-            provider VARCHAR(32) NOT NULL DEFAULT 'xendit',
-            external_id VARCHAR(96) NULL,
-            transaction_id VARCHAR(128) NULL,
-            status VARCHAR(48) NOT NULL DEFAULT 'PENDING',
-            amount DECIMAL(14,2) NOT NULL DEFAULT 0,
-            currency VARCHAR(8) NOT NULL DEFAULT 'PHP',
-            budget_type VARCHAR(64) NULL,
-            target_department VARCHAR(255) NULL,
-            payload_json LONGTEXT NULL,
-            response_json LONGTEXT NULL,
-            error_message TEXT NULL,
+        CREATE TABLE IF NOT EXISTS department_budget_ledger (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            company_id INT NOT NULL,
+            dept_name VARCHAR(255) NOT NULL,
+            request_id INT NULL,
+            transaction_type VARCHAR(50) NOT NULL,
+            budget_type_name VARCHAR(120) NULL,
+            amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            balance_before DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            balance_after DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            note TEXT NULL,
+            created_by_email VARCHAR(255) NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_department_budget_ledger_company_dept_created (company_id, dept_name, created_at),
+            INDEX idx_department_budget_ledger_request_type (request_id, transaction_type)
+        )
+        """
+    )
+
+    if not _table_has_column(cursor, "department_budget_ledger", "budget_type_name"):
+        cursor.execute("ALTER TABLE department_budget_ledger ADD COLUMN budget_type_name VARCHAR(120) NULL")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS budget_alerts (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            company_id INT NOT NULL,
+            dept_name VARCHAR(255) NOT NULL,
+            request_id INT NULL,
+            alert_type VARCHAR(50) NOT NULL,
+            message TEXT NOT NULL,
+            current_balance DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            threshold_value DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            is_resolved TINYINT(1) NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TIMESTAMP NULL DEFAULT NULL,
+            INDEX idx_budget_alerts_company_resolved_created (company_id, is_resolved, created_at),
+            INDEX idx_budget_alerts_company_dept (company_id, dept_name)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS budget_types (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            company_id INT NOT NULL,
+            type_name VARCHAR(120) NOT NULL,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_request_budget_transactions_request (request_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            UNIQUE KEY uq_budget_types_company_type (company_id, type_name)
+        )
         """
     )
 
     conn.commit()
-    _budget_request_schema_checked = True
+    _department_budget_schema_checked = True
+
+
+def _normalize_department_name(value):
+    return str(value or "").strip()
+
+
+def _ensure_department_budget_row(cursor, company_id, dept_name):
+    normalized_dept = _normalize_department_name(dept_name)
+    if int(company_id or 0) <= 0 or not normalized_dept:
+        return None
+
+    cursor.execute(
+        """
+        INSERT IGNORE INTO department_budget_allocations
+            (company_id, dept_name, allocated_budget, consumed_budget, low_balance_threshold)
+        VALUES (%s, %s, 0, 0, 10000)
+        """,
+        (company_id, normalized_dept),
+    )
+
+    cursor.execute(
+        """
+        SELECT id, company_id, dept_name, allocated_budget, consumed_budget, low_balance_threshold
+        FROM department_budget_allocations
+        WHERE company_id = %s AND dept_name = %s
+        LIMIT 1
+        """,
+        (company_id, normalized_dept),
+    )
+    return cursor.fetchone() or None
+
+
+def _create_budget_alert(cursor, company_id, dept_name, request_id, alert_type, message, current_balance, threshold_value):
+    cursor.execute(
+        """
+        INSERT INTO budget_alerts
+            (company_id, dept_name, request_id, alert_type, message, current_balance, threshold_value)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            int(company_id or 0),
+            _normalize_department_name(dept_name),
+            request_id,
+            str(alert_type or "GENERAL").strip().upper(),
+            str(message or "").strip(),
+            str(parse_amount_decimal(current_balance)),
+            str(parse_amount_decimal(threshold_value)),
+        ),
+    )
+
+
+def apply_department_budget_deduction(cursor, conn, request_id, actor_email=""):
+    ensure_budget_request_schema(cursor, conn)
+    ensure_department_budget_schema(cursor, conn)
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM department_budget_ledger
+        WHERE request_id = %s AND transaction_type = 'DEDUCTION'
+        LIMIT 1
+        """,
+        (request_id,),
+    )
+    if cursor.fetchone():
+        return {"processed": True, "already_processed": True, "alerts": []}
+
+    cursor.execute(
+        """
+        SELECT
+            r.request_id,
+            r.company_id,
+            r.amount,
+            COALESCE(meta.budget_type, r.wfor, '') AS budget_type,
+            COALESCE(meta.target_department, d.dept_name, '') AS target_department
+        FROM requests r
+        LEFT JOIN users u ON u.user_id = r.user_id
+        LEFT JOIN departments d ON d.dept_id = u.dept_id
+        LEFT JOIN request_budget_metadata meta ON meta.request_id = r.request_id
+        WHERE r.request_id = %s
+        LIMIT 1
+        """,
+        (request_id,),
+    )
+    row = cursor.fetchone() or {}
+    if not row:
+        return {"processed": False, "reason": "request_not_found", "alerts": []}
+
+    budget_type = normalize_request_budget(row.get("budget_type"))
+    if not budget_type:
+        return {"processed": False, "reason": "not_budget_request", "alerts": []}
+
+    company_id = int(row.get("company_id") or 0)
+    target_department = _normalize_department_name(row.get("target_department"))
+    amount = parse_amount_decimal(row.get("amount"))
+
+    if company_id <= 0:
+        return {"processed": False, "reason": "missing_company", "alerts": []}
+    if not target_department:
+        return {"processed": False, "reason": "missing_target_department", "alerts": []}
+    if amount <= 0:
+        return {"processed": False, "reason": "invalid_amount", "alerts": []}
+
+    allocation_row = _ensure_department_budget_row(cursor, company_id, target_department)
+    if not allocation_row:
+        return {"processed": False, "reason": "allocation_not_found", "alerts": []}
+
+    allocated_budget = parse_amount_decimal(allocation_row.get("allocated_budget"))
+    consumed_budget = parse_amount_decimal(allocation_row.get("consumed_budget"))
+    low_balance_threshold = parse_amount_decimal(allocation_row.get("low_balance_threshold"))
+
+    balance_before = allocated_budget - consumed_budget
+    new_consumed_budget = consumed_budget + amount
+    balance_after = allocated_budget - new_consumed_budget
+
+    cursor.execute(
+        """
+        UPDATE department_budget_allocations
+        SET consumed_budget = %s
+        WHERE company_id = %s AND dept_name = %s
+        """,
+        (str(new_consumed_budget), company_id, target_department),
+    )
+
+    cursor.execute(
+        """
+        INSERT INTO department_budget_ledger
+            (company_id, dept_name, request_id, transaction_type, budget_type_name, amount, balance_before, balance_after, note, created_by_email)
+        VALUES (%s, %s, %s, 'DEDUCTION', %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            company_id,
+            target_department,
+            request_id,
+            budget_type,
+            str(amount),
+            str(balance_before),
+            str(balance_after),
+            f"Auto-deduction for approved request #{request_id} ({budget_type})",
+            (actor_email or "").strip().lower(),
+        ),
+    )
+
+    alerts = []
+
+    if amount > balance_before:
+        message = (
+            f"Budget over-limit detected for {target_department}. "
+            f"Request #{request_id} deducted {float(amount):,.2f} with only {float(balance_before):,.2f} available."
+        )
+        _create_budget_alert(
+            cursor,
+            company_id,
+            target_department,
+            request_id,
+            "OVER_LIMIT",
+            message,
+            balance_after,
+            low_balance_threshold,
+        )
+        alerts.append({"type": "OVER_LIMIT", "message": message})
+
+    if balance_after <= low_balance_threshold:
+        message = (
+            f"Low budget balance for {target_department}. "
+            f"Current balance is {float(balance_after):,.2f}, threshold is {float(low_balance_threshold):,.2f}."
+        )
+        _create_budget_alert(
+            cursor,
+            company_id,
+            target_department,
+            request_id,
+            "LOW_BALANCE",
+            message,
+            balance_after,
+            low_balance_threshold,
+        )
+        alerts.append({"type": "LOW_BALANCE", "message": message})
+
+    return {
+        "processed": True,
+        "already_processed": False,
+        "company_id": company_id,
+        "department": target_department,
+        "amount": float(amount),
+        "balance_before": float(balance_before),
+        "balance_after": float(balance_after),
+        "alerts": alerts,
+    }
 
 
 def ensure_coo_special_approval_schema(cursor, conn):
@@ -754,26 +2425,7 @@ def ensure_coo_special_approval_schema(cursor, conn):
     if _coo_special_approval_schema_checked:
         return
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS request_coo_approvals (
-            request_id INT NOT NULL PRIMARY KEY,
-            status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
-            requested_to_email VARCHAR(255) NULL,
-            requested_by_email VARCHAR(255) NULL,
-            approved_by_user_id INT NULL,
-            approved_by_email VARCHAR(255) NULL,
-            approval_method VARCHAR(32) NULL,
-            requested_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            approved_at TIMESTAMP NULL,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_request_coo_approvals_status (status),
-            INDEX idx_request_coo_approvals_requested_at (requested_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """
-    )
-
-    conn.commit()
+    # Table is managed externally by database migrations.
     _coo_special_approval_schema_checked = True
 
 
@@ -2323,17 +3975,7 @@ def ensure_request_type_form_schema_table(cursor, conn):
     if _request_type_form_schema_checked:
         return
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS request_type_form_schemas (
-            request_type_id INT NOT NULL PRIMARY KEY,
-            schema_json LONGTEXT NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """
-    )
-    conn.commit()
+    # Table is managed externally by database migrations.
     _request_type_form_schema_checked = True
 
 
@@ -2343,18 +3985,7 @@ def ensure_request_form_submission_table(cursor, conn):
     if _request_form_submission_schema_checked:
         return
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS request_form_submissions (
-            request_id INT NOT NULL PRIMARY KEY,
-            request_type_id INT NOT NULL,
-            form_data_json LONGTEXT NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """
-    )
-    conn.commit()
+    # Table is managed externally by database migrations.
     _request_form_submission_schema_checked = True
 
 
@@ -3214,8 +4845,6 @@ def validate_fillable_submission(schema, template_data_json):
             value = str(raw_value or "").strip()
             cleaned_fields[block_id] = value
 
-            list_values = _split_list_values(value)
-
             if block.get("required") and not value:
                 return None, None, False, f"{block.get('label') or block_id} is required."
 
@@ -3583,7 +5212,14 @@ def _normalize_pdf_field_lookup_key(value):
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
 
-def build_filled_pdf_from_submission(template_pdf_bytes, schema, cleaned_payload, total_amount=None):
+def build_filled_pdf_from_submission(
+    template_pdf_bytes,
+    schema,
+    cleaned_payload,
+    total_amount=None,
+    total_amount_scope="first",
+    total_amount_template_page=None,
+):
     if not template_pdf_bytes:
         return template_pdf_bytes
 
@@ -3849,6 +5485,40 @@ def build_filled_pdf_from_submission(template_pdf_bytes, schema, cleaned_payload
         total_text = f"{total_decimal}"
         total_written = False
 
+        normalized_scope = str(total_amount_scope or "first").strip().lower()
+        if normalized_scope not in {"first", "all", "specific"}:
+            normalized_scope = "first"
+
+        normalized_specific_page = None
+        if normalized_scope == "specific":
+            try:
+                parsed_page = int(str(total_amount_template_page).strip())
+                if parsed_page > 0:
+                    normalized_specific_page = parsed_page - 1
+            except (TypeError, ValueError):
+                normalized_specific_page = None
+
+        def _is_total_block_target(block_obj):
+            if normalized_scope == "all":
+                return True
+
+            if normalized_scope != "specific":
+                return True
+
+            if normalized_specific_page is None:
+                return True
+
+            overlay = _normalize_pdf_overlay_config(block_obj.get("pdf_overlay"))
+            if not overlay:
+                return False
+
+            try:
+                page_idx = int(overlay.get("page", 0) or 0)
+            except (TypeError, ValueError):
+                page_idx = 0
+
+            return page_idx == normalized_specific_page
+
         for block in schema.get("blocks", []):
             block_type = str(block.get("type") or "").strip().lower()
             if block_type != "number":
@@ -3857,6 +5527,9 @@ def build_filled_pdf_from_submission(template_pdf_bytes, schema, cleaned_payload
             block_id = str(block.get("id") or "").strip().lower()
             block_label = str(block.get("label") or "").strip().lower()
             if "total" not in block_id and "total" not in block_label:
+                continue
+
+            if not _is_total_block_target(block):
                 continue
 
             block_overlay_cfg = _normalize_pdf_overlay_config(block.get("pdf_overlay"))
@@ -3870,12 +5543,16 @@ def build_filled_pdf_from_submission(template_pdf_bytes, schema, cleaned_payload
                 field_values[matched_name] = total_text
                 used_pdf_fields.add(matched_name)
                 total_written = True
-                break
+                if normalized_scope == "first":
+                    break
+                continue
 
             if block_overlay_cfg:
                 append_overlay_text(total_text, block_overlay_cfg)
                 total_written = True
-                break
+                if normalized_scope == "first":
+                    break
+                continue
 
         if not total_written:
             matched_total_name = resolve_field_name([
@@ -4051,6 +5728,8 @@ def build_filled_pdf_from_submission(template_pdf_bytes, schema, cleaned_payload
                     schema,
                     extra_payload,
                     total_amount=None,
+                    total_amount_scope="first",
+                    total_amount_template_page=None,
                 )
                 extra_reader = _PdfReader(BytesIO(extra_pdf_bytes))
                 copy_suffix = f"__copy_{extra_page_index}_{int(time.time() * 1000) % 100000}"
@@ -4227,9 +5906,10 @@ def home():
     if "email" not in session:
         return redirect("/login")
 
-    role = session.get("role").strip()
-    dept = session.get("dept").strip()
-    position = session.get("position").strip()
+    role = (session.get("role") or "").strip()
+    dept = (session.get("dept") or "").strip()
+    position = (session.get("position") or "").strip()
+    is_it_context = role == "IT" or (role == "SuperAdmin" and position.lower() == "it")
     
     if dept == "GSD" and role in ["AssistantAdmin", "Admin"]:
         flash("Login Successful", "success")
@@ -4239,16 +5919,381 @@ def home():
         flash("Login Successful", "success")
         return redirect("/dean")
 
+    elif is_it_context:
+        flash("Login Successful", "success")
+        return redirect("/IT")
+
     elif role in ["Admin", "AssistantAdmin", "SuperAdmin", "SBO"]:
         flash("Login Successful", "success")
         return redirect("/admin")
 
-    elif role == "IT":
+    elif role.lower() == "dev":
         flash("Login Successful", "success")
-        return redirect("/IT")
+        return redirect("/dev")
     else:
         flash("Login Successful", "success")
         return redirect("/udashboard")
+
+
+@app.route("/dev")
+@login_required
+def dev_dashboard():
+    if (session.get("role") or "").strip().lower() != "dev":
+        return "Forbidden", 403
+
+    maintenance_state = get_system_maintenance_state(use_cache=False)
+
+    return render_template(
+        "dev.html",
+        email=(session.get("email") or "").strip(),
+        company_id=int(session.get("company_id") or 0),
+        company_name=(session.get("company_name") or "").strip(),
+        maintenance_mode_enabled=bool(maintenance_state.get("enabled")),
+        maintenance_reason=str(maintenance_state.get("reason") or ""),
+        maintenance_updated_by=str(maintenance_state.get("updated_by") or ""),
+        maintenance_updated_at=str(maintenance_state.get("updated_at") or ""),
+    )
+
+
+@app.route("/api/dev/system-maintenance", methods=["GET"])
+@login_required
+def dev_get_system_maintenance_api():
+    if (session.get("role") or "").strip().lower() != "dev":
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    state = get_system_maintenance_state(use_cache=False)
+    return jsonify(
+        {
+            "success": True,
+            "enabled": bool(state.get("enabled")),
+            "reason": str(state.get("reason") or ""),
+            "updated_by": str(state.get("updated_by") or ""),
+            "updated_at": str(state.get("updated_at") or ""),
+        }
+    )
+
+
+@app.route("/api/dev/system-maintenance", methods=["POST"])
+@login_required
+def dev_set_system_maintenance_api():
+    if (session.get("role") or "").strip().lower() != "dev":
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    raw_enabled = payload.get("enabled")
+    enabled = str(raw_enabled).strip().lower() in {"1", "true", "yes", "on"}
+    reason = _normalize_maintenance_reason(payload.get("reason"))
+
+    try:
+        state = set_system_maintenance_state(
+            enabled=enabled,
+            reason=reason,
+            updated_by_email=(session.get("email") or "").strip(),
+        )
+    except Exception:
+        logger.exception("dev_set_system_maintenance_api failed")
+        return jsonify({"success": False, "error": "Failed to update maintenance mode"}), 500
+
+    return jsonify(
+        {
+            "success": True,
+            "enabled": bool(state.get("enabled")),
+            "reason": str(state.get("reason") or ""),
+            "updated_by": str(state.get("updated_by") or ""),
+            "updated_at": str(state.get("updated_at") or ""),
+        }
+    )
+
+
+@app.route("/api/dev/system-broadcast", methods=["POST"])
+@login_required
+def dev_send_system_broadcast_api():
+    if (session.get("role") or "").strip().lower() != "dev":
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    title = _normalize_broadcast_title(payload.get("title"))
+    message = _normalize_broadcast_message(payload.get("message"))
+
+    if not message:
+        return jsonify({"success": False, "error": "Message is required"}), 400
+
+    try:
+        broadcast_id = create_system_broadcast(
+            title=title,
+            message=message,
+            actor_email=(session.get("email") or "").strip(),
+        )
+    except Exception:
+        logger.exception("dev_send_system_broadcast_api failed")
+        return jsonify({"success": False, "error": "Failed to send broadcast"}), 500
+
+    return jsonify(
+        {
+            "success": True,
+            "id": broadcast_id,
+            "title": title,
+            "message": message,
+        }
+    )
+
+
+@app.route("/saas-admin")
+@login_required
+def saas_admin_dashboard():
+    if not is_saas_owner_user():
+        return "Forbidden", 403
+
+    return render_template(
+        "saas_admin.html",
+        email=(session.get("email") or "").strip(),
+    )
+
+
+@app.route("/api/saas/companies", methods=["GET"])
+@login_required
+def saas_companies_api():
+    if not is_saas_owner_user():
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_saas_owner_schema(cursor, conn)
+
+        cursor.execute(
+            """
+            SELECT
+                o.company_id,
+                o.company_name,
+                o.company_slug,
+                o.is_active,
+                o.created_at,
+                COALESCE(ts.plan_name, 'FREE') AS plan_name,
+                COALESCE(ts.subscription_status, 'ACTIVE') AS subscription_status,
+                COALESCE(ts.monthly_price, 0) AS monthly_price,
+                COALESCE(ts.seats_limit, 0) AS seats_limit,
+                COALESCE(ts.requests_limit, 0) AS requests_limit,
+                COALESCE(u.user_count, 0) AS user_count,
+                COALESCE(r.request_count, 0) AS request_count
+            FROM organizations o
+            LEFT JOIN tenant_subscriptions ts ON ts.company_id = o.company_id
+            LEFT JOIN (
+                SELECT company_id, COUNT(*) AS user_count
+                FROM users
+                GROUP BY company_id
+            ) u ON u.company_id = o.company_id
+            LEFT JOIN (
+                SELECT company_id, COUNT(*) AS request_count
+                FROM requests
+                GROUP BY company_id
+            ) r ON r.company_id = o.company_id
+            ORDER BY o.created_at DESC
+            """
+        )
+        rows = cursor.fetchall() or []
+
+        for row in rows:
+            row["monthly_price"] = float(parse_amount_decimal(row.get("monthly_price")))
+            row["is_active"] = int(row.get("is_active") or 0)
+
+        return jsonify({"success": True, "companies": rows})
+    except Exception:
+        logger.exception("saas_companies_api failed")
+        return jsonify({"success": False, "error": "Failed to load companies"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/saas/companies/<int:company_id>/status", methods=["POST"])
+@login_required
+def saas_company_status_update_api(company_id):
+    if not is_saas_owner_user():
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    raw_active = payload.get("is_active")
+    is_active = 1 if str(raw_active).strip().lower() in {"1", "true", "yes", "on"} else 0
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        cursor.execute("SELECT company_id FROM organizations WHERE company_id = %s LIMIT 1", (company_id,))
+        if not cursor.fetchone():
+            return jsonify({"success": False, "error": "Company not found"}), 404
+
+        cursor.execute(
+            "UPDATE organizations SET is_active = %s WHERE company_id = %s",
+            (is_active, company_id),
+        )
+        conn.commit()
+        return jsonify({"success": True, "company_id": company_id, "is_active": is_active})
+    except Exception:
+        conn.rollback()
+        logger.exception("saas_company_status_update_api failed")
+        return jsonify({"success": False, "error": "Failed to update company status"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/saas/subscription/plans", methods=["GET"])
+@login_required
+def saas_subscription_plans_api():
+    if not is_saas_owner_user():
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    plans = []
+    for plan_name, values in SAAS_PLAN_DEFINITIONS.items():
+        plans.append(
+            {
+                "plan_name": plan_name,
+                "monthly_price": float(parse_amount_decimal(values.get("monthly_price"))),
+                "seats_limit": int(values.get("seats_limit") or 0),
+                "requests_limit": int(values.get("requests_limit") or 0),
+            }
+        )
+
+    return jsonify({"success": True, "plans": plans})
+
+
+@app.route("/api/saas/subscription/assign", methods=["POST"])
+@login_required
+def saas_assign_subscription_api():
+    if not is_saas_owner_user():
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        company_id = int(payload.get("company_id") or 0)
+    except (TypeError, ValueError):
+        company_id = 0
+    plan_name = _normalize_plan_name(payload.get("plan_name"))
+    subscription_status = str(payload.get("subscription_status") or "ACTIVE").strip().upper() or "ACTIVE"
+    plan_config = SAAS_PLAN_DEFINITIONS.get(plan_name, SAAS_PLAN_DEFINITIONS["FREE"])
+
+    if company_id <= 0:
+        return jsonify({"success": False, "error": "Invalid company_id"}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_saas_owner_schema(cursor, conn)
+
+        cursor.execute("SELECT company_id FROM organizations WHERE company_id = %s LIMIT 1", (company_id,))
+        if not cursor.fetchone():
+            return jsonify({"success": False, "error": "Company not found"}), 404
+
+        cursor.execute(
+            """
+            INSERT INTO tenant_subscriptions
+                (company_id, plan_name, subscription_status, monthly_price, seats_limit, requests_limit)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                plan_name = VALUES(plan_name),
+                subscription_status = VALUES(subscription_status),
+                monthly_price = VALUES(monthly_price),
+                seats_limit = VALUES(seats_limit),
+                requests_limit = VALUES(requests_limit),
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                company_id,
+                plan_name,
+                subscription_status,
+                str(parse_amount_decimal(plan_config.get("monthly_price"))),
+                int(plan_config.get("seats_limit") or 0),
+                int(plan_config.get("requests_limit") or 0),
+            ),
+        )
+        conn.commit()
+
+        return jsonify(
+            {
+                "success": True,
+                "company_id": company_id,
+                "plan_name": plan_name,
+                "subscription_status": subscription_status,
+            }
+        )
+    except Exception:
+        conn.rollback()
+        logger.exception("saas_assign_subscription_api failed")
+        return jsonify({"success": False, "error": "Failed to assign subscription"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/saas/analytics", methods=["GET"])
+@login_required
+def saas_analytics_api():
+    if not is_saas_owner_user():
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_saas_owner_schema(cursor, conn)
+
+        cursor.execute("SELECT COUNT(*) AS count FROM organizations")
+        total_companies = int((cursor.fetchone() or {}).get("count") or 0)
+
+        cursor.execute("SELECT COUNT(*) AS count FROM organizations WHERE is_active = 1")
+        active_companies = int((cursor.fetchone() or {}).get("count") or 0)
+
+        cursor.execute("SELECT COUNT(*) AS count FROM users")
+        total_users = int((cursor.fetchone() or {}).get("count") or 0)
+
+        cursor.execute("SELECT COUNT(*) AS count FROM requests")
+        total_requests = int((cursor.fetchone() or {}).get("count") or 0)
+
+        cursor.execute(
+            """
+            SELECT COALESCE(plan_name, 'FREE') AS plan_name, COUNT(*) AS count
+            FROM tenant_subscriptions
+            GROUP BY plan_name
+            ORDER BY count DESC
+            """
+        )
+        plan_distribution = cursor.fetchall() or []
+
+        cursor.execute(
+            """
+            SELECT DATE(created_at) AS metric_date, COUNT(*) AS count
+            FROM requests
+            WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+            GROUP BY DATE(created_at)
+            ORDER BY metric_date ASC
+            """
+        )
+        request_trend_30d = cursor.fetchall() or []
+
+        return jsonify(
+            {
+                "success": True,
+                "summary": {
+                    "total_companies": total_companies,
+                    "active_companies": active_companies,
+                    "inactive_companies": max(0, total_companies - active_companies),
+                    "total_users": total_users,
+                    "total_requests": total_requests,
+                },
+                "plan_distribution": plan_distribution,
+                "request_trend_30d": request_trend_30d,
+            }
+        )
+    except Exception:
+        logger.exception("saas_analytics_api failed")
+        return jsonify({"success": False, "error": "Failed to load SaaS analytics"}), 500
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @app.route("/dean")
@@ -4389,13 +6434,21 @@ def dean_dashboard():
 def udashboard():
     if "email" not in session:
         return redirect(url_for("login"))
-    if (session.get("role") or "").strip() not in ["User"]:
+    role = (session.get("role") or "").strip().lower()
+    if role not in {"user", "dev"}:
         return "Forbidden", 403
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
-    user_id = get_user_id(session["email"])
 
     try:
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return "No company context found", 403
+
+        user_id = get_user_id_for_company(session["email"], company_id)
+        if not user_id:
+            return "Forbidden", 403
+
         ensure_request_type_form_schema_table(cursor, conn)
         can_request_budget = can_use_secretary_budget_fields()
 
@@ -4411,11 +6464,12 @@ def udashboard():
                     WHERE fs.request_type_id = rt.request_type_id
                 ) AS has_form_schema
             FROM request_types rt
+            WHERE rt.company_id = %s
             ORDER BY type_name ASC
-        """)
+        """, (company_id,))
         request_types = cursor.fetchall()
 
-        cursor.execute("SELECT dept_name FROM departments ORDER BY dept_name ASC")
+        cursor.execute("SELECT dept_name FROM departments WHERE company_id = %s ORDER BY dept_name ASC", (company_id,))
         departments = [row.get("dept_name") for row in (cursor.fetchall() or []) if row.get("dept_name")]
 
         # user table list WITH status
@@ -4430,9 +6484,9 @@ def udashboard():
             FROM requests r
             LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
             LEFT JOIN request_status s ON r.status_id = s.status_id
-            WHERE r.user_id = %s
+            WHERE r.user_id = %s AND r.company_id = %s
             ORDER BY r.request_id 
-        """, (user_id,))
+        """, (user_id, company_id))
         all_request = cursor.fetchall()
 
         # CARD COUNTS
@@ -4444,8 +6498,8 @@ def udashboard():
                 SUM(CASE WHEN s.status_name = 'COMPLETED' THEN 1 ELSE 0 END) AS completed_count
             FROM requests r
             JOIN request_status s ON r.status_id = s.status_id
-            WHERE r.user_id = %s
-        """, (user_id,))
+            WHERE r.user_id = %s AND r.company_id = %s
+        """, (user_id, company_id))
         counts = cursor.fetchone() or {}
 
         return render_template(
@@ -4528,10 +6582,180 @@ def get_user_notifications():
 
             notifications.append(notif)
 
+        broadcast_rows = fetch_system_broadcast_rows(cursor, limit=80)
+        for row in reversed(broadcast_rows):
+            created_at = row.get("created_at")
+            if hasattr(created_at, "strftime"):
+                display_time = created_at.strftime("%b %d, %H:%M")
+            else:
+                display_time = ""
+
+            notifications.append(
+                {
+                    "id": row.get("id"),
+                    "title": row.get("title") or "System Broadcast",
+                    "time": display_time,
+                    "message": row.get("description") or "",
+                    "type": "info",
+                    "icon": "bell",
+                }
+            )
+
         return jsonify(notifications)
     except Exception as e:
         print(f"Notification Error: {e}")
         return jsonify([])
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/bugs/report", methods=["POST"])
+@login_required
+def api_report_bug():
+    reporter_email = (session.get("email") or "").strip().lower()
+    if not reporter_email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    description = str(request.form.get("description") or "").strip()
+    if len(description) < 5:
+        return jsonify({"success": False, "error": "Please provide a clear bug description."}), 400
+
+    image_blob = None
+    image_mime = None
+    image_name = None
+    image_file = request.files.get("image")
+
+    if image_file and str(image_file.filename or "").strip():
+        raw_name = str(image_file.filename or "").strip()
+        safe_name = secure_filename(raw_name)
+        mime_type = str(image_file.mimetype or "").strip().lower()
+
+        if not allowed_bug_image(safe_name, mime_type):
+            return jsonify({"success": False, "error": "Supported image formats: PNG, JPG, JPEG, WEBP, GIF."}), 400
+
+        image_bytes = image_file.read() or b""
+        if not image_bytes:
+            return jsonify({"success": False, "error": "Uploaded image is empty."}), 400
+        if len(image_bytes) > MAX_BUG_IMAGE_BYTES:
+            return jsonify({"success": False, "error": "Image is too large. Maximum size is 5MB."}), 413
+
+        image_blob = image_bytes
+        image_mime = mime_type or "application/octet-stream"
+        image_name = safe_name
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_bug_reports_schema(cursor, conn)
+
+        company_id = ensure_session_company_context(cursor)
+        reporter_role = (session.get("role") or "").strip()
+
+        cursor.execute(
+            """
+            INSERT INTO bug_reports
+                (company_id, reporter_email, reporter_role, description, image_blob, image_mime, image_name)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                int(company_id or 0) if int(company_id or 0) > 0 else None,
+                reporter_email,
+                reporter_role or None,
+                description,
+                image_blob,
+                image_mime,
+                image_name,
+            ),
+        )
+        conn.commit()
+        return jsonify({"success": True, "message": "Bug report submitted successfully."})
+    except Exception:
+        conn.rollback()
+        logger.exception("api_report_bug failed")
+        return jsonify({"success": False, "error": "Failed to submit bug report."}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/bug-reports", methods=["GET"])
+@login_required
+def bug_reports_dashboard():
+    if not is_saas_owner_user():
+        return "Forbidden", 403
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_bug_reports_schema(cursor, conn)
+
+        cursor.execute(
+            """
+            SELECT
+                b.id,
+                b.company_id,
+                COALESCE(o.company_name, '') AS company_name,
+                b.reporter_email,
+                COALESCE(b.reporter_role, '') AS reporter_role,
+                b.description,
+                COALESCE(b.image_mime, '') AS image_mime,
+                COALESCE(b.image_name, '') AS image_name,
+                b.created_at
+            FROM bug_reports b
+            LEFT JOIN organizations o ON o.company_id = b.company_id
+            ORDER BY b.created_at DESC
+            LIMIT 500
+            """
+        )
+        rows = cursor.fetchall() or []
+
+        for row in rows:
+            row["has_image"] = bool(row.get("image_name"))
+
+        return render_template(
+            "bug_reports.html",
+            email=(session.get("email") or "").strip(),
+            bug_reports=rows,
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/bug-reports/image/<int:report_id>", methods=["GET"])
+@login_required
+def bug_report_image(report_id):
+    if not is_saas_owner_user():
+        return "Forbidden", 403
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_bug_reports_schema(cursor, conn)
+        cursor.execute(
+            """
+            SELECT image_blob, COALESCE(image_mime, 'application/octet-stream') AS image_mime, COALESCE(image_name, 'bug-image') AS image_name
+            FROM bug_reports
+            WHERE id = %s
+            LIMIT 1
+            """,
+            (report_id,),
+        )
+        row = cursor.fetchone() or {}
+        image_blob = row.get("image_blob")
+        if not image_blob:
+            return "Image not found", 404
+
+        return send_file(
+            BytesIO(image_blob),
+            mimetype=str(row.get("image_mime") or "application/octet-stream"),
+            as_attachment=False,
+            download_name=str(row.get("image_name") or f"bug-{report_id}-image"),
+            conditional=True,
+        )
     finally:
         cursor.close()
         conn.close()
@@ -4547,7 +6771,7 @@ def api_activity_logs():
     try:
         position_id = int(position_id)
     except (TypeError, ValueError):
-        return jsonify({"success": True, "data": []})
+        position_id = 0
 
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
@@ -4666,6 +6890,17 @@ def api_activity_logs():
                     }
                 )
 
+        broadcast_rows = fetch_system_broadcast_rows(cur, limit=120)
+        for row in broadcast_rows:
+            rows.append(
+                {
+                    "id": row.get("id"),
+                    "created_at": row.get("created_at"),
+                    "title": row.get("title") or "System Broadcast",
+                    "description": row.get("description") or "",
+                }
+            )
+
         rows.sort(
             key=lambda item: (
                 item.get("created_at").timestamp()
@@ -4693,19 +6928,30 @@ def api_user_dashboard():
 
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
-    user_id = get_user_id(request.user_email)
-
-    if not user_id:
-        cursor.close()
-        conn.close()
-        return jsonify({"error": "Unauthorized"}), 401
 
     try:
+        company_id = int(getattr(request, "user_company_id", 0) or 0)
+        if company_id <= 0:
+            cursor.execute(
+                "SELECT COALESCE(company_id, 0) AS company_id FROM users WHERE email = %s LIMIT 1",
+                (request.user_email,),
+            )
+            row = cursor.fetchone() or {}
+            company_id = int(row.get("company_id") or 0)
+
+        if company_id <= 0:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        user_id = get_user_id_for_company(request.user_email, company_id)
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
         cursor.execute("""
             SELECT request_type_id, type_name, template_filename, template_mode
             FROM request_types
+            WHERE company_id = %s
             ORDER BY type_name ASC
-        """)
+        """, (company_id,))
         request_types = cursor.fetchall()
 
         cursor.execute("""
@@ -4723,9 +6969,9 @@ def api_user_dashboard():
             LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
             LEFT JOIN request_status s ON r.status_id = s.status_id
             LEFT JOIN positions p ON r.stage_position_id = p.position_id
-            WHERE r.user_id = %s
+            WHERE r.user_id = %s AND r.company_id = %s
             ORDER BY r.request_id ASC
-        """, (user_id,))
+        """, (user_id, company_id))
         all_request = cursor.fetchall()
 
         for r in all_request:
@@ -4780,8 +7026,8 @@ def api_user_dashboard():
                 SUM(CASE WHEN s.status_name = 'COMPLETED' THEN 1 ELSE 0 END) AS completed_count
             FROM requests r
             JOIN request_status s ON r.status_id = s.status_id
-            WHERE r.user_id = %s
-        """, (user_id,))
+            WHERE r.user_id = %s AND r.company_id = %s
+        """, (user_id, company_id))
         counts = cursor.fetchone() or {}
 
         return jsonify({
@@ -4989,7 +7235,6 @@ def admin_dashboard():
         return redirect("/login")
 
     position_id = session.get("position_id")
-    dept = (session.get("dept") or "").strip()
     role = (session.get("role") or "").strip()
     if not (role in ["Admin", "AssistantAdmin", "SuperAdmin", "SBO"]):
         return "Forbidden", 403
@@ -4998,6 +7243,14 @@ def admin_dashboard():
     cursor = conn.cursor(dictionary=True)
 
     try:
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return "No company context found", 403
+
+        can_manage_request_types_access = can_manage_request_types(cursor, role=role)
+        can_view_reports_access = can_view_reports(cursor, role=role)
+        can_manage_budget_access = can_manage_budget(cursor, role=role)
+
         cursor.execute(
             """
             SELECT COUNT(*) AS count
@@ -5005,8 +7258,9 @@ def admin_dashboard():
             JOIN request_status s ON r.status_id = s.status_id
             WHERE s.status_name = 'PENDING'
             AND r.stage_position_id = %s
+            AND r.company_id = %s
             """,
-            (position_id,),
+            (position_id, company_id),
         )
         pending_count = cursor.fetchone()["count"]
 
@@ -5014,32 +7268,38 @@ def admin_dashboard():
         cursor.execute(
             """
             SELECT COUNT(*) AS count
-            FROM request_actions
-            WHERE actor_position_id = %s AND action = 'APPROVED'
+            FROM request_actions ra
+            JOIN requests r ON r.request_id = ra.request_id
+            WHERE ra.actor_position_id = %s AND ra.action = 'APPROVED'
+            AND r.company_id = %s
             """,
-            (position_id,),
+            (position_id, company_id),
         )
         approved_count = cursor.fetchone()["count"]
 
         cursor.execute(
             """
             SELECT COUNT(*) AS count
-            FROM request_actions
-            WHERE actor_position_id = %s AND action = 'REJECTED'
+            FROM request_actions ra
+            JOIN requests r ON r.request_id = ra.request_id
+            WHERE ra.actor_position_id = %s AND ra.action = 'REJECTED'
+            AND r.company_id = %s
             """,
-            (position_id,),
+            (position_id, company_id),
         )
         rejected_count = cursor.fetchone()["count"]
 
         cursor.execute(
             """
             SELECT COUNT(*) AS count
-            FROM request_actions
-            WHERE actor_position_id = %s
-            AND action = 'APPROVED'
-            AND DATE(created_at) = CURDATE()
+            FROM request_actions ra
+            JOIN requests r ON r.request_id = ra.request_id
+            WHERE ra.actor_position_id = %s
+            AND ra.action = 'APPROVED'
+            AND DATE(ra.created_at) = CURDATE()
+            AND r.company_id = %s
             """,
-            (position_id,),
+            (position_id, company_id),
         )
         approvals_today = cursor.fetchone()["count"]
         
@@ -5049,7 +7309,9 @@ def admin_dashboard():
             FROM requests r
             JOIN request_status s ON r.status_id = s.status_id
             WHERE s.status_name = 'IN PROGRESS'
+            AND r.company_id = %s
             """,
+            (company_id,),
         )
         in_progress = cursor.fetchone()["count"]
         
@@ -5059,11 +7321,13 @@ def admin_dashboard():
             FROM requests r
             JOIN request_status s ON r.status_id = s.status_id
             WHERE s.status_name = 'COMPLETED'
+            AND r.company_id = %s
             """,
+            (company_id,),
         )
         completed = cursor.fetchone()["count"]
 
-        cursor.execute("SELECT COUNT(*) as count FROM users")
+        cursor.execute("SELECT COUNT(*) as count FROM users WHERE company_id = %s", (company_id,))
         total_users = cursor.fetchone()["count"]
 
         position_id = int(session.get("position_id") or 0)
@@ -5126,9 +7390,12 @@ def admin_dashboard():
             ) ra ON ra.request_id = r.request_id
 
             WHERE
-            (%(is_purchasing)s = 1)
-            OR (s.status_name = 'PENDING' AND r.stage_position_id = %(pos_id)s)
-            OR (ra.request_id IS NOT NULL)
+            r.company_id = %(company_id)s
+            AND (
+                (%(is_purchasing)s = 1)
+                OR (s.status_name = 'PENDING' AND r.stage_position_id = %(pos_id)s)
+                OR (ra.request_id IS NOT NULL)
+            )
 
             ORDER BY r.created_at ASC
             LIMIT 50
@@ -5139,6 +7406,7 @@ def admin_dashboard():
             {
                 "pos_id": int(position_id or 0),
                 "is_purchasing": 1 if is_purchasing else 0,
+                "company_id": company_id,
             },
         )
         recent_requests = cursor.fetchall()
@@ -5147,7 +7415,8 @@ def admin_dashboard():
 
         # Positions dropdown
         cursor.execute(
-            "SELECT position_id, position_name FROM positions ORDER BY position_name ASC"
+            "SELECT position_id, position_name FROM positions WHERE company_id = %s ORDER BY position_name ASC",
+            (company_id,),
         )
         positions = cursor.fetchall()
 
@@ -5166,17 +7435,19 @@ def admin_dashboard():
             LEFT JOIN positions pr ON rtr.position_id = pr.position_id
             LEFT JOIN request_type_approvers rta ON rt.request_type_id = rta.request_type_id
             LEFT JOIN positions pa ON rta.position_id = pa.position_id
+            WHERE rt.company_id = %s
             GROUP BY rt.request_type_id, rt.type_name, rt.template_filename
             ORDER BY rt.type_name ASC
-        """)
+        """, (company_id,))
         existing_types = cursor.fetchall()
 
         # CC recipients dropdown (all known user emails)
         cursor.execute("""
             SELECT u.email
             FROM users u
+            WHERE u.company_id = %s
             ORDER BY u.email ASC
-        """)
+        """, (company_id,))
         cc_recipients = [row["email"] for row in cursor.fetchall()]
 
         return render_template(
@@ -5192,6 +7463,9 @@ def admin_dashboard():
             positions=positions,
             existing_types=existing_types,
             cc_recipients=cc_recipients,
+            can_manage_request_types=can_manage_request_types_access,
+            can_view_reports=can_view_reports_access,
+            can_manage_budget=can_manage_budget_access,
         )
 
     except Exception as e:
@@ -5215,6 +7489,10 @@ def api_admin_live():
     cursor = conn.cursor(dictionary=True)
 
     try:
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
         position_id = int(session.get("position_id") or 0)
         position_name = (session.get("position") or "").strip().lower()
         is_purchasing = 1 if "purchasing" in position_name else 0
@@ -5226,28 +7504,33 @@ def api_admin_live():
             JOIN request_status s ON r.status_id = s.status_id
             WHERE s.status_name = 'PENDING'
             AND r.stage_position_id = %s
+            AND r.company_id = %s
             """,
-            (position_id,),
+            (position_id, company_id),
         )
         pending_count = cursor.fetchone()["count"]
 
         cursor.execute(
             """
             SELECT COUNT(*) AS count
-            FROM request_actions
-            WHERE actor_position_id = %s AND action = 'APPROVED'
+            FROM request_actions ra
+            JOIN requests r ON r.request_id = ra.request_id
+            WHERE ra.actor_position_id = %s AND ra.action = 'APPROVED'
+            AND r.company_id = %s
             """,
-            (position_id,),
+            (position_id, company_id),
         )
         approved_count = cursor.fetchone()["count"]
 
         cursor.execute(
             """
             SELECT COUNT(*) AS count
-            FROM request_actions
-            WHERE actor_position_id = %s AND action = 'REJECTED'
+            FROM request_actions ra
+            JOIN requests r ON r.request_id = ra.request_id
+            WHERE ra.actor_position_id = %s AND ra.action = 'REJECTED'
+            AND r.company_id = %s
             """,
-            (position_id,),
+            (position_id, company_id),
         )
         rejected_count = cursor.fetchone()["count"]
 
@@ -5257,7 +7540,9 @@ def api_admin_live():
             FROM requests r
             JOIN request_status s ON r.status_id = s.status_id
             WHERE s.status_name = 'IN PROGRESS'
-            """
+            AND r.company_id = %s
+            """,
+            (company_id,),
         )
         in_progress = cursor.fetchone()["count"]
 
@@ -5267,7 +7552,9 @@ def api_admin_live():
             FROM requests r
             JOIN request_status s ON r.status_id = s.status_id
             WHERE s.status_name = 'COMPLETED'
-            """
+            AND r.company_id = %s
+            """,
+            (company_id,),
         )
         completed = cursor.fetchone()["count"]
 
@@ -5320,9 +7607,12 @@ def api_admin_live():
             ) ra ON ra.request_id = r.request_id
 
             WHERE
-            (%(is_purchasing)s = 1)
-            OR (s.status_name = 'PENDING' AND r.stage_position_id = %(pos_id)s)
-            OR (ra.request_id IS NOT NULL)
+            r.company_id = %(company_id)s
+            AND (
+                (%(is_purchasing)s = 1)
+                OR (s.status_name = 'PENDING' AND r.stage_position_id = %(pos_id)s)
+                OR (ra.request_id IS NOT NULL)
+            )
 
             ORDER BY r.created_at ASC
             LIMIT 50
@@ -5333,6 +7623,7 @@ def api_admin_live():
             {
                 "pos_id": position_id,
                 "is_purchasing": is_purchasing,
+                "company_id": company_id,
             },
         )
         recent_requests = cursor.fetchall() or []
@@ -5764,14 +8055,18 @@ def get_request_workflow(request_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"error": "No company context found"}), 403
+
         # get request basics
         cursor.execute(
             """
             SELECT request_id, request_type_id, stage_position_id
             FROM requests
-            WHERE request_id = %s
+            WHERE request_id = %s AND company_id = %s
         """,
-            (request_id,),
+            (request_id, company_id),
         )
         req = cursor.fetchone()
         if not req:
@@ -5830,12 +8125,32 @@ def update_request_workflow(request_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"error": "No company context found"}), 403
+
         # ensure request exists
         cursor.execute(
-            "SELECT request_id FROM requests WHERE request_id=%s", (request_id,)
+            "SELECT request_id FROM requests WHERE request_id=%s AND company_id=%s",
+            (request_id, company_id),
         )
         if not cursor.fetchone():
             return jsonify({"error": "Request not found"}), 404
+
+        all_position_ids = reviewer_ids + approver_ids
+        if stage_position_id is not None:
+            all_position_ids.append(stage_position_id)
+
+        if all_position_ids:
+            placeholders = ",".join(["%s"] * len(all_position_ids))
+            cursor.execute(
+                f"SELECT position_id FROM positions WHERE company_id=%s AND position_id IN ({placeholders})",
+                tuple([company_id] + all_position_ids),
+            )
+            valid_position_ids = {int(row["position_id"]) for row in (cursor.fetchall() or [])}
+            for pid in all_position_ids:
+                if int(pid) not in valid_position_ids:
+                    return jsonify({"error": "One or more workflow positions do not belong to your company"}), 400
 
         # overwrite per-request reviewer override
         cursor.execute(
@@ -5868,9 +8183,9 @@ def update_request_workflow(request_id):
             """
             UPDATE requests
             SET stage_position_id = %s
-            WHERE request_id = %s
+            WHERE request_id = %s AND company_id = %s
         """,
-            (stage_position_id, request_id),
+            (stage_position_id, request_id, company_id),
         )
 
         conn.commit()
@@ -5976,18 +8291,49 @@ def add_request_type():
                 return redirect(url_for("admin_dashboard"))
 
     conn = get_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
 
     try:
+        if not can_manage_request_types(cursor):
+            flash("You do not have permission to manage request types.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("No company context found.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        normalized_reviewer_ids = []
+        normalized_approver_ids = []
+        try:
+            normalized_reviewer_ids = [int(pos_id) for pos_id in reviewer_ids if str(pos_id).strip()]
+            normalized_approver_ids = [int(pos_id) for pos_id in approver_ids if str(pos_id).strip()]
+        except (TypeError, ValueError):
+            flash("Invalid reviewer/approver selection.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        selected_position_ids = normalized_reviewer_ids + normalized_approver_ids
+        if selected_position_ids:
+            placeholders = ",".join(["%s"] * len(selected_position_ids))
+            cursor.execute(
+                f"SELECT position_id FROM positions WHERE company_id=%s AND position_id IN ({placeholders})",
+                tuple([company_id] + selected_position_ids),
+            )
+            valid_ids = {int(row["position_id"]) for row in (cursor.fetchall() or [])}
+            for pos_id in selected_position_ids:
+                if pos_id not in valid_ids:
+                    flash("Selected reviewers/approvers must belong to your company.", "danger")
+                    return redirect(url_for("admin_dashboard"))
+
         ensure_request_type_form_schema_table(cursor, conn)
 
         # Insert request type WITH template + mode
         cursor.execute(
             """
-            INSERT INTO request_types (type_name, template_filename, template_file, template_mode)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO request_types (type_name, template_filename, template_file, template_mode, company_id)
+            VALUES (%s, %s, %s, %s, %s)
             """,
-            (type_name, template_filename, template_blob, template_mode),
+            (type_name, template_filename, template_blob, template_mode, company_id),
         )
         new_type_id = cursor.lastrowid
 
@@ -6004,25 +8350,25 @@ def add_request_type():
             )
 
         # reviewers in the EXACT order selected
-        for i, pos_id in enumerate(reviewer_ids, start=1):
+        for i, pos_id in enumerate(normalized_reviewer_ids, start=1):
             if pos_id:
                 cursor.execute(
                     """
                     INSERT INTO request_type_reviewers (request_type_id, position_id, order_no)
                     VALUES (%s, %s, %s)
                     """,
-                    (new_type_id, int(pos_id), i),
+                    (new_type_id, pos_id, i),
                 )
 
         # approvers in the EXACT order selected
-        for i, pos_id in enumerate(approver_ids, start=1):
+        for i, pos_id in enumerate(normalized_approver_ids, start=1):
             if pos_id:
                 cursor.execute(
                     """
                     INSERT INTO request_type_approvers (request_type_id, position_id, order_no)
                     VALUES (%s, %s, %s)
                     """,
-                    (new_type_id, int(pos_id), i),
+                    (new_type_id, pos_id, i),
                 )
 
         conn.commit()
@@ -6050,7 +8396,10 @@ def create_request():
 
     
     if not user_id and session.get("email"):
-        resolved_user_id = get_user_id(session.get("email"))
+        resolved_user_id = get_user_id_for_company(
+            session.get("email"),
+            int(session.get("company_id") or 0),
+        )
         if resolved_user_id:
             session["user_id"] = resolved_user_id
             user_id = resolved_user_id
@@ -6069,6 +8418,20 @@ def create_request():
         or request.form.get("amount")
         or ""
     ).strip()
+    total_amount_scope = str(request.form.get("total_apply_scope") or "first").strip().lower()
+    if total_amount_scope not in {"first", "all", "specific"}:
+        total_amount_scope = "first"
+
+    total_amount_template_page = None
+    if total_amount_scope == "specific":
+        raw_total_page = (request.form.get("total_apply_template_page") or "").strip()
+        if raw_total_page:
+            try:
+                parsed_total_page = int(raw_total_page)
+                if parsed_total_page > 0:
+                    total_amount_template_page = parsed_total_page
+            except (TypeError, ValueError):
+                total_amount_template_page = None
     request_purpose = (request.form.get("purpose") or "").strip()
     request_budget = normalize_request_budget(request.form.get("request_budget"))
     request_department = (session.get("dept") or "").strip()
@@ -6122,9 +8485,26 @@ def create_request():
     cursor = conn.cursor(dictionary=True)
 
     try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_saas_owner_schema(cursor, conn)
         ensure_request_type_form_schema_table(cursor, conn)
         ensure_request_form_submission_table(cursor, conn)
         ensure_budget_request_schema(cursor, conn)
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            msg = "No company context found."
+            if request.headers.get("X-Requested-With") == "fetch":
+                return jsonify({"success": False, "message": msg}), 403
+            flash(msg, "danger")
+            return redirect(request.referrer or "/udashboard")
+
+        requests_ok, requests_msg = check_company_request_capacity(cursor, company_id)
+        if not requests_ok:
+            if request.headers.get("X-Requested-With") == "fetch":
+                return jsonify({"success": False, "message": requests_msg}), 403
+            flash(requests_msg, "danger")
+            return redirect(request.referrer or "/udashboard")
 
         if can_request_budget:
             if not request_budget:
@@ -6142,8 +8522,8 @@ def create_request():
                 return redirect(request.referrer or "/udashboard")
 
             cursor.execute(
-                "SELECT dept_name FROM departments WHERE dept_name = %s LIMIT 1",
-                (request_department,),
+                "SELECT dept_name FROM departments WHERE dept_name = %s AND company_id = %s LIMIT 1",
+                (request_department, company_id),
             )
             if not (cursor.fetchone() or {}).get("dept_name"):
                 msg = "Invalid target department selected."
@@ -6156,10 +8536,10 @@ def create_request():
             """
             SELECT request_type_id, template_mode, template_filename, template_file
             FROM request_types
-            WHERE request_type_id = %s
+            WHERE request_type_id = %s AND company_id = %s
             LIMIT 1
             """,
-            (request_type_id,),
+            (request_type_id, company_id),
         )
         request_type_row = cursor.fetchone()
         if not request_type_row:
@@ -6195,14 +8575,26 @@ def create_request():
             validated_template_payload_json = json.dumps(cleaned_payload, ensure_ascii=True)
 
             if has_total_sources:
-                amount = float(computed_total)
+                if amount_raw:
+                    try:
+                        amount = float(amount_raw)
+                    except (TypeError, ValueError):
+                        msg = "Invalid amount value."
+                        if request.headers.get("X-Requested-With") == "fetch":
+                            return jsonify({"success": False, "message": msg}), 400
+                        flash(msg, "danger")
+                        return redirect(request.referrer or "/udashboard")
+                else:
+                    amount = float(computed_total)
 
-            if request_type_template_blob:
+            if request_type_template_blob and not file_blob:
                 file_blob = build_filled_pdf_from_submission(
                     request_type_template_blob,
                     schema,
                     cleaned_payload,
                     total_amount=computed_total if has_total_sources else None,
+                    total_amount_scope=total_amount_scope,
+                    total_amount_template_page=total_amount_template_page,
                 )
                 filename = request_type_template_name or f"request_type_{request_type_id}_template.pdf"
 
@@ -6266,10 +8658,10 @@ def create_request():
                     """
                     SELECT wfor
                     FROM request_types
-                    WHERE request_type_id = %s
+                    WHERE request_type_id = %s AND company_id = %s
                     LIMIT 1
                     """,
-                    (request_type_id,),
+                    (request_type_id, company_id),
                 )
                 request_type_wfor_row = cursor.fetchone() or {}
                 wfor = (request_type_wfor_row.get("wfor") or "").strip()
@@ -6279,10 +8671,10 @@ def create_request():
                         """
                         SELECT `for` AS wfor
                         FROM request_types
-                        WHERE request_type_id = %s
+                        WHERE request_type_id = %s AND company_id = %s
                         LIMIT 1
                         """,
-                        (request_type_id,),
+                        (request_type_id, company_id),
                     )
                     request_type_wfor_row = cursor.fetchone() or {}
                     wfor = (request_type_wfor_row.get("wfor") or "").strip()
@@ -6294,9 +8686,9 @@ def create_request():
 
         # Insert Request
         cursor.execute("""
-            INSERT INTO requests (user_id, request_type_id, wfor, filename, attachment, amount, status_id, stage_position_id)
-            VALUES (%s, %s, %s, %s, %s, %s, 1, %s)
-        """, (user_id, request_type_id, wfor, filename, file_blob, amount, stage_position_id))
+            INSERT INTO requests (user_id, request_type_id, wfor, filename, attachment, amount, status_id, stage_position_id, company_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s)
+        """, (user_id, request_type_id, wfor, filename, file_blob, amount, stage_position_id, company_id))
 
         request_id = cursor.lastrowid
 
@@ -6354,26 +8746,49 @@ def create_request():
 
 @app.route("/api/reports")
 def reports_api():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT COUNT(*) AS c FROM requests WHERE WEEK(created_at)=WEEK(NOW())")
+        if not can_view_reports(cur):
+            return jsonify({"success": False, "error": "Forbidden"}), 403
+
+        company_id = ensure_session_company_context(cur)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM requests WHERE company_id=%s AND WEEK(created_at)=WEEK(NOW())",
+            (company_id,),
+        )
         weekly = cur.fetchone()["c"]
 
-        cur.execute("SELECT COUNT(*) AS c FROM requests WHERE MONTH(created_at)=MONTH(NOW())")
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM requests WHERE company_id=%s AND MONTH(created_at)=MONTH(NOW())",
+            (company_id,),
+        )
         monthly = cur.fetchone()["c"]
 
-        cur.execute("SELECT COUNT(*) AS c FROM requests WHERE YEAR(created_at)=YEAR(NOW())")
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM requests WHERE company_id=%s AND YEAR(created_at)=YEAR(NOW())",
+            (company_id,),
+        )
         yearly = cur.fetchone()["c"]
 
-        cur.execute("""
+        cur.execute(
+            """
             SELECT t.type_name, COUNT(*) as total
             FROM requests r
             JOIN request_types t ON r.request_type_id=t.request_type_id
+            WHERE r.company_id = %s
             GROUP BY t.type_name
             ORDER BY total DESC
             LIMIT 1
-        """)
+            """,
+            (company_id,),
+        )
         top = cur.fetchone()
 
         return jsonify({
@@ -6413,6 +8828,11 @@ def budget_overview_api():
     try:
         ensure_budget_schema(cursor, conn)
         ensure_budget_request_schema(cursor, conn)
+        ensure_department_budget_schema(cursor, conn)
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
 
         configured_total_budget = BUDGET_DEFAULT_TOTAL
         email = (session.get("email") or "").strip().lower()
@@ -6443,10 +8863,11 @@ def budget_overview_api():
             LEFT JOIN departments d ON d.dept_id = u.dept_id
             LEFT JOIN request_budget_metadata meta ON meta.request_id = r.request_id
             LEFT JOIN request_status rs ON r.status_id = rs.status_id
-            WHERE YEAR(r.created_at) = YEAR(CURDATE())
+            WHERE r.company_id = %s
+            AND YEAR(r.created_at) = YEAR(CURDATE())
             AND UPPER(COALESCE(rs.status_name, '')) IN ('APPROVED', 'IN PROGRESS', 'PENDING_USER', 'COMPLETED')
         """
-        query_params = []
+        query_params = [company_id]
         if scope_department:
             base_query += """
             AND TRIM(COALESCE(meta.target_department, d.dept_name, '')) COLLATE utf8mb4_general_ci = TRIM(%s) COLLATE utf8mb4_general_ci
@@ -6501,22 +8922,141 @@ def budget_overview_api():
             )
         ]
 
+        transfer_query = """
+            SELECT created_at, COALESCE(budget_type_name, 'Department Budget') AS budget_type_name, amount, transaction_type
+            FROM department_budget_ledger
+            WHERE company_id = %s
+              AND transaction_type IN ('TRANSFER_IN', 'TRANSFER_IN_STUDENT')
+              AND YEAR(created_at) = YEAR(CURDATE())
+        """
+        transfer_params = [company_id]
+        if scope_department:
+            transfer_query += """
+              AND (
+                    TRIM(dept_name) COLLATE utf8mb4_general_ci = TRIM(%s) COLLATE utf8mb4_general_ci
+                    OR transaction_type = 'TRANSFER_IN_STUDENT'
+                  )
+            """
+            transfer_params.append(scope_department)
+
+        cursor.execute(transfer_query, tuple(transfer_params))
+        transfer_rows = cursor.fetchall() or []
+
+        transfer_category_totals = {}
+        student_transfer_total = Decimal("0")
+        for row in transfer_rows:
+            created_at = row.get("created_at")
+            if hasattr(created_at, "month"):
+                month_index = int(created_at.month) - 1
+            else:
+                parsed = parse_budget_record_date(str(created_at or ""))
+                month_index = parsed.month - 1 if parsed else -1
+
+            if month_index < 0 or month_index > 11:
+                continue
+
+            amount = parse_amount_decimal(row.get("amount"))
+            category = (row.get("budget_type_name") or "Department Budget").strip() or "Department Budget"
+            key = (month_index, category)
+            transfer_category_totals[key] = transfer_category_totals.get(key, Decimal("0")) + amount
+
+            tx_type = str(row.get("transaction_type") or "").strip().upper()
+            if tx_type == "TRANSFER_IN_STUDENT" or "student" in category.lower():
+                student_transfer_total += amount
+
+        records.extend(
+            {
+                "month": month,
+                "category": category,
+                "amount": float(total),
+            }
+            for (month, category), total in sorted(
+                transfer_category_totals.items(),
+                key=lambda item: (item[0][0], item[0][1].lower()),
+            )
+        )
+
         total_cost = sum(monthly_totals, Decimal("0"))
         total_request_budget = total_cost
         student_department_total_cost = student_total_cost + department_total_cost
+        student_available_total = (configured_total_budget + student_transfer_total) - student_total_cost
+        if student_available_total < 0:
+            student_available_total = Decimal("0")
+
+        allocation_query = """
+            SELECT
+                d.dept_name,
+                COALESCE(a.allocated_budget, 0) AS allocated_budget,
+                COALESCE(a.consumed_budget, 0) AS consumed_budget,
+                COALESCE(a.low_balance_threshold, 10000) AS low_balance_threshold
+            FROM departments d
+            LEFT JOIN department_budget_allocations a
+                ON a.company_id = d.company_id AND a.dept_name = d.dept_name
+            WHERE d.company_id = %s
+        """
+        allocation_params = [company_id]
+        if scope_department:
+            allocation_query += """
+            AND TRIM(d.dept_name) COLLATE utf8mb4_general_ci = TRIM(%s) COLLATE utf8mb4_general_ci
+            """
+            allocation_params.append(scope_department)
+
+        allocation_query += """
+            ORDER BY d.dept_name ASC
+        """
+
+        cursor.execute(allocation_query, tuple(allocation_params))
+        allocation_rows = cursor.fetchall() or []
+        department_budgets = []
+        department_allocated_total = Decimal("0")
+        department_consumed_total = Decimal("0")
+        department_available_total = Decimal("0")
+        for item in allocation_rows:
+            allocated_budget = parse_amount_decimal(item.get("allocated_budget"))
+            consumed_budget = parse_amount_decimal(item.get("consumed_budget"))
+            available_budget = allocated_budget - consumed_budget
+            department_allocated_total += allocated_budget
+            department_consumed_total += consumed_budget
+            department_available_total += available_budget
+            department_budgets.append(
+                {
+                    "department": item.get("dept_name"),
+                    "allocated_budget": float(allocated_budget),
+                    "consumed_budget": float(consumed_budget),
+                    "available_budget": float(available_budget),
+                    "low_balance_threshold": float(parse_amount_decimal(item.get("low_balance_threshold"))),
+                }
+            )
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM budget_alerts
+            WHERE company_id = %s AND is_resolved = 0
+            """,
+            (company_id,),
+        )
+        open_alert_count = int((cursor.fetchone() or {}).get("count") or 0)
 
         return jsonify(
             {
                 "success": True,
                 "year": datetime.datetime.now().year,
-            "total_request_budget": float(total_request_budget),
-            "total_budget": float(configured_total_budget),
+                "total_request_budget": float(total_request_budget),
+                "total_budget": float(configured_total_budget),
                 "total_cost": float(total_cost),
                 "student_total_cost": float(student_total_cost),
                 "department_total_cost": float(department_total_cost),
                 "student_department_total_cost": float(student_department_total_cost),
+                "student_transfer_total": float(student_transfer_total),
+                "student_available_total": float(student_available_total),
                 "monthly_totals": [float(total) for total in monthly_totals],
                 "records": records,
+                "department_budgets": department_budgets,
+                "department_allocated_total": float(department_allocated_total),
+                "department_consumed_total": float(department_consumed_total),
+                "department_available_total": float(department_available_total),
+                "open_budget_alert_count": open_alert_count,
             }
         )
     except Exception:
@@ -6578,14 +9118,431 @@ def budget_total_update_api():
         conn.close()
 
 
+@app.route("/api/budget/departments", methods=["GET"])
+def budget_departments_api():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_department_budget_schema(cursor, conn)
+
+        role = (session.get("role") or "").strip()
+        position = (session.get("position") or "").strip()
+        dept = (session.get("dept") or "").strip()
+        if not (can_use_budget_reports(role, position, dept) or can_manage_budget(cursor, role=role)):
+            return jsonify({"success": False, "error": "Forbidden"}), 403
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
+        cursor.execute(
+            """
+            SELECT
+                d.dept_name,
+                COALESCE(a.allocated_budget, 0) AS allocated_budget,
+                COALESCE(a.consumed_budget, 0) AS consumed_budget,
+                COALESCE(a.low_balance_threshold, 10000) AS low_balance_threshold
+            FROM departments d
+            LEFT JOIN department_budget_allocations a
+                ON a.company_id = d.company_id AND a.dept_name = d.dept_name
+            WHERE d.company_id = %s
+            ORDER BY d.dept_name ASC
+            """,
+            (company_id,),
+        )
+        rows = cursor.fetchall() or []
+
+        items = []
+        for row in rows:
+            allocated_budget = parse_amount_decimal(row.get("allocated_budget"))
+            consumed_budget = parse_amount_decimal(row.get("consumed_budget"))
+            available_budget = allocated_budget - consumed_budget
+            items.append(
+                {
+                    "department": row.get("dept_name"),
+                    "allocated_budget": float(allocated_budget),
+                    "consumed_budget": float(consumed_budget),
+                    "available_budget": float(available_budget),
+                    "low_balance_threshold": float(parse_amount_decimal(row.get("low_balance_threshold"))),
+                }
+            )
+
+        cursor.execute(
+            """
+            SELECT id, dept_name, request_id, alert_type, message, current_balance, threshold_value, created_at
+            FROM budget_alerts
+            WHERE company_id = %s AND is_resolved = 0
+            ORDER BY created_at DESC
+            LIMIT 100
+            """,
+            (company_id,),
+        )
+        alerts = cursor.fetchall() or []
+
+        for alert in alerts:
+            alert["current_balance"] = float(parse_amount_decimal(alert.get("current_balance")))
+            alert["threshold_value"] = float(parse_amount_decimal(alert.get("threshold_value")))
+
+        return jsonify({"success": True, "items": items, "alerts": alerts})
+    except Exception:
+        logger.exception("budget_departments_api failed")
+        return jsonify({"success": False, "message": "Failed to load department budgets"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/budget/departments/allocate", methods=["POST"])
+def budget_department_allocate_api():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    payload = request.get_json(silent=True) or {}
+    dept_name = _normalize_department_name(payload.get("department") or payload.get("dept_name"))
+    amount = parse_amount_decimal(payload.get("amount"))
+    threshold = payload.get("low_balance_threshold")
+    threshold_value = parse_amount_decimal(threshold) if threshold is not None else None
+
+    if not dept_name:
+        return jsonify({"success": False, "message": "Department is required"}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_department_budget_schema(cursor, conn)
+        if not can_manage_budget(cursor):
+            return jsonify({"success": False, "error": "Forbidden"}), 403
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
+        cursor.execute(
+            "SELECT dept_id FROM departments WHERE company_id = %s AND dept_name = %s LIMIT 1",
+            (company_id, dept_name),
+        )
+        if not cursor.fetchone():
+            return jsonify({"success": False, "message": "Department not found"}), 404
+
+        allocation_row = _ensure_department_budget_row(cursor, company_id, dept_name)
+        if not allocation_row:
+            return jsonify({"success": False, "message": "Failed to initialize department allocation"}), 500
+
+        allocated_budget = parse_amount_decimal(allocation_row.get("allocated_budget"))
+        consumed_budget = parse_amount_decimal(allocation_row.get("consumed_budget"))
+        low_balance_threshold = parse_amount_decimal(allocation_row.get("low_balance_threshold"))
+
+        new_allocated_budget = allocated_budget + amount
+        if new_allocated_budget < consumed_budget:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Allocation cannot be less than already consumed budget",
+                    "consumed_budget": float(consumed_budget),
+                }
+            ), 400
+
+        if threshold_value is None:
+            threshold_value = low_balance_threshold
+
+        balance_before = allocated_budget - consumed_budget
+        balance_after = new_allocated_budget - consumed_budget
+        action_label = "ALLOCATION" if amount >= 0 else "ADJUSTMENT"
+
+        cursor.execute(
+            """
+            UPDATE department_budget_allocations
+            SET allocated_budget = %s,
+                low_balance_threshold = %s
+            WHERE company_id = %s AND dept_name = %s
+            """,
+            (str(new_allocated_budget), str(threshold_value), company_id, dept_name),
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO department_budget_ledger
+                (company_id, dept_name, transaction_type, amount, balance_before, balance_after, note, created_by_email)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                company_id,
+                dept_name,
+                action_label,
+                str(amount),
+                str(balance_before),
+                str(balance_after),
+                f"Manual budget update for {dept_name}",
+                (session.get("email") or "").strip().lower(),
+            ),
+        )
+
+        conn.commit()
+        return jsonify(
+            {
+                "success": True,
+                "department": dept_name,
+                "allocated_budget": float(new_allocated_budget),
+                "consumed_budget": float(consumed_budget),
+                "available_budget": float(balance_after),
+                "low_balance_threshold": float(threshold_value),
+                "message": "Department budget updated",
+            }
+        )
+    except Exception:
+        conn.rollback()
+        logger.exception("budget_department_allocate_api failed")
+        return jsonify({"success": False, "message": "Failed to update department budget"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/budget/types", methods=["GET", "POST"])
+def budget_types_api():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_department_budget_schema(cursor, conn)
+        if not can_manage_budget(cursor):
+            return jsonify({"success": False, "error": "Forbidden"}), 403
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
+        if request.method == "GET":
+            cursor.execute(
+                """
+                SELECT id, type_name, is_active, created_at, updated_at
+                FROM budget_types
+                WHERE company_id = %s
+                ORDER BY type_name ASC
+                """,
+                (company_id,),
+            )
+            return jsonify({"success": True, "items": cursor.fetchall() or []})
+
+        payload = request.get_json(silent=True) or {}
+        type_name = str(payload.get("type_name") or "").strip()
+        if not type_name:
+            return jsonify({"success": False, "message": "Budget type name is required"}), 400
+
+        cursor.execute(
+            "INSERT INTO budget_types (company_id, type_name, is_active) VALUES (%s, %s, 1)",
+            (company_id, type_name),
+        )
+        conn.commit()
+        return jsonify({"success": True, "message": "Budget type created"})
+    except mysql.connector.Error as exc:
+        conn.rollback()
+        if getattr(exc, "errno", None) == 1062:
+            return jsonify({"success": False, "message": "Budget type already exists"}), 409
+        logger.exception("budget_types_api failed")
+        return jsonify({"success": False, "message": "Failed to manage budget types"}), 500
+    except Exception:
+        conn.rollback()
+        logger.exception("budget_types_api failed")
+        return jsonify({"success": False, "message": "Failed to manage budget types"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/budget/types/<int:type_id>", methods=["PUT", "DELETE"])
+def budget_type_item_api(type_id):
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_department_budget_schema(cursor, conn)
+        if not can_manage_budget(cursor):
+            return jsonify({"success": False, "error": "Forbidden"}), 403
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
+        cursor.execute(
+            "SELECT id FROM budget_types WHERE id = %s AND company_id = %s LIMIT 1",
+            (type_id, company_id),
+        )
+        if not cursor.fetchone():
+            return jsonify({"success": False, "message": "Budget type not found"}), 404
+
+        if request.method == "DELETE":
+            cursor.execute("DELETE FROM budget_types WHERE id = %s AND company_id = %s", (type_id, company_id))
+            conn.commit()
+            return jsonify({"success": True, "message": "Budget type deleted"})
+
+        payload = request.get_json(silent=True) or {}
+        type_name = str(payload.get("type_name") or "").strip()
+        if not type_name:
+            return jsonify({"success": False, "message": "Budget type name is required"}), 400
+
+        cursor.execute(
+            "UPDATE budget_types SET type_name = %s WHERE id = %s AND company_id = %s",
+            (type_name, type_id, company_id),
+        )
+        conn.commit()
+        return jsonify({"success": True, "message": "Budget type updated"})
+    except mysql.connector.Error as exc:
+        conn.rollback()
+        if getattr(exc, "errno", None) == 1062:
+            return jsonify({"success": False, "message": "Budget type already exists"}), 409
+        logger.exception("budget_type_item_api failed")
+        return jsonify({"success": False, "message": "Failed to update budget type"}), 500
+    except Exception:
+        conn.rollback()
+        logger.exception("budget_type_item_api failed")
+        return jsonify({"success": False, "message": "Failed to update budget type"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/budget/transfer", methods=["POST"])
+def budget_transfer_api():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    payload = request.get_json(silent=True) or {}
+    dept_name = _normalize_department_name(payload.get("department") or payload.get("dept_name"))
+    amount = parse_amount_decimal(payload.get("amount"))
+    budget_type_id = payload.get("budget_type_id")
+
+    if amount <= 0:
+        return jsonify({"success": False, "message": "Amount must be greater than 0"}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_department_budget_schema(cursor, conn)
+        if not can_manage_budget(cursor):
+            return jsonify({"success": False, "error": "Forbidden"}), 403
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
+        budget_type_name = "Department Budget"
+        if budget_type_id not in (None, ""):
+            try:
+                budget_type_id_int = int(budget_type_id)
+            except (TypeError, ValueError):
+                return jsonify({"success": False, "message": "Invalid budget type"}), 400
+
+            cursor.execute(
+                "SELECT type_name FROM budget_types WHERE id = %s AND company_id = %s LIMIT 1",
+                (budget_type_id_int, company_id),
+            )
+            budget_type_row = cursor.fetchone() or {}
+            budget_type_name = str(budget_type_row.get("type_name") or "").strip()
+            if not budget_type_name:
+                return jsonify({"success": False, "message": "Budget type not found"}), 404
+
+        is_student_transfer = "student" in budget_type_name.lower()
+        if not is_student_transfer:
+            if not dept_name:
+                return jsonify({"success": False, "message": "Department is required for this budget type"}), 400
+            cursor.execute(
+                "SELECT dept_id FROM departments WHERE company_id = %s AND dept_name = %s LIMIT 1",
+                (company_id, dept_name),
+            )
+            if not cursor.fetchone():
+                return jsonify({"success": False, "message": "Department not found"}), 404
+
+        ledger_dept_name = dept_name if dept_name else "STUDENT_POOL"
+
+        allocated_budget = Decimal("0")
+        consumed_budget = Decimal("0")
+        low_balance_threshold = Decimal("0")
+        new_allocated_budget = Decimal("0")
+        balance_before = Decimal("0")
+        balance_after = Decimal("0")
+
+        if not is_student_transfer:
+            allocation_row = _ensure_department_budget_row(cursor, company_id, dept_name)
+            if not allocation_row:
+                return jsonify({"success": False, "message": "Failed to initialize department allocation"}), 500
+
+            allocated_budget = parse_amount_decimal(allocation_row.get("allocated_budget"))
+            consumed_budget = parse_amount_decimal(allocation_row.get("consumed_budget"))
+            low_balance_threshold = parse_amount_decimal(allocation_row.get("low_balance_threshold"))
+
+            new_allocated_budget = allocated_budget + amount
+            balance_before = allocated_budget - consumed_budget
+            balance_after = new_allocated_budget - consumed_budget
+
+            cursor.execute(
+                """
+                UPDATE department_budget_allocations
+                SET allocated_budget = %s
+                WHERE company_id = %s AND dept_name = %s
+                """,
+                (str(new_allocated_budget), company_id, dept_name),
+            )
+
+        note = (
+            f"Virtual budget transfer ({budget_type_name}) to {dept_name}"
+            if not is_student_transfer
+            else f"Virtual student budget transfer ({budget_type_name})"
+        )
+        cursor.execute(
+            """
+            INSERT INTO department_budget_ledger
+                (company_id, dept_name, transaction_type, budget_type_name, amount, balance_before, balance_after, note, created_by_email)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                company_id,
+                ledger_dept_name,
+                "TRANSFER_IN_STUDENT" if is_student_transfer else "TRANSFER_IN",
+                budget_type_name,
+                str(amount),
+                str(balance_before),
+                str(balance_after),
+                note,
+                (session.get("email") or "").strip().lower(),
+            ),
+        )
+
+        conn.commit()
+        return jsonify(
+            {
+                "success": True,
+                "message": "Budget sent successfully",
+                "department": dept_name,
+                "budget_type": budget_type_name,
+                "budget_scope": "student" if is_student_transfer else "department",
+                "amount": float(amount),
+                "allocated_budget": float(new_allocated_budget),
+                "consumed_budget": float(consumed_budget),
+                "available_budget": float(balance_after),
+                "low_balance_threshold": float(low_balance_threshold),
+            }
+        )
+    except Exception:
+        conn.rollback()
+        logger.exception("budget_transfer_api failed")
+        return jsonify({"success": False, "message": "Failed to send budget"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @app.route("/api/reports/export")
 def export_reports_csv():
     if "email" not in session:
         return Response("Unauthorized", status=401, mimetype="text/plain")
-
-    role = (session.get("role") or "").strip()
-    if role not in {"Admin", "AssistantAdmin"}:
-        return Response("Forbidden: only Admin and AssistantAdmin can export reports", status=403, mimetype="text/plain")
 
     selected_range = (request.args.get("range") or "this_week").strip().lower()
     selected_status = (request.args.get("status") or "all").strip().lower()
@@ -6641,6 +9598,13 @@ def export_reports_csv():
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     try:
+        if not can_view_reports(cur):
+            return Response("Forbidden: missing report access permission", status=403, mimetype="text/plain")
+
+        company_id = ensure_session_company_context(cur)
+        if company_id <= 0:
+            return jsonify({"success": False, "message": "No company context found"}), 403
+
         cur.execute(
             f"""
             SELECT
@@ -6658,12 +9622,13 @@ def export_reports_csv():
             LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
             LEFT JOIN request_status s ON r.status_id = s.status_id
             LEFT JOIN positions p ON r.stage_position_id = p.position_id
-            WHERE {where_clause}
+            WHERE r.company_id = %s
+            AND {where_clause}
             {status_clause}
             ORDER BY r.created_at DESC
         """
             ,
-            status_values,
+            tuple([company_id] + list(status_values)),
         )
         rows = cur.fetchall() or []
 
@@ -7655,7 +10620,18 @@ def annotate_request(request_id):
         return jsonify({"error": "Unauthorized"}), 401
 
     role = session.get("role")
-    position_id = session.get("position_id")
+    actor_user_id = session.get("user_id")
+    actor_company_id = session.get("company_id")
+
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    try:
+        actor_company_id = int(actor_company_id) if actor_company_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_company_id = None
 
     data = request.get_json() or {}
     who = (data.get("who") or "").strip().lower()
@@ -7685,6 +10661,21 @@ def annotate_request(request_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_user_saved_signature_schema(cursor, conn)
+
+        if png_bytes is not None and actor_user_id is not None:
+            cursor.execute(
+                """
+                INSERT INTO user_saved_signatures (user_id, company_id, signature_png)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    company_id = VALUES(company_id),
+                    signature_png = VALUES(signature_png),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (actor_user_id, actor_company_id, png_bytes),
+            )
+
         # Load original PDF bytes
         template_pdf_bytes, _ = _load_template_pdf_bytes_for_request(cursor, request_id)
         if not template_pdf_bytes:
@@ -7699,7 +10690,7 @@ def annotate_request(request_id):
             (request_id,),
         )
 
-        now = datetime.now()
+        now = datetime.datetime.now()
 
         if who == "reviewer":
             cursor.execute(
@@ -7821,6 +10812,59 @@ def annotate_request(request_id):
         conn.close()
 
 
+@app.get("/api/annotations/my-signature")
+def get_my_saved_signature():
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    actor_user_id = session.get("user_id")
+    actor_company_id = session.get("company_id")
+
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    try:
+        actor_company_id = int(actor_company_id) if actor_company_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_company_id = None
+
+    if actor_user_id is None:
+        return jsonify({"has_signature": False})
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_user_saved_signature_schema(cursor, conn)
+        cursor.execute(
+            """
+            SELECT signature_png
+            FROM user_saved_signatures
+            WHERE user_id = %s
+              AND (%s IS NULL OR company_id = %s OR company_id IS NULL)
+            LIMIT 1
+            """,
+            (actor_user_id, actor_company_id, actor_company_id),
+        )
+        row = cursor.fetchone() or {}
+        signature_png = row.get("signature_png")
+
+        if not signature_png:
+            return jsonify({"has_signature": False})
+
+        encoded = base64.b64encode(signature_png).decode("ascii")
+        return jsonify(
+            {
+                "has_signature": True,
+                "signature_png_base64": f"data:image/png;base64,{encoded}",
+            }
+        )
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # Download Template Route
 @app.route("/download_template/<int:type_id>")
 def download_template(type_id):
@@ -7854,21 +10898,42 @@ def download_template(type_id):
 
 @app.route("/delete_request_type/<int:id>")
 def delete_request_type(id):
-    if session.get("role") not in ["Admin", "AssistantAdmin"]:
-        return redirect("/")
+    if "email" not in session:
+        return redirect("/login")
+
     conn = get_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
     try:
+        if not can_manage_request_types(cursor):
+            flash("You do not have permission to manage request types.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("No company context found.", "danger")
+            return redirect("/admin")
+
+        cursor.execute(
+            "SELECT request_type_id FROM request_types WHERE request_type_id = %s AND company_id = %s LIMIT 1",
+            (id, company_id),
+        )
+        if not cursor.fetchone():
+            flash("Request type not found in your company.", "warning")
+            return redirect("/admin")
+
         cursor.execute(
             "DELETE FROM request_type_reviewers WHERE request_type_id = %s", (id,)
         )
         cursor.execute(
             "DELETE FROM request_type_approvers WHERE request_type_id = %s", (id,)
         )
-        cursor.execute("DELETE FROM request_types WHERE request_type_id = %s", (id,))
+        cursor.execute(
+            "DELETE FROM request_types WHERE request_type_id = %s AND company_id = %s",
+            (id, company_id),
+        )
         conn.commit()
         flash("Request Type deleted.", "success")
-    except Exception as e:
+    except Exception:
         conn.rollback()
         flash("Cannot delete: Type is in use.", "danger")
     finally:
@@ -7887,54 +10952,99 @@ def edit_request_type():
     reviewer_pos_ids = request.form.getlist("reviewer_position_ids[]")
     approver_pos_ids = request.form.getlist("approver_position_ids[]")
 
-    tpl = request.files.get("template_file")
-    if tpl and tpl.filename:
-        template_filename = secure_filename(tpl.filename)
-        template_blob = tpl.read()
-        cursor.execute(
-            """
-            UPDATE request_types
-            SET template_filename = %s, template_file = %s
-            WHERE request_type_id = %s
-            """,
-            (template_filename, template_blob, type_id),
-        )
-
     conn = get_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
     try:
+        if not can_manage_request_types(cursor):
+            flash("You do not have permission to manage request types.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("No company context found.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        try:
+            type_id_int = int(type_id)
+        except (TypeError, ValueError):
+            flash("Invalid request type ID.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        cursor.execute(
+            "SELECT request_type_id FROM request_types WHERE request_type_id = %s AND company_id = %s LIMIT 1",
+            (type_id_int, company_id),
+        )
+        if not cursor.fetchone():
+            flash("Request type not found in your company.", "warning")
+            return redirect(url_for("admin_dashboard"))
+
+        normalized_reviewer_ids = []
+        normalized_approver_ids = []
+        try:
+            normalized_reviewer_ids = [int(pos_id) for pos_id in reviewer_pos_ids if str(pos_id).strip()]
+            normalized_approver_ids = [int(pos_id) for pos_id in approver_pos_ids if str(pos_id).strip()]
+        except (TypeError, ValueError):
+            flash("Invalid reviewer/approver selection.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        selected_position_ids = normalized_reviewer_ids + normalized_approver_ids
+        if selected_position_ids:
+            placeholders = ",".join(["%s"] * len(selected_position_ids))
+            cursor.execute(
+                f"SELECT position_id FROM positions WHERE company_id=%s AND position_id IN ({placeholders})",
+                tuple([company_id] + selected_position_ids),
+            )
+            valid_ids = {int(row["position_id"]) for row in (cursor.fetchall() or [])}
+            for pos_id in selected_position_ids:
+                if pos_id not in valid_ids:
+                    flash("Selected reviewers/approvers must belong to your company.", "danger")
+                    return redirect(url_for("admin_dashboard"))
+
+        tpl = request.files.get("template_file")
+        if tpl and tpl.filename:
+            template_filename = secure_filename(tpl.filename)
+            template_blob = tpl.read()
+            cursor.execute(
+                """
+                UPDATE request_types
+                SET template_filename = %s, template_file = %s
+                WHERE request_type_id = %s AND company_id = %s
+                """,
+                (template_filename, template_blob, type_id_int, company_id),
+            )
+
         # Update the Name
         cursor.execute(
-            "UPDATE request_types SET type_name = %s WHERE request_type_id = %s",
-            (new_name, type_id),
+            "UPDATE request_types SET type_name = %s WHERE request_type_id = %s AND company_id = %s",
+            (new_name, type_id_int, company_id),
         )
 
         # reviewer/approver
         cursor.execute(
-            "DELETE FROM request_type_reviewers WHERE request_type_id = %s", (type_id,)
+            "DELETE FROM request_type_reviewers WHERE request_type_id = %s", (type_id_int,)
         )
         cursor.execute(
-            "DELETE FROM request_type_approvers WHERE request_type_id = %s", (type_id,)
+            "DELETE FROM request_type_approvers WHERE request_type_id = %s", (type_id_int,)
         )
 
-        for i, pos_id in enumerate(reviewer_pos_ids, start=1):
+        for i, pos_id in enumerate(normalized_reviewer_ids, start=1):
             if pos_id:
                 cursor.execute(
                     """
                     INSERT INTO request_type_reviewers (request_type_id, position_id, order_no)
                     VALUES (%s, %s, %s)
                     """,
-                    (type_id, pos_id, i),
+                    (type_id_int, pos_id, i),
                 )
 
-        for i, pos_id in enumerate(approver_pos_ids, start=1):
+        for i, pos_id in enumerate(normalized_approver_ids, start=1):
             if pos_id:
                 cursor.execute(
                     """
                     INSERT INTO request_type_approvers (request_type_id, position_id, order_no)
                     VALUES (%s, %s, %s)
                     """,
-                    (type_id, pos_id, i),
+                    (type_id_int, pos_id, i),
                 )
 
         conn.commit()
@@ -7943,24 +11053,16 @@ def edit_request_type():
         conn.rollback()
         flash(f"Error: {e}", "danger")
     finally:
+        cursor.close()
         conn.close()
     return redirect(url_for("admin_dashboard"))
 
 
 #  IT DASHBOARD ROUTES
 
-
 def ensure_department_management_schema(cursor, conn):
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS department_heads (
-            dept_id INT NOT NULL PRIMARY KEY,
-            user_id INT NOT NULL,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """
-    )
-    conn.commit()
+    # Table is managed externally by database migrations.
+    return
 
 
 @app.route("/IT")
@@ -7971,8 +11073,14 @@ def it_dashboard():
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_tenant_schema(cursor, conn)
         ensure_user_account_control_schema(cursor, conn)
         ensure_department_management_schema(cursor, conn)
+        ensure_activity_log_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return "Forbidden", 403
+        company_name = (session.get("company_name") or "").strip() or "Organization"
 
         cursor.execute(
                         """
@@ -7980,7 +11088,10 @@ def it_dashboard():
                         FROM users
                         WHERE COALESCE(is_deleted, 0) = 0
                             AND LOWER(COALESCE(email, '')) NOT LIKE '%@deleted.local'
+                            AND company_id = %s
                         """
+                ,
+                (company_id,)
                 )
         result = cursor.fetchone()
         total_users = result["count"] if result else 0
@@ -8009,16 +11120,17 @@ def it_dashboard():
             LEFT JOIN positions p ON u.position_id = p.position_id
                         WHERE COALESCE(u.is_deleted, 0) = 0
                             AND LOWER(COALESCE(u.email, '')) NOT LIKE '%@deleted.local'
+                            AND u.company_id = %s
             ORDER BY u.user_id DESC
         """
-        cursor.execute(query_users)
+        cursor.execute(query_users, (company_id,))
         users = cursor.fetchall()
 
-        cursor.execute("SELECT * FROM departments")
+        cursor.execute("SELECT * FROM departments WHERE company_id = %s", (company_id,))
         departments = cursor.fetchall()
-        cursor.execute("SELECT * FROM roles")
+        cursor.execute("SELECT * FROM roles WHERE company_id = %s", (company_id,))
         roles = cursor.fetchall()
-        cursor.execute("SELECT * FROM positions")
+        cursor.execute("SELECT * FROM positions WHERE company_id = %s", (company_id,))
         positions = cursor.fetchall()
 
         department_profiles_by_id = {}
@@ -8050,13 +11162,16 @@ def it_dashboard():
             LEFT JOIN users u ON u.dept_id = d.dept_id
             LEFT JOIN roles r ON r.role_id = u.role_id
             LEFT JOIN positions p ON p.position_id = u.position_id
-            WHERE u.user_id IS NULL
+                WHERE d.company_id = %s
+                  AND (u.user_id IS NULL
                OR (
                     COALESCE(u.is_deleted, 0) = 0
                     AND LOWER(COALESCE(u.email, '')) NOT LIKE '%@deleted.local'
-               )
+                    ))
             ORDER BY d.dept_name ASC, u.email ASC
             """
+                ,
+                (company_id,)
         )
         member_rows = cursor.fetchall() or []
 
@@ -8127,8 +11242,11 @@ def it_dashboard():
             LEFT JOIN request_types rt ON rt.request_type_id = r.request_type_id
             LEFT JOIN request_status rs ON rs.status_id = r.status_id
             WHERE d.dept_id IS NOT NULL
+                            AND COALESCE(u.company_id, r.company_id) = %s
             ORDER BY r.created_at DESC
             """
+                        ,
+                        (company_id,)
         )
         request_rows = cursor.fetchall() or []
 
@@ -8189,10 +11307,48 @@ def it_dashboard():
             LEFT JOIN departments d ON d.dept_id = u.dept_id
             WHERE COALESCE(u.is_deleted, 0) = 0
               AND LOWER(COALESCE(u.email, '')) NOT LIKE '%@deleted.local'
+                            AND u.company_id = %s
             ORDER BY u.email ASC
             """
+                        ,
+                        (company_id,)
         )
         active_user_rows = cursor.fetchall() or []
+        default_dev_email = (DEFAULT_DEV_EMAIL or "").strip().lower()
+        company_user_emails = {
+            str((row.get("email") or "")).strip().lower()
+            for row in active_user_rows
+            if str((row.get("email") or "")).strip()
+            and str((row.get("email") or "")).strip().lower() != default_dev_email
+        }
+
+        def _log_belongs_to_company(log_row):
+            log_company_id = log_row.get("company_id")
+            try:
+                if int(log_company_id or 0) == int(company_id):
+                    return True
+            except (TypeError, ValueError):
+                pass
+
+            text_blob = (
+                f"{(log_row.get('title') or '')} {(log_row.get('description') or '')} "
+                f"{(log_row.get('actor_email') or '')}"
+            ).strip().lower()
+
+            if not text_blob:
+                return False
+
+            if default_dev_email and default_dev_email in text_blob:
+                return False
+
+            if f"company_id={int(company_id)}" in text_blob:
+                return True
+
+            for email_value in company_user_emails:
+                if email_value and email_value in text_blob:
+                    return True
+
+            return False
 
         for profile in department_profiles:
             profile["members_count"] = len(profile.get("members") or [])
@@ -8221,12 +11377,99 @@ def it_dashboard():
                     }
                 )
 
-        cursor.execute("SELECT * FROM activity_logs ORDER BY created_at ASC LIMIT 15")
-        notifications = cursor.fetchall()
+        notifications = []
+
+        def _is_it_admin_notification(row):
+            title = str((row or {}).get("title") or "").strip().lower()
+            description = str((row or {}).get("description") or "").strip().lower()
+            text_blob = f"{title} {description}".strip()
+            if not text_blob:
+                return False
+
+            disallowed_tokens = (
+                "req#",
+                "request approved",
+                "request rejected",
+                "request completed",
+                "request marked",
+                "in progress",
+                "pending",
+                "login",
+                "log in",
+                "logout",
+                "log out",
+                "sign up",
+                "signup",
+            )
+            if any(token in text_blob for token in disallowed_tokens):
+                return False
+
+            allowed_tokens = (
+                "account created",
+                "new account",
+                "department created",
+                "department deleted",
+                "position created",
+                "position deleted",
+                "role created",
+                "role updated",
+                "role permissions updated",
+                "permissions updated",
+                "user moved",
+                "user reassigned",
+                "ban",
+                "unban",
+                "deleted account",
+                "tenant",
+                "organization",
+                "subscription",
+                "plan",
+                "system broadcast",
+                "system announcement",
+                "broadcast:",
+            )
+            return any(token in text_blob for token in allowed_tokens)
+
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    n.message AS title,
+                    n.message AS description,
+                    n.created_at
+                FROM notifications n
+                JOIN users u ON u.user_id = n.user_id
+                WHERE u.company_id = %s
+                  AND (%s = '' OR LOWER(TRIM(u.email)) <> %s)
+                ORDER BY n.created_at DESC
+                LIMIT 200
+                """,
+                (company_id, default_dev_email, default_dev_email),
+            )
+            notification_rows = cursor.fetchall() or []
+            filtered_rows = [row for row in notification_rows if _is_it_admin_notification(row)]
+            notifications = list(reversed(filtered_rows[:15]))
+        except Exception:
+            cursor.execute(
+                """
+                SELECT log_id, title, description, created_at, company_id, actor_email
+                FROM activity_logs
+                ORDER BY created_at DESC
+                LIMIT 500
+                """
+            )
+            notification_rows = cursor.fetchall() or []
+            notifications = [
+                row
+                for row in notification_rows
+                if _log_belongs_to_company(row) and _is_it_admin_notification(row)
+            ][:15]
+            notifications = list(reversed(notifications))
 
         cursor.execute(
             """
             SELECT title, description, created_at
+            , company_id, actor_email
             FROM activity_logs
             WHERE
                 LOWER(COALESCE(title, '')) IN ('login', 'log in', 'sign up', 'signup', 'logout', 'log out')
@@ -8235,7 +11478,7 @@ def it_dashboard():
             LIMIT 200
             """
         )
-        auth_log_rows = cursor.fetchall() or []
+        auth_log_rows = [row for row in (cursor.fetchall() or []) if _log_belongs_to_company(row)]
 
         activity_logs = []
         for row in auth_log_rows:
@@ -8288,13 +11531,37 @@ def it_dashboard():
             INNER JOIN requests r ON r.request_id = ra.request_id
             LEFT JOIN users sub ON sub.user_id = r.user_id
             WHERE
+                COALESCE(sub.company_id, r.company_id) = %s
+                AND (
                 LOWER(COALESCE(ra.action, '')) LIKE '%approv%'
                 OR LOWER(COALESCE(ra.action, '')) LIKE '%reject%'
+                )
             ORDER BY ra.created_at DESC, ra.request_id DESC
             LIMIT 500
             """
+            ,
+            (company_id,)
         )
         audit_rows = cursor.fetchall() or []
+
+        cursor.execute(
+            """
+            SELECT rp.role_id, rp.permission_key
+            FROM role_permissions rp
+            JOIN roles r ON r.role_id = rp.role_id
+            WHERE r.company_id = %s
+            """,
+            (company_id,),
+        )
+        role_permission_rows = cursor.fetchall() or []
+        role_permission_map = {}
+        for row in role_permission_rows:
+            role_id = int(row.get("role_id") or 0)
+            if role_id <= 0:
+                continue
+            role_permission_map.setdefault(role_id, set()).add(str(row.get("permission_key") or "").strip())
+
+        role_permission_map = {k: sorted(v) for k, v in role_permission_map.items()}
 
         audit_trails = []
         for row in audit_rows:
@@ -8347,6 +11614,9 @@ def it_dashboard():
             notifications=notifications,
             activity_logs=activity_logs,
             audit_trails=audit_trails,
+            company_name=company_name,
+            tenant_permission_catalog=TENANT_PERMISSION_CATALOG,
+            role_permission_map=role_permission_map,
         )
     finally:
         cursor.close()
@@ -8362,7 +11632,11 @@ def get_it_stats():
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_tenant_schema(cursor, conn)
         ensure_user_account_control_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"error": "Company context is missing"}), 403
 
         cursor.execute(
                         """
@@ -8370,11 +11644,14 @@ def get_it_stats():
                         FROM users
                         WHERE COALESCE(is_deleted, 0) = 0
                             AND LOWER(COALESCE(email, '')) NOT LIKE '%@deleted.local'
+                            AND company_id = %s
                         """
+                        ,
+                        (company_id,)
                 )
         total_users = cursor.fetchone()["count"]
 
-        cursor.execute("SELECT COUNT(*) as count FROM departments")
+        cursor.execute("SELECT COUNT(*) as count FROM departments WHERE company_id = %s", (company_id,))
         total_depts = cursor.fetchone()["count"]
 
         active_sessions = None
@@ -8400,7 +11677,11 @@ def get_all_users_for_admin():
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_tenant_schema(cursor, conn)
         ensure_user_account_control_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "Company context is missing"}), 403
 
         cursor.execute(
             """
@@ -8420,8 +11701,11 @@ def get_all_users_for_admin():
             LEFT JOIN departments d ON d.dept_id = u.dept_id
                         WHERE COALESCE(u.is_deleted, 0) = 0
                             AND LOWER(COALESCE(u.email, '')) NOT LIKE '%@deleted.local'
+                            AND u.company_id = %s
             ORDER BY u.user_id DESC
             """
+            ,
+            (company_id,)
         )
         rows = cursor.fetchall()
         return jsonify({"success": True, "data": rows})
@@ -8436,19 +11720,53 @@ def get_all_users_for_admin():
 @login_required
 @role_required("IT", "SuperAdmin")
 def create_role():
-    role_name = request.form.get("role_name")
+    role_name = (request.form.get("role_name") or "").strip()
+    selected_permissions = set(request.form.getlist("permissions"))
+    allowed_permission_keys = {item[0] for item in TENANT_PERMISSION_CATALOG}
+    selected_permissions = {p for p in selected_permissions if p in allowed_permission_keys}
+
+    if not role_name:
+        flash("Role name is required.", "danger")
+        return redirect(url_for("it_dashboard"))
 
     conn = get_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
 
     try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_saas_owner_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        seats_ok, seat_msg = check_company_user_seat_capacity(cursor, company_id)
+        if not seats_ok:
+            flash(seat_msg, "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "SELECT role_id FROM roles WHERE company_id = %s AND LOWER(TRIM(role_name)) = LOWER(TRIM(%s)) LIMIT 1",
+            (company_id, role_name),
+        )
+        if cursor.fetchone():
+            flash(f"Role '{role_name}' already exists.", "danger")
+            return redirect(url_for("it_dashboard"))
+
         # Insert into Roles table
-        cursor.execute("INSERT INTO roles (role_name) VALUES (%s)", (role_name,))
+        cursor.execute("INSERT INTO roles (role_name, company_id) VALUES (%s, %s)", (role_name, company_id))
+        new_role_id = int(cursor.lastrowid)
+
+        for permission_key in sorted(selected_permissions):
+            cursor.execute(
+                "INSERT INTO role_permissions (role_id, permission_key) VALUES (%s, %s)",
+                (new_role_id, permission_key),
+            )
 
         # Log the Activity
         cursor.execute(
             "INSERT INTO activity_logs (title, description) VALUES (%s, %s)",
-            ("Role Created", f"New system role '{role_name}' added."),
+            ("Role Created", f"New system role '{role_name}' added in company_id={company_id}."),
         )
 
         conn.commit()
@@ -8456,11 +11774,7 @@ def create_role():
 
     except mysql.connector.Error as err:
         conn.rollback()
-        # Check for Duplicate Entry error
-        if err.errno == 1062:
-            flash(f"Role '{role_name}' already exists.", "danger")
-        else:
-            flash(f"Database Error: {err}", "danger")
+        flash(f"Database Error: {err}", "danger")
 
     finally:
         cursor.close()
@@ -8473,15 +11787,33 @@ def create_role():
 @login_required
 @role_required("IT", "SuperAdmin")
 def create_position():
-    position_name = request.form.get("position_name")
+    position_name = (request.form.get("position_name") or "").strip()
+    if not position_name:
+        flash("Position name is required.", "danger")
+        return redirect(url_for("it_dashboard"))
 
     conn = get_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
 
     try:
+        ensure_tenant_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "SELECT position_id FROM positions WHERE company_id = %s AND LOWER(TRIM(position_name)) = LOWER(TRIM(%s)) LIMIT 1",
+            (company_id, position_name),
+        )
+        if cursor.fetchone():
+            flash(f"Position '{position_name}' already exists.", "danger")
+            return redirect(url_for("it_dashboard"))
+
         # Insert into Positions table
         cursor.execute(
-            "INSERT INTO positions (position_name) VALUES (%s)", (position_name,)
+            "INSERT INTO positions (position_name, company_id) VALUES (%s, %s)",
+            (position_name, company_id),
         )
 
         # Log the Activity
@@ -8495,12 +11827,58 @@ def create_position():
 
     except mysql.connector.Error as err:
         conn.rollback()
-        # Check for Duplicate Entry error
-        if err.errno == 1062:
-            flash(f"Position '{position_name}' already exists.", "danger")
-        else:
-            flash(f"Database Error: {err}", "danger")
+        flash(f"Database Error: {err}", "danger")
 
+    finally:
+        cursor.close()
+        conn.close()
+
+    return redirect(url_for("it_dashboard"))
+
+
+@app.route("/it/role/<int:role_id>/permissions", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
+def it_update_role_permissions(role_id):
+    selected_permissions = set(request.form.getlist("permissions"))
+    allowed_permission_keys = {item[0] for item in TENANT_PERMISSION_CATALOG}
+    selected_permissions = {p for p in selected_permissions if p in allowed_permission_keys}
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute("SELECT role_id, role_name FROM roles WHERE role_id=%s AND company_id=%s LIMIT 1", (role_id, company_id))
+        role_row = cursor.fetchone()
+        if not role_row:
+            flash("Role not found for this organization.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute("DELETE FROM role_permissions WHERE role_id=%s", (role_id,))
+        for permission_key in sorted(selected_permissions):
+            cursor.execute(
+                "INSERT INTO role_permissions (role_id, permission_key) VALUES (%s, %s)",
+                (role_id, permission_key),
+            )
+
+        cursor.execute(
+            "INSERT INTO activity_logs (title, description) VALUES (%s, %s)",
+            (
+                "Role Permissions Updated",
+                f"{session.get('email')} updated permissions for role '{role_row.get('role_name')}' (company_id={company_id}).",
+            ),
+        )
+        conn.commit()
+        flash("Role permissions updated.", "success")
+    except Exception:
+        conn.rollback()
+        logger.exception("it_update_role_permissions failed")
+        flash("Failed to update role permissions.", "danger")
     finally:
         cursor.close()
         conn.close()
@@ -8529,7 +11907,9 @@ def update_request_status(request_id):
 
     data = request.get_json(silent=True) or {}
     new_status = (data.get("status") or request.form.get("status") or "").strip()
-    rejection_msg = data.get("message") or request.form.get("message")
+    action_note_raw = data.get("message") or request.form.get("message") or data.get("comment") or request.form.get("comment")
+    action_note = str(action_note_raw or "").strip()
+    rejection_msg = action_note
 
     if not new_status:
         return jsonify({"error": "Missing status"}), 400
@@ -8538,20 +11918,51 @@ def update_request_status(request_id):
     cursor = conn.cursor(dictionary=True)
 
     try:
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"error": "No company context found"}), 403
+
         cursor.execute(
-            "SELECT stage_position_id FROM requests WHERE request_id = %s",
-            (request_id,),
+            "SELECT stage_position_id, request_type_id FROM requests WHERE request_id = %s AND company_id = %s",
+            (request_id, company_id),
         )
         auth_row = cursor.fetchone()
         if not auth_row:
             return jsonify({"error": "Request not found"}), 404
 
         current_stage_for_auth = auth_row.get("stage_position_id")
+        req_type_for_auth = auth_row.get("request_type_id")
         if not is_admin_role:
             if actor_position_id_int is None:
                 return jsonify({"error": "Forbidden"}), 403
-            if current_stage_for_auth is None or int(current_stage_for_auth) != actor_position_id_int:
-                return jsonify({"error": "Forbidden"}), 403
+
+            active_positions = []
+            try:
+                workflow_steps = get_effective_workflow_steps(
+                    cursor,
+                    request_id=request_id,
+                    request_type_id=req_type_for_auth,
+                )
+                workflow_steps = _apply_conditional_high_value_workflow_steps(
+                    cursor,
+                    request_id,
+                    workflow_steps,
+                )
+                approved_positions = _get_request_approved_positions(cursor, request_id)
+                _active_idx, active_positions = _get_active_workflow_step_state(
+                    workflow_steps,
+                    current_stage_for_auth,
+                    approved_positions,
+                )
+            except Exception:
+                active_positions = []
+
+            if active_positions:
+                if actor_position_id_int not in active_positions:
+                    return jsonify({"error": "Forbidden"}), 403
+            else:
+                if current_stage_for_auth is None or int(current_stage_for_auth) != actor_position_id_int:
+                    return jsonify({"error": "Forbidden"}), 403
 
         new_status = (new_status or "").strip()
         if new_status.lower() in ("inprogress", "in_progress", "in progress"):
@@ -8580,18 +11991,16 @@ def update_request_status(request_id):
             SELECT u.email AS requestor_email
             FROM requests r
             JOIN users u ON u.user_id = r.user_id
-            WHERE r.request_id = %s
+            WHERE r.request_id = %s AND r.company_id = %s
             """,
-            (request_id,),
+            (request_id, company_id),
         )
         _owner_row = cursor.fetchone() or {}
         requestor_email = (_owner_row.get("requestor_email") or "").strip()
 
-        # Get current stage before changing (used for logs)
-        current_stage_before = current_stage_for_auth
-        
         # IN PROGRESS
         if new_status.lower() == "in progress":
+            in_progress_note = _truncate_request_action_message(cursor, action_note)
             cursor.execute(
                 """
                 UPDATE requests
@@ -8604,8 +12013,8 @@ def update_request_status(request_id):
             try:
                 cursor.execute(
                     "INSERT INTO request_actions (request_id, actor_user_id, actor_position_id, actor_email, action, message) "
-                    "VALUES (%s, %s, %s, %s, 'IN_PROGRESS', NULL)",
-                    (request_id, actor_user_id, actor_position_id, actor_email),
+                    "VALUES (%s, %s, %s, %s, 'IN_PROGRESS', %s)",
+                    (request_id, actor_user_id, actor_position_id, actor_email, in_progress_note),
                 )
                 cursor.execute(
                     "INSERT INTO activity_logs (title, description) VALUES (%s, %s)",
@@ -8622,9 +12031,13 @@ def update_request_status(request_id):
         # If REJECTED mark rejected immediately
         
         if (new_status or "").lower() == "rejected":
+            if not action_note:
+                return jsonify({"error": "Rejection reason is required"}), 400
+
             approved_recipients = []
             request_type_name = "Request"
-            rejection_reason_text = (rejection_msg or "").strip() or "No reason was provided."
+            rejection_reason_text = action_note
+            rejection_msg = _truncate_request_action_message(cursor, action_note)
 
             cursor.execute(
                 """
@@ -8731,13 +12144,14 @@ def update_request_status(request_id):
 
         # If APPROVED advance to next reviewer/approver
         if (new_status or "").lower() == "approved":
+            approved_note = _truncate_request_action_message(cursor, action_note)
 
             # log action (for per-position stats/history)
             try:
                 cursor.execute(
                     "INSERT INTO request_actions (request_id, actor_user_id, actor_position_id, actor_email, action, message) "
-                    "VALUES (%s, %s, %s, %s, 'APPROVED', NULL)",
-                    (request_id, actor_user_id, actor_position_id, actor_email),
+                    "VALUES (%s, %s, %s, %s, 'APPROVED', %s)",
+                    (request_id, actor_user_id, actor_position_id, actor_email, approved_note),
                 )
                 cursor.execute(
                     "INSERT INTO activity_logs (title, description) VALUES (%s, %s)",
@@ -8750,8 +12164,8 @@ def update_request_status(request_id):
                 print("request_actions log error:", _log_err)
 
             cursor.execute(
-                "SELECT request_type_id, stage_position_id FROM requests WHERE request_id = %s",
-                (request_id,),
+                "SELECT request_type_id, stage_position_id FROM requests WHERE request_id = %s AND company_id = %s",
+                (request_id, company_id),
             )
             req = cursor.fetchone()
             if not req:
@@ -8771,11 +12185,22 @@ def update_request_status(request_id):
                 request_id=request_id,
                 request_type_id=req_type_id,
             )
+            workflow = _apply_conditional_high_value_workflow(cursor, request_id, workflow)
+            workflow_steps = get_effective_workflow_steps(
+                cursor,
+                request_id=request_id,
+                request_type_id=req_type_id,
+            )
+            workflow_steps = _apply_conditional_high_value_workflow_steps(
+                cursor,
+                request_id,
+                workflow_steps,
+            )
 
             if current_stage is not None:
                 current_stage = int(current_stage)
 
-            if not workflow:
+            if not workflow and not workflow_steps:
                 cursor.execute(
                     """
                     UPDATE requests
@@ -8796,6 +12221,17 @@ def update_request_status(request_id):
                 except Exception as _coo_queue_err:
                     print("coo queue error (no workflow):", _coo_queue_err)
 
+                budget_result = {"processed": False, "reason": "not_budget_request", "alerts": []}
+                try:
+                    budget_result = apply_department_budget_deduction(
+                        cursor,
+                        conn,
+                        request_id,
+                        actor_email=actor_email,
+                    )
+                except Exception as _budget_err:
+                    print("budget deduction error (no workflow):", _budget_err)
+
                 conn.commit()
                 if requestor_email:
                     try:
@@ -8813,14 +12249,102 @@ def update_request_status(request_id):
                 elif coo_queue_result.get("reason") == "email_delivery_failed":
                     base_message += " COO queue was created but email delivery failed. Use Special Access resend email."
 
-                base_message += " Budget processing will run when completion is done by Purchasing or Representative."
+                if budget_result.get("processed"):
+                    if budget_result.get("already_processed"):
+                        base_message += " Budget deduction was already recorded."
+                    else:
+                        base_message += (
+                            f" Department budget deducted by {budget_result.get('amount', 0):,.2f}. "
+                            f"Remaining balance: {budget_result.get('balance_after', 0):,.2f}."
+                        )
+                elif budget_result.get("reason") == "not_budget_request":
+                    base_message += " No department budget deduction was required."
+
+                budget_alerts = budget_result.get("alerts") or []
+                if budget_alerts:
+                    base_message += " Budget alert(s): " + " | ".join(str(a.get("message") or "").strip() for a in budget_alerts)
+
+                base_message += " Budget disbursement processing still runs on completion by Purchasing or Representative."
                 return jsonify(
                     {
                         "message": base_message,
                         "coo": coo_queue_result,
+                        "budget": budget_result,
                         "xendit": {"processed": False, "reason": "release_actor_required"},
                     }
                 )
+
+            if workflow_steps:
+                approved_positions = _get_request_approved_positions(cursor, request_id)
+                pre_idx, pre_pending_positions = _get_active_workflow_step_state(
+                    workflow_steps,
+                    current_stage,
+                    approved_positions,
+                )
+
+                if pre_idx is None:
+                    cursor.execute(
+                        """
+                        UPDATE requests
+                        SET status_id = %s, rejection_message = NULL, stage_position_id = NULL
+                        WHERE request_id = %s
+                    """,
+                        (status_id, request_id),
+                    )
+                    conn.commit()
+                    return jsonify({"message": "Request fully approved."})
+
+                # Recompute after APPROVED action log above.
+                approved_positions = _get_request_approved_positions(cursor, request_id)
+                post_idx, post_pending_positions = _get_active_workflow_step_state(
+                    workflow_steps,
+                    current_stage,
+                    approved_positions,
+                )
+
+                if post_idx is None:
+                    cursor.execute(
+                        """
+                        UPDATE requests
+                        SET status_id = %s, rejection_message = NULL, stage_position_id = NULL
+                        WHERE request_id = %s
+                    """,
+                        (status_id, request_id),
+                    )
+                    conn.commit()
+                    if requestor_email:
+                        try:
+                            send_request_email_async(requestor_email, "APPROVED")
+                        except Exception as _owner_mail_err:
+                            print("requestor approved email error:", _owner_mail_err)
+                    return jsonify({"message": "Request fully approved."})
+
+                next_stage_position = int(post_pending_positions[0]) if post_pending_positions else None
+                if next_stage_position is None:
+                    cursor.execute(
+                        """
+                        UPDATE requests
+                        SET status_id = %s, rejection_message = NULL, stage_position_id = NULL
+                        WHERE request_id = %s
+                    """,
+                        (status_id, request_id),
+                    )
+                    conn.commit()
+                    return jsonify({"message": "Request fully approved."})
+
+                cursor.execute(
+                    """
+                    UPDATE requests
+                    SET status_id = %s, rejection_message = NULL, stage_position_id = %s
+                    WHERE request_id = %s
+                """,
+                    (pending_status_id, next_stage_position, request_id),
+                )
+                conn.commit()
+
+                if post_idx == pre_idx:
+                    return jsonify({"message": "Approved. Waiting for other parallel approvers."})
+                return jsonify({"message": "Approved. Moved to next stage."})
 
             if not current_stage:
                 cursor.execute(
@@ -8888,6 +12412,17 @@ def update_request_status(request_id):
                 except Exception as _coo_queue_err:
                     print("coo queue error:", _coo_queue_err)
 
+                budget_result = {"processed": False, "reason": "not_budget_request", "alerts": []}
+                try:
+                    budget_result = apply_department_budget_deduction(
+                        cursor,
+                        conn,
+                        request_id,
+                        actor_email=actor_email,
+                    )
+                except Exception as _budget_err:
+                    print("budget deduction error:", _budget_err)
+
                 if coo_queue_result.get("queued"):
                     base_message += " COO special approval was queued."
                 elif coo_queue_result.get("reason") == "already_approved":
@@ -8897,10 +12432,26 @@ def update_request_status(request_id):
                 elif coo_queue_result.get("reason") == "email_delivery_failed":
                     base_message += " COO queue was created but email delivery failed. Use Special Access resend email."
 
-                base_message += " Budget processing will run when completion is done by Purchasing or Representative."
+                if budget_result.get("processed"):
+                    if budget_result.get("already_processed"):
+                        base_message += " Budget deduction was already recorded."
+                    else:
+                        base_message += (
+                            f" Department budget deducted by {budget_result.get('amount', 0):,.2f}. "
+                            f"Remaining balance: {budget_result.get('balance_after', 0):,.2f}."
+                        )
+                elif budget_result.get("reason") == "not_budget_request":
+                    base_message += " No department budget deduction was required."
+
+                budget_alerts = budget_result.get("alerts") or []
+                if budget_alerts:
+                    base_message += " Budget alert(s): " + " | ".join(str(a.get("message") or "").strip() for a in budget_alerts)
+
+                base_message += " Budget disbursement processing still runs on completion by Purchasing or Representative."
                 return jsonify({
                     "message": base_message,
                     "coo": coo_queue_result,
+                    "budget": budget_result,
                     "xendit": {"processed": False, "reason": "release_actor_required"},
                 })
 
@@ -8909,9 +12460,9 @@ def update_request_status(request_id):
             """
             UPDATE requests 
             SET status_id = %s, rejection_message = %s 
-            WHERE request_id = %s
+            WHERE request_id = %s AND company_id = %s
         """,
-            (status_id, rejection_msg, request_id),
+            (status_id, rejection_msg, request_id, company_id),
         )
 
         conn.commit()
@@ -8925,6 +12476,7 @@ def update_request_status(request_id):
 
 
 @app.route("/api/request/<int:request_id>/send-back", methods=["POST"])
+@login_required
 def send_back_request(request_id):
     if "email" not in session:
         return jsonify({"error": "Unauthorized"}), 401
@@ -8946,15 +12498,19 @@ def send_back_request(request_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"error": "No company context found"}), 403
+
         cursor.execute(
             """
             SELECT r.request_id, r.request_type_id, r.stage_position_id, s.status_name
             FROM requests r
             JOIN request_status s ON s.status_id = r.status_id
-            WHERE r.request_id = %s
+            WHERE r.request_id = %s AND r.company_id = %s
             LIMIT 1
         """,
-            (request_id,),
+            (request_id, company_id),
         )
         req = cursor.fetchone()
         if not req:
@@ -9010,9 +12566,9 @@ def send_back_request(request_id):
             UPDATE requests
             SET status_id = %s,
                 stage_position_id = %s
-            WHERE request_id = %s
+            WHERE request_id = %s AND company_id = %s
         """,
-            (pending_status_id, target_stage, request_id),
+            (pending_status_id, target_stage, request_id, company_id),
         )
 
         action_message = f"Sent back to {target_position_name}. Note: {note}"
@@ -9310,11 +12866,16 @@ def it_update_department(dept_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_tenant_schema(cursor, conn)
         ensure_department_management_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
 
         cursor.execute(
-            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s LIMIT 1",
-            (dept_id,),
+            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s AND company_id=%s LIMIT 1",
+            (dept_id, company_id),
         )
         existing = cursor.fetchone()
         if not existing:
@@ -9322,8 +12883,8 @@ def it_update_department(dept_id):
             return redirect(url_for("it_dashboard"))
 
         cursor.execute(
-            "SELECT dept_id FROM departments WHERE LOWER(TRIM(dept_name))=LOWER(TRIM(%s)) AND dept_id<>%s LIMIT 1",
-            (dept_name, dept_id),
+            "SELECT dept_id FROM departments WHERE company_id=%s AND LOWER(TRIM(dept_name))=LOWER(TRIM(%s)) AND dept_id<>%s LIMIT 1",
+            (company_id, dept_name, dept_id),
         )
         duplicate = cursor.fetchone()
         if duplicate:
@@ -9363,11 +12924,16 @@ def it_set_department_head(dept_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_tenant_schema(cursor, conn)
         ensure_department_management_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
 
         cursor.execute(
-            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s LIMIT 1",
-            (dept_id,),
+            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s AND company_id=%s LIMIT 1",
+            (dept_id, company_id),
         )
         dept = cursor.fetchone()
         if not dept:
@@ -9399,11 +12965,12 @@ def it_set_department_head(dept_id):
             FROM users
             WHERE user_id=%s
               AND dept_id=%s
+                            AND company_id=%s
               AND COALESCE(is_deleted, 0)=0
               AND LOWER(COALESCE(email, '')) NOT LIKE '%@deleted.local'
             LIMIT 1
             """,
-            (head_user_id, dept_id),
+                        (head_user_id, dept_id, company_id),
         )
         head_user = cursor.fetchone()
         if not head_user:
@@ -9452,12 +13019,17 @@ def it_add_department_member(dept_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_tenant_schema(cursor, conn)
         ensure_department_management_schema(cursor, conn)
         ensure_user_account_control_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
 
         cursor.execute(
-            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s LIMIT 1",
-            (dept_id,),
+            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s AND company_id=%s LIMIT 1",
+            (dept_id, company_id),
         )
         dept = cursor.fetchone()
         if not dept:
@@ -9472,10 +13044,11 @@ def it_add_department_member(dept_id):
                 dept_id,
                 COALESCE(is_deleted, 0) AS is_deleted
             FROM users
-            WHERE user_id=%s
+                        WHERE user_id=%s
+                            AND company_id=%s
             LIMIT 1
             """,
-            (user_id,),
+                        (user_id, company_id),
         )
         user = cursor.fetchone()
         if not user:
@@ -9534,12 +13107,17 @@ def it_remove_department_member(dept_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_tenant_schema(cursor, conn)
         ensure_department_management_schema(cursor, conn)
         ensure_user_account_control_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
 
         cursor.execute(
-            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s LIMIT 1",
-            (dept_id,),
+            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s AND company_id=%s LIMIT 1",
+            (dept_id, company_id),
         )
         dept = cursor.fetchone()
         if not dept:
@@ -9554,10 +13132,11 @@ def it_remove_department_member(dept_id):
                 dept_id,
                 COALESCE(is_deleted, 0) AS is_deleted
             FROM users
-            WHERE user_id=%s
+                        WHERE user_id=%s
+                            AND company_id=%s
             LIMIT 1
             """,
-            (user_id,),
+                        (user_id, company_id),
         )
         user = cursor.fetchone()
         if not user:
@@ -9606,18 +13185,23 @@ def it_delete_department(dept_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        ensure_tenant_schema(cursor, conn)
         ensure_department_management_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
 
         cursor.execute(
-            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s LIMIT 1",
-            (dept_id,),
+            "SELECT dept_id, dept_name FROM departments WHERE dept_id=%s AND company_id=%s LIMIT 1",
+            (dept_id, company_id),
         )
         dept = cursor.fetchone()
         if not dept:
             flash("Department not found.", "danger")
             return redirect(url_for("it_dashboard"))
 
-        cursor.execute("SELECT COUNT(*) AS count FROM users WHERE dept_id=%s", (dept_id,))
+        cursor.execute("SELECT COUNT(*) AS count FROM users WHERE dept_id=%s AND company_id=%s", (dept_id, company_id))
         member_count = int((cursor.fetchone() or {}).get("count") or 0)
         if member_count > 0:
             flash("Cannot delete department with assigned users. Reassign users first.", "warning")
@@ -9659,16 +13243,37 @@ def create_user():
     hashed_password = hash_user_password(password)
 
     conn = get_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
 
     try:
+        ensure_tenant_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute("SELECT dept_id FROM departments WHERE dept_id=%s AND company_id=%s LIMIT 1", (dept_id, company_id))
+        if not cursor.fetchone():
+            flash("Invalid department for your organization.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute("SELECT role_id FROM roles WHERE role_id=%s AND company_id=%s LIMIT 1", (role_id, company_id))
+        if not cursor.fetchone():
+            flash("Invalid role for your organization.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute("SELECT position_id FROM positions WHERE position_id=%s AND company_id=%s LIMIT 1", (position_id, company_id))
+        if not cursor.fetchone():
+            flash("Invalid position for your organization.", "danger")
+            return redirect(url_for("it_dashboard"))
+
         #  Insert the New User
         query_user = """
-            INSERT INTO users (email, password, dept_id, role_id, position_id)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO users (email, password, dept_id, role_id, position_id, company_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """
         cursor.execute(
-            query_user, (email, hashed_password, dept_id, role_id, position_id)
+            query_user, (email, hashed_password, dept_id, role_id, position_id, company_id)
         )
 
         #  Insert the Activity Log (The Notification)
@@ -9705,13 +13310,44 @@ def create_dept():
         # dept_head = request.form.get('dept_head', '')
 
         conn = get_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
 
         try:
-            #  Create the Department
+            ensure_tenant_schema(cursor, conn)
+            _ensure_company_scoped_unique_name(cursor, "departments", "dept_name")
+            company_id = ensure_session_company_context(cursor)
+            if company_id <= 0:
+                flash("Company context is missing.", "danger")
+                return redirect(url_for("it_dashboard"))
+
             cursor.execute(
-                "INSERT INTO departments (dept_name) VALUES (%s)", (dept_name,)
+                "SELECT dept_id FROM departments WHERE company_id=%s AND LOWER(TRIM(dept_name)) = LOWER(TRIM(%s)) LIMIT 1",
+                (company_id, dept_name),
             )
+            if cursor.fetchone():
+                flash(f"Department '{dept_name}' already exists.", "danger")
+                return redirect(url_for("it_dashboard"))
+
+            # Create the department. If a legacy global unique index on dept_name still exists,
+            # repair it to company-scoped uniqueness and retry once.
+            try:
+                cursor.execute(
+                    "INSERT INTO departments (dept_name, company_id) VALUES (%s, %s)",
+                    (dept_name, company_id),
+                )
+            except mysql.connector.Error as insert_err:
+                is_duplicate_name_error = (
+                    getattr(insert_err, "errno", None) == 1062
+                    and "dept_name" in str(insert_err).lower()
+                )
+                if not is_duplicate_name_error:
+                    raise
+
+                _ensure_company_scoped_unique_name(cursor, "departments", "dept_name")
+                cursor.execute(
+                    "INSERT INTO departments (dept_name, company_id) VALUES (%s, %s)",
+                    (dept_name, company_id),
+                )
 
             # Create the Log
             log_title = "Department Created"
@@ -9767,10 +13403,20 @@ def api_user_profile():
 
 @app.route("/api/request-types", methods=["GET"])
 def api_request_types():
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT request_type_id, type_name FROM request_types")
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"error": "No company context found"}), 403
+
+        cursor.execute(
+            "SELECT request_type_id, type_name FROM request_types WHERE company_id = %s",
+            (company_id,),
+        )
         data = cursor.fetchall()
         return jsonify(data)
     finally:
@@ -9815,14 +13461,18 @@ def api_request_type_form_schema(request_type_id):
 
         ensure_request_type_form_schema_table(cursor, conn)
 
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
         cursor.execute(
             """
             SELECT request_type_id, type_name, template_mode, template_file
             FROM request_types
-            WHERE request_type_id = %s
+            WHERE request_type_id = %s AND company_id = %s
             LIMIT 1
             """,
-            (request_type_id,),
+            (request_type_id, company_id),
         )
         request_type = cursor.fetchone()
         if not request_type:
@@ -9839,7 +13489,7 @@ def api_request_type_form_schema(request_type_id):
             ), 400
 
         if request.method == "POST":
-            if (session.get("role") or "").strip() not in {"Admin", "AssistantAdmin", "SuperAdmin"}:
+            if not can_manage_request_types(cursor):
                 return jsonify({"success": False, "error": "Forbidden"}), 403
 
             payload = request.get_json(silent=True) or {}
@@ -9910,14 +13560,18 @@ def api_request_type_filled_preview(request_type_id):
     try:
         ensure_request_type_form_schema_table(cursor, conn)
 
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
         cursor.execute(
             """
             SELECT request_type_id, template_mode, template_filename, template_file
             FROM request_types
-            WHERE request_type_id = %s
+            WHERE request_type_id = %s AND company_id = %s
             LIMIT 1
             """,
-            (request_type_id,),
+            (request_type_id, company_id),
         )
         row = cursor.fetchone() or {}
         if not row:
@@ -9981,26 +13635,43 @@ def api_request_type_filled_preview(request_type_id):
 
 @app.route("/request-type-form-builder", methods=["GET"])
 @login_required
-@role_required("Admin", "AssistantAdmin", "SuperAdmin")
 def request_type_form_builder_page():
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        if not can_manage_request_types(cursor):
+            flash("You do not have permission to manage request types.", "danger")
+            return redirect(url_for("admin_dashboard"))
+    finally:
+        cursor.close()
+        conn.close()
+
     return render_template("request_type_form_builder.html")
 
 
 @app.route("/request-type-field-mapper/<int:request_type_id>", methods=["GET"])
 @login_required
-@role_required("Admin", "AssistantAdmin", "SuperAdmin")
 def request_type_field_mapper_page(request_type_id):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        if not can_manage_request_types(cursor):
+            flash("You do not have permission to manage request types.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("No company context found.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
         cursor.execute(
             """
             SELECT request_type_id, type_name, template_mode
             FROM request_types
-            WHERE request_type_id = %s
+            WHERE request_type_id = %s AND company_id = %s
             LIMIT 1
             """,
-            (request_type_id,),
+            (request_type_id, company_id),
         )
         row = cursor.fetchone()
         if not row:
@@ -10024,14 +13695,28 @@ def request_type_field_mapper_page(request_type_id):
 @app.route("/api/requests", methods=["GET", "POST"])
 def api_requests():
     if "email" not in session:
-        return jsonify({"error": "Unauthorized"})
-
-    user_id = get_user_id(session["email"])
-    if not user_id:
-        return jsonify({"error": "User ID not found"})
+        return jsonify({"error": "Unauthorized"}), 401
 
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_saas_owner_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            cursor.close()
+            conn.close()
+            return jsonify({"error": "No company context found"}), 403
+
+        user_id = get_user_id_for_company(session.get("email"), company_id)
+        if not user_id:
+            cursor.close()
+            conn.close()
+            return jsonify({"error": "User ID not found"}), 404
+    except Exception as e:
+        cursor.close()
+        conn.close()
+        return jsonify({"error": str(e)}), 500
 
     # Fetch All Requests
     if request.method == "GET":
@@ -10060,10 +13745,11 @@ def api_requests():
                     JOIN request_status rs ON r.status_id = rs.status_id
                     LEFT JOIN positions p ON r.stage_position_id = p.position_id
                     WHERE r.user_id = %s
+                      AND r.company_id = %s
                     ORDER BY r.created_at DESC
                     """
 
-            cursor.execute(query, (user_id,))
+            cursor.execute(query, (user_id, company_id))
             requests_data = cursor.fetchall()
             return jsonify(requests_data)
         except Exception as e:
@@ -10078,6 +13764,9 @@ def api_requests():
             role_name = (session.get("role") or "").strip()
             position_name = (session.get("position") or "").strip()
             can_request_budget = can_use_secretary_budget_fields(role_name, position_name)
+            requests_ok, requests_msg = check_company_request_capacity(cursor, company_id)
+            if not requests_ok:
+                return jsonify({"error": requests_msg}), 403
 
             # Handle JSON
             req_type_id_raw = (request.form.get("request_type_id") or "").strip()
@@ -10087,6 +13776,20 @@ def api_requests():
                 or request.form.get("amount")
                 or ""
             ).strip()
+            total_amount_scope = str(request.form.get("total_apply_scope") or "first").strip().lower()
+            if total_amount_scope not in {"first", "all", "specific"}:
+                total_amount_scope = "first"
+
+            total_amount_template_page = None
+            if total_amount_scope == "specific":
+                raw_total_page = (request.form.get("total_apply_template_page") or "").strip()
+                if raw_total_page:
+                    try:
+                        parsed_total_page = int(raw_total_page)
+                        if parsed_total_page > 0:
+                            total_amount_template_page = parsed_total_page
+                    except (TypeError, ValueError):
+                        total_amount_template_page = None
             request_budget = normalize_request_budget(request.form.get("request_budget"))
             request_department = (session.get("dept") or "").strip()
             wfor = request_budget
@@ -10121,8 +13824,8 @@ def api_requests():
                     return jsonify({"error": "Your account has no assigned department. Please contact admin."}), 400
 
                 cursor.execute(
-                    "SELECT dept_name FROM departments WHERE dept_name = %s LIMIT 1",
-                    (request_department,),
+                    "SELECT dept_name FROM departments WHERE dept_name = %s AND company_id = %s LIMIT 1",
+                    (request_department, company_id),
                 )
                 if not (cursor.fetchone() or {}).get("dept_name"):
                     return jsonify({"error": "Invalid target department selected"}), 400
@@ -10131,10 +13834,10 @@ def api_requests():
                 """
                 SELECT request_type_id, template_mode, template_filename, template_file
                 FROM request_types
-                WHERE request_type_id = %s
+                WHERE request_type_id = %s AND company_id = %s
                 LIMIT 1
                 """,
-                (req_type_id,),
+                (req_type_id, company_id),
             )
             request_type = cursor.fetchone()
             if not request_type:
@@ -10160,7 +13863,13 @@ def api_requests():
 
                 validated_template_payload_json = json.dumps(cleaned_payload, ensure_ascii=True)
                 if has_total_sources:
-                    amount = float(computed_total)
+                    if amount_raw:
+                        try:
+                            amount = float(amount_raw)
+                        except (TypeError, ValueError):
+                            return jsonify({"error": "Invalid amount value"}), 400
+                    else:
+                        amount = float(computed_total)
 
                 if request_type_template_blob:
                     file_data = build_filled_pdf_from_submission(
@@ -10168,6 +13877,8 @@ def api_requests():
                         schema,
                         cleaned_payload,
                         total_amount=computed_total if has_total_sources else None,
+                        total_amount_scope=total_amount_scope,
+                        total_amount_template_page=total_amount_template_page,
                     )
                     filename = request_type_template_name or f"request_type_{req_type_id}_template.pdf"
 
@@ -10217,10 +13928,10 @@ def api_requests():
                         """
                         SELECT wfor
                         FROM request_types
-                        WHERE request_type_id = %s
+                        WHERE request_type_id = %s AND company_id = %s
                         LIMIT 1
                         """,
-                        (req_type_id,),
+                            (req_type_id, company_id),
                     )
                     request_type_row = cursor.fetchone() or {}
                     wfor = (request_type_row.get("wfor") or "").strip()
@@ -10230,10 +13941,10 @@ def api_requests():
                             """
                             SELECT `for` AS wfor
                             FROM request_types
-                            WHERE request_type_id = %s
+                            WHERE request_type_id = %s AND company_id = %s
                             LIMIT 1
                             """,
-                            (req_type_id,),
+                            (req_type_id, company_id),
                         )
                         request_type_row = cursor.fetchone() or {}
                         wfor = (request_type_row.get("wfor") or "").strip()
@@ -10245,8 +13956,8 @@ def api_requests():
 
             cursor.execute(
                 """
-                INSERT INTO requests (request_type_id, user_id, wfor, filename, attachment, amount, status_id, stage_position_id, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                INSERT INTO requests (request_type_id, user_id, wfor, filename, attachment, amount, status_id, stage_position_id, company_id, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
             """,
                 (
                     req_type_id,
@@ -10257,6 +13968,7 @@ def api_requests():
                     amount,
                     status_id,
                     stage_position_id,
+                    company_id,
                 ),
             )
 
@@ -10448,7 +14160,7 @@ def admin_complete_request(request_id):
                     f"REQ#{request_id} marked admin-completed by {session.get('email')} (pos_id={session.get('position_id')}).",
                 ),
             )
-        except Exception as _:
+        except Exception:
             pass
 
         xendit_result = {"processed": False, "reason": "release_actor_required"}
@@ -10741,19 +14453,28 @@ def delete_account():
 
 @app.route("/api/reports/chartdata")
 def report_chart_data():
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
 
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     try:
+        if not can_view_reports(cur):
+            return jsonify({"success": False, "error": "Forbidden"}), 403
+
+        company_id = ensure_session_company_context(cur)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "No company context found"}), 403
+
         # Monthly totals
         cur.execute("""
             SELECT DATE_FORMAT(created_at,'%b') AS month,
             COUNT(*) AS total
             FROM requests
-            WHERE YEAR(created_at)=YEAR(NOW())
+            WHERE company_id = %s AND YEAR(created_at)=YEAR(NOW())
             GROUP BY MONTH(created_at)
             ORDER BY MONTH(created_at)
-        """)
+        """, (company_id,))
 
         rows = cur.fetchall()
 
@@ -10766,8 +14487,9 @@ def report_chart_data():
             SELECT t.type_name,COUNT(*) as total
             FROM requests r
             JOIN request_types t ON r.request_type_id=t.request_type_id
+            WHERE r.company_id = %s
             GROUP BY t.type_name
-        """)
+        """, (company_id,))
 
         types=cur.fetchall()
 
@@ -10801,8 +14523,46 @@ def report_chart_data():
 def signup():
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT dept_name FROM departments ORDER BY dept_name")
-    departments = cursor.fetchall()
+    ensure_tenant_schema(cursor, conn)
+    cursor.execute("SELECT company_id, company_name, company_slug FROM organizations WHERE is_active = 1 ORDER BY company_name ASC")
+    companies = cursor.fetchall() or []
+    selected_company_slug = (
+        request.values.get("company_slug")
+        or request.values.get("company")
+        or ""
+    ).strip().lower()
+    if not selected_company_slug and companies:
+        selected_company_slug = str(companies[0].get("company_slug") or "").strip().lower()
+
+    def _departments_for_company_slug(company_slug):
+        normalized_slug = (company_slug or "").strip().lower()
+        if not normalized_slug:
+            return []
+
+        conn_local = get_connection()
+        cursor_local = conn_local.cursor(dictionary=True)
+        try:
+            ensure_tenant_schema(cursor_local, conn_local)
+            cursor_local.execute(
+                "SELECT company_id FROM organizations WHERE company_slug = %s LIMIT 1",
+                (normalized_slug,),
+            )
+            company_row = cursor_local.fetchone() or {}
+            selected_company_id = int(company_row.get("company_id") or 0)
+            if selected_company_id <= 0:
+                return []
+
+            cursor_local.execute(
+                "SELECT dept_name FROM departments WHERE company_id = %s ORDER BY dept_name",
+                (selected_company_id,),
+            )
+            return cursor_local.fetchall() or []
+        finally:
+            cursor_local.close()
+            conn_local.close()
+
+    departments = _departments_for_company_slug(selected_company_slug)
+    selected_dept_name = (request.values.get("dept") or "").strip()
     cursor.close()
     conn.close()
 
@@ -10812,30 +14572,54 @@ def signup():
                 "signup.html",
                 message="Please verify OTP first",
                 departments=departments,
+                companies=companies,
+                selected_company_slug=selected_company_slug,
+                selected_dept_name=selected_dept_name,
             )
 
         e = request.form["email"].strip().lower()
         p = request.form["pass"]
         cp = request.form["cpass"]
         dept_name = request.form.get("dept", "").strip()
+        company_slug = (request.form.get("company_slug") or "").strip().lower()
+        selected_company_slug = company_slug or selected_company_slug
+        departments = _departments_for_company_slug(selected_company_slug)
+        selected_dept_name = dept_name
 
-        ad = "phinmaed.com"
+        if not company_slug:
+            return render_template(
+                "signup.html",
+                message="Please select your company",
+                departments=departments,
+                companies=companies,
+                selected_company_slug=selected_company_slug,
+                selected_dept_name=selected_dept_name,
+            )
 
         if not dept_name:
             return render_template(
                 "signup.html",
                 message="Please Select your Department",
                 departments=departments,
+                companies=companies,
+                selected_company_slug=selected_company_slug,
+                selected_dept_name=selected_dept_name,
             )
         if not re.match(r"[a-z0-9.%+]+@[a-z0-9.-]+\.[a-z]{2,}$", e):
             return render_template(
                 "signup.html", message="Invalid email address", departments=departments
+                , companies=companies,
+                selected_company_slug=selected_company_slug,
+                selected_dept_name=selected_dept_name,
             )
-        if e.split("@")[1] != ad:
+        if not is_allowed_system_email(e):
             return render_template(
                 "signup.html",
-                message="Use your phinmaed account",
+                message=EMAIL_DOMAIN_HELPER_MESSAGE,
                 departments=departments,
+                companies=companies,
+                selected_company_slug=selected_company_slug,
+                selected_dept_name=selected_dept_name,
             )
         if (
             len(p) < 6
@@ -10846,15 +14630,49 @@ def signup():
                 "signup.html",
                 message="Password: 6+ chars, 1 digit, 1 uppercase",
                 departments=departments,
+                companies=companies,
+                selected_company_slug=selected_company_slug,
+                selected_dept_name=selected_dept_name,
             )
         if p != cp:
             return render_template(
                 "signup.html", message="Passwords do not match", departments=departments
+                , companies=companies,
+                selected_company_slug=selected_company_slug,
+                selected_dept_name=selected_dept_name,
             )
 
         try:
             conn = get_connection()
             cursor = conn.cursor(dictionary=True)
+            ensure_tenant_schema(cursor, conn)
+
+            cursor.execute(
+                "SELECT company_id, company_name FROM organizations WHERE company_slug = %s AND is_active = 1 LIMIT 1",
+                (company_slug,),
+            )
+            company_row = cursor.fetchone() or {}
+            company_id = int(company_row.get("company_id") or 0)
+            company_name = (company_row.get("company_name") or "").strip()
+            if company_id <= 0:
+                return render_template(
+                    "signup.html",
+                    message="Invalid company selected",
+                    departments=departments,
+                    companies=companies,
+                    selected_company_slug=selected_company_slug,
+                    selected_dept_name=selected_dept_name,
+                )
+
+            if not _is_allowed_email_for_company(cursor, e, company_id=company_id):
+                return render_template(
+                    "signup.html",
+                    message="Email domain is not allowed for this company",
+                    departments=departments,
+                    companies=companies,
+                    selected_company_slug=selected_company_slug,
+                    selected_dept_name=selected_dept_name,
+                )
 
             cursor.execute("SELECT user_id FROM users WHERE email=%s", (e,))
             if cursor.fetchone():
@@ -10862,25 +14680,45 @@ def signup():
                     "signup.html",
                     message="Email already used please login",
                     departments=departments,
+                    companies=companies,
+                    selected_company_slug=selected_company_slug,
+                    selected_dept_name=selected_dept_name,
+                )
+
+            ensure_saas_owner_schema(cursor, conn)
+            seats_ok, seat_msg = check_company_user_seat_capacity(cursor, company_id)
+            if not seats_ok:
+                return render_template(
+                    "signup.html",
+                    message=seat_msg,
+                    departments=departments,
+                    companies=companies,
+                    selected_company_slug=selected_company_slug,
+                    selected_dept_name=selected_dept_name,
                 )
 
             cursor.execute(
-                "SELECT dept_id FROM departments WHERE dept_name=%s", (dept_name,)
+                "SELECT dept_id FROM departments WHERE dept_name=%s AND company_id = %s",
+                (dept_name, company_id),
             )
             dept = cursor.fetchone()
             if not dept:
                 return render_template(
-                    "signup.html", message="Invalid department", departments=departments
+                    "signup.html", message="Invalid department", departments=departments,
+                    companies=companies,
+                    selected_company_slug=selected_company_slug,
+                    selected_dept_name=selected_dept_name,
                 )
             dept_id = dept["dept_id"]
 
             # Default Role/Position
-            cursor.execute("SELECT role_id FROM roles WHERE role_name='User'")
+            cursor.execute("SELECT role_id FROM roles WHERE role_name='User' AND company_id=%s", (company_id,))
             role_row = cursor.fetchone()
             role_id = role_row["role_id"] if role_row else 1
 
             cursor.execute(
-                "SELECT position_id FROM positions WHERE position_name='None'"
+                "SELECT position_id FROM positions WHERE position_name='None' AND company_id=%s",
+                (company_id,),
             )
             pos_row = cursor.fetchone()
             position_id = pos_row["position_id"] if pos_row else 1
@@ -10888,8 +14726,8 @@ def signup():
             hp = hash_user_password(p)
 
             cursor.execute(
-                "INSERT INTO users (email, password, dept_id, role_id, position_id) VALUES (%s,%s,%s,%s,%s)",
-                (e, hp, dept_id, role_id, position_id),
+                "INSERT INTO users (email, password, dept_id, role_id, position_id, company_id) VALUES (%s,%s,%s,%s,%s,%s)",
+                (e, hp, dept_id, role_id, position_id, company_id),
             )
             created_user_id = cursor.lastrowid
             conn.commit()
@@ -10900,7 +14738,11 @@ def signup():
             session["user_id"] = created_user_id
             session["dept"] = dept_name
             session["role"] = "User"
+            session["role_id"] = role_id
             session["position"] = "None"
+            session["position_id"] = position_id
+            session["company_id"] = company_id
+            session["company_name"] = company_name
             session.pop("otp_verified", None)
 
             return redirect("/udashboard")
@@ -10908,7 +14750,10 @@ def signup():
         except Exception as ex:
             print("Signup error:", ex)
             return render_template(
-                "signup.html", message="Something went wrong", departments=departments
+                "signup.html", message="Something went wrong", departments=departments,
+                companies=companies,
+                selected_company_slug=selected_company_slug,
+                selected_dept_name=selected_dept_name,
             )
         finally:
             if cursor:
@@ -10916,32 +14761,152 @@ def signup():
             if conn:
                 conn.close()
 
-    return render_template("signup.html", departments=departments)
+    return render_template(
+        "signup.html",
+        departments=departments,
+        companies=companies,
+        selected_company_slug=selected_company_slug,
+        selected_dept_name=selected_dept_name,
+    )
+
+
+@app.route("/company/register", methods=["GET", "POST"])
+def company_register():
+    if request.method == "POST":
+        company_name = (request.form.get("company_name") or "").strip()
+        admin_email = (request.form.get("admin_email") or "").strip().lower()
+        password = request.form.get("pass") or ""
+        confirm = request.form.get("cpass") or ""
+        first_department = (request.form.get("first_department") or "General").strip() or "General"
+
+        if not company_name:
+            return render_template("company_register.html", message="Company name is required")
+        if not re.match(r"[a-z0-9.%+]+@[a-z0-9.-]+\.[a-z]{2,}$", admin_email):
+            return render_template("company_register.html", message="Invalid admin email")
+        if not is_allowed_system_email(admin_email):
+            return render_template("company_register.html", message=EMAIL_DOMAIN_HELPER_MESSAGE)
+        if password != confirm:
+            return render_template("company_register.html", message="Passwords do not match")
+        if len(password) < 6 or not any(c.isdigit() for c in password) or not any(c.isupper() for c in password):
+            return render_template("company_register.html", message="Password: 6+ chars, 1 digit, 1 uppercase")
+
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            ensure_tenant_schema(cursor, conn)
+            # Keep onboarding resilient even if app started before index migration logic.
+            _ensure_company_scoped_unique_name(cursor, "roles", "role_name")
+            _ensure_company_scoped_unique_name(cursor, "positions", "position_name")
+
+            base_slug = _slugify_company_name(company_name)
+            slug = base_slug
+            suffix = 2
+            while True:
+                cursor.execute("SELECT company_id FROM organizations WHERE company_slug=%s LIMIT 1", (slug,))
+                if not cursor.fetchone():
+                    break
+                slug = f"{base_slug}-{suffix}"
+                suffix += 1
+
+            cursor.execute(
+                "INSERT INTO organizations (company_name, company_slug) VALUES (%s, %s)",
+                (company_name, slug),
+            )
+            company_id = int(cursor.lastrowid)
+
+            cursor.execute("INSERT INTO departments (dept_name, company_id) VALUES (%s, %s)", (first_department, company_id))
+            dept_id = int(cursor.lastrowid)
+
+            for role_name in ("SuperAdmin", "IT", "Admin", "AssistantAdmin", "User", "Reviewer", "Dean", "SBO"):
+                cursor.execute(
+                    "INSERT IGNORE INTO roles (role_name, company_id) VALUES (%s, %s)",
+                    (role_name, company_id),
+                )
+
+            for position_name in ("Administrator", "IT", "None"):
+                cursor.execute(
+                    "INSERT IGNORE INTO positions (position_name, company_id) VALUES (%s, %s)",
+                    (position_name, company_id),
+                )
+
+            cursor.execute("SELECT role_id FROM roles WHERE role_name='SuperAdmin' AND company_id=%s LIMIT 1", (company_id,))
+            role_row = cursor.fetchone() or {}
+            superadmin_role_id = int(role_row.get("role_id") or 0)
+
+            cursor.execute("SELECT position_id FROM positions WHERE position_name='IT' AND company_id=%s LIMIT 1", (company_id,))
+            pos_row = cursor.fetchone() or {}
+            it_position_id = int(pos_row.get("position_id") or 0)
+
+            if superadmin_role_id <= 0 or it_position_id <= 0:
+                conn.rollback()
+                return render_template("company_register.html", message="Failed to create tenant defaults")
+
+            hashed_password = hash_user_password(password)
+            cursor.execute(
+                """
+                INSERT INTO users (email, password, dept_id, role_id, position_id, company_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (admin_email, hashed_password, dept_id, superadmin_role_id, it_position_id, company_id),
+            )
+            admin_user_id = int(cursor.lastrowid)
+
+            ensure_default_role_permissions(cursor, company_id)
+            conn.commit()
+
+            session["email"] = admin_email
+            session["user_id"] = admin_user_id
+            session["role"] = "SuperAdmin"
+            session["role_id"] = superadmin_role_id
+            session["position"] = "IT"
+            session["position_id"] = it_position_id
+            session["dept"] = first_department
+            session["company_id"] = company_id
+            session["company_name"] = company_name
+            return redirect(url_for("it_dashboard"))
+        except Exception:
+            conn.rollback()
+            logger.exception("company_register failed")
+            return render_template("company_register.html", message="Failed to register company")
+        finally:
+            cursor.close()
+            conn.close()
+
+    return render_template("company_register.html")
 
 
 # web login
 @app.route("/login", methods=["GET", "POST"])
 @limiter.limit("20 per minute", methods=["POST"])
 def login():
+    template_ctx = {"dev_exception_email": DEV_EXCEPTION_EMAIL}
     if request.method == "POST":
         e = request.form["email"].strip().lower()
         password = request.form["pass"]
 
+        if not is_allowed_system_email(e):
+            return render_template("login.html", message=EMAIL_DOMAIN_HELPER_MESSAGE, **template_ctx)
+
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
+            ensure_tenant_schema(cursor, conn)
             ensure_user_account_control_schema(cursor, conn)
 
             cursor.execute(
                 """
-                SELECT u.user_id, u.email, u.password, r.role_name, 
+                SELECT u.user_id, u.email, u.password, r.role_name, r.role_id,
                 p.position_name, p.position_id, d.dept_name,
+                COALESCE(u.company_id, 0) AS company_id,
+                COALESCE(o.company_name, '') AS company_name,
+                COALESCE(o.is_active, 1) AS company_is_active,
                 COALESCE(u.is_banned, 0) AS is_banned,
                 COALESCE(u.is_deleted, 0) AS is_deleted
                 FROM users u
                 JOIN roles r ON u.role_id = r.role_id
                 JOIN positions p ON u.position_id = p.position_id
                 LEFT JOIN departments d ON u.dept_id = d.dept_id
+                LEFT JOIN organizations o ON o.company_id = u.company_id
                 WHERE u.email = %s
             """,
                 (e,),
@@ -10949,10 +14914,17 @@ def login():
             user = cursor.fetchone()
 
             if user and int(user.get("is_deleted") or 0) == 1:
-                return render_template("login.html", message="Account has been deleted. Please contact IT.")
+                return render_template("login.html", message="Account has been deleted. Please contact IT.", **template_ctx)
 
             if user and int(user.get("is_banned") or 0) == 1:
-                return render_template("login.html", message="Account is banned. Please contact IT.")
+                return render_template("login.html", message="Account is banned. Please contact IT.", **template_ctx)
+
+            if user and int(user.get("company_is_active") or 0) != 1:
+                return render_template(
+                    "login.html",
+                    message="Your organization is currently paused. Please contact Dev or SaaS Owner.",
+                    **template_ctx,
+                )
 
             if user and verify_user_password(user["password"], password):
                 if needs_password_rehash(user.get("password")):
@@ -10970,21 +14942,24 @@ def login():
                 session["email"] = user["email"]
                 session["user_id"] = user["user_id"]
                 session["role"] = user["role_name"]
+                session["role_id"] = user.get("role_id")
                 session["position"] = user["position_name"]
                 session["position_id"] = user["position_id"]
                 session["dept"] = user["dept_name"]
+                session["company_id"] = int(user.get("company_id") or 0)
+                session["company_name"] = (user.get("company_name") or "").strip()
 
                 log_auth_activity("Login", user["email"])
                 return redirect("/")
             
             else:
-                jsonify({"message": "Login attept"})
-                return render_template("login.html", message="Invalid credentials")
+                jsonify({"message": "Login attempt failed"})
+                return render_template("login.html", message="Invalid credentials", **template_ctx)
                 
         finally:
             cursor.close()
             conn.close()
-    return render_template("login.html", message=request.args.get("message"))
+    return render_template("login.html", message=request.args.get("message"), **template_ctx)
 
 
 @app.route("/forgot-password", methods=["GET", "POST"])
@@ -10998,6 +14973,13 @@ def forgot_password():
             return render_template(
                 "forgot_password.html",
                 message="Please enter your email address",
+                success=False,
+            )
+
+        if not is_allowed_system_email(email):
+            return render_template(
+                "forgot_password.html",
+                message=EMAIL_DOMAIN_HELPER_MESSAGE,
                 success=False,
             )
 
@@ -11093,10 +15075,24 @@ def reset_password(token):
 @app.route("/api/mobile/departments", methods=["GET"])
 @csrf.exempt
 def mobile_departments():
+    company_slug = (request.args.get("company_slug") or "").strip().lower()
+
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT dept_name FROM departments ORDER BY dept_name")
+        if company_slug:
+            cursor.execute(
+                """
+                SELECT d.dept_name
+                FROM departments d
+                JOIN organizations o ON o.company_id = d.company_id
+                WHERE o.company_slug = %s AND o.is_active = 1
+                ORDER BY d.dept_name
+            """,
+                (company_slug,),
+            )
+        else:
+            cursor.execute("SELECT dept_name FROM departments ORDER BY dept_name")
         rows = cursor.fetchall() or []
         departments = [row["dept_name"] for row in rows if row.get("dept_name")]
         return jsonify({"departments": departments})
@@ -11114,6 +15110,8 @@ def mobile_send_otp():
 
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
+    if not is_allowed_system_email(email):
+        return jsonify({"error": EMAIL_DOMAIN_HELPER_MESSAGE}), 400
     message, ok = request_signup_otp(email)
 
     if not ok:
@@ -11132,6 +15130,8 @@ def mobile_verify_otp():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
     otp = (data.get("otp") or "").strip()
+    if not is_allowed_system_email(email):
+        return jsonify({"error": EMAIL_DOMAIN_HELPER_MESSAGE}), 400
     message, ok = verify_signup_otp(email, otp, consume=True)
 
     if not ok:
@@ -11169,17 +15169,17 @@ def mobile_signup():
         or data.get("verification_token")
         or ""
     ).strip()
+    company_slug = (
+        data.get("company_slug")
+        or data.get("company")
+        or ""
+    ).strip().lower()
 
-    ad = "phinmaed.com"
-
-    if not e or not p or not cp or not dept_name or not signup_otp_token:
+    if not e or not p or not cp or not dept_name or not signup_otp_token or not company_slug:
         return jsonify({"error": "Please fill all fields"}), 400
 
     if not re.match(r"[a-z0-9.%+]+@[a-z0-9.-]+\.[a-z]{2,}$", e):
         return jsonify({"error": "Invalid email address"}), 400
-
-    if "@" not in e or e.split("@", 1)[1] != ad:
-        return jsonify({"error": "Please use your phinmaed email"}), 400
 
     try:
         verified_email = verify_mobile_signup_otp_token(signup_otp_token)
@@ -11201,28 +15201,49 @@ def mobile_signup():
     cursor = conn.cursor(dictionary=True)
 
     try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_saas_owner_schema(cursor, conn)
+        cursor.execute(
+            "SELECT company_id FROM organizations WHERE company_slug=%s AND is_active=1 LIMIT 1",
+            (company_slug,),
+        )
+        company_row = cursor.fetchone() or {}
+        company_id = int(company_row.get("company_id") or 0)
+        if company_id <= 0:
+            return jsonify({"error": "Invalid company selected"}), 400
+
+        if not _is_allowed_email_for_company(cursor, e, company_id=company_id):
+            return jsonify({"error": "Email domain is not allowed for this company"}), 400
+
         cursor.execute("SELECT user_id FROM users WHERE email=%s", (e,))
         if cursor.fetchone():
             return jsonify({"error": "Email already used, please login"}), 409
 
-        cursor.execute("SELECT dept_id FROM departments WHERE dept_name=%s", (dept_name,))
+        seats_ok, seat_msg = check_company_user_seat_capacity(cursor, company_id)
+        if not seats_ok:
+            return jsonify({"error": seat_msg}), 403
+
+        cursor.execute(
+            "SELECT dept_id FROM departments WHERE dept_name=%s AND company_id=%s",
+            (dept_name, company_id),
+        )
         dept = cursor.fetchone()
         if not dept:
             return jsonify({"error": "Invalid department"}), 400
         dept_id = dept["dept_id"]
 
-        cursor.execute("SELECT role_id FROM roles WHERE role_name='User'")
+        cursor.execute("SELECT role_id FROM roles WHERE role_name='User' AND company_id=%s", (company_id,))
         role_row = cursor.fetchone()
         role_id = role_row["role_id"] if role_row else 1
 
-        cursor.execute("SELECT position_id FROM positions WHERE position_name='None'")
+        cursor.execute("SELECT position_id FROM positions WHERE position_name='None' AND company_id=%s", (company_id,))
         pos_row = cursor.fetchone()
         position_id = pos_row["position_id"] if pos_row else 1
 
         hp = hash_user_password(p)
         cursor.execute(
-            "INSERT INTO users (email, password, dept_id, role_id, position_id) VALUES (%s,%s,%s,%s,%s)",
-            (e, hp, dept_id, role_id, position_id),
+            "INSERT INTO users (email, password, dept_id, role_id, position_id, company_id) VALUES (%s,%s,%s,%s,%s,%s)",
+            (e, hp, dept_id, role_id, position_id, company_id),
         )
         conn.commit()
 
@@ -11244,29 +15265,45 @@ def mobile_login():
     data = request.get_json(silent=True) or {}
     e = (data.get("email") or "").strip().lower()
     pw = data.get("password") or ""
+    company_slug = (
+        data.get("company_slug")
+        or data.get("company")
+        or ""
+    ).strip().lower()
 
     if not e or not pw:
         return jsonify({"error": "Email and password required"}), 400
+
+    if not is_allowed_system_email(e):
+        return jsonify({"error": EMAIL_DOMAIN_HELPER_MESSAGE}), 400
 
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute(
             """
-            SELECT u.user_id, u.email, u.password, r.role_name,
-            p.position_name, d.dept_name
+                        SELECT u.user_id, u.email, u.password, r.role_name,
+                        p.position_name, d.dept_name,
+                        COALESCE(u.company_id, 0) AS company_id,
+                        COALESCE(o.company_slug, '') AS company_slug,
+                        COALESCE(o.is_active, 1) AS company_is_active
             FROM users u
             JOIN roles r ON u.role_id = r.role_id
             JOIN positions p ON u.position_id = p.position_id
             LEFT JOIN departments d ON u.dept_id = d.dept_id
+                        LEFT JOIN organizations o ON o.company_id = u.company_id
             WHERE u.email = %s
+                            AND (%s = '' OR o.company_slug = %s)
             """,
-            (e,),
+                        (e, company_slug, company_slug),
         )
         user = cursor.fetchone()
 
         if not user or not verify_user_password(user["password"], pw):
             return jsonify({"error": "Invalid credentials"}), 401
+
+        if int(user.get("company_is_active") or 0) != 1:
+            return jsonify({"error": "Your organization is currently paused. Please contact Dev or SaaS Owner."}), 403
 
         if needs_password_rehash(user.get("password")):
             try:
@@ -11283,7 +15320,11 @@ def mobile_login():
         if user["role_name"] != "User":
             return jsonify({"error": "User role only"}), 403
 
-        token = create_token(user["email"])
+        token = create_token_with_claims(
+            user["email"],
+            company_id=user.get("company_id"),
+            role=user.get("role_name"),
+        )
 
         return jsonify({
             "token": token,
@@ -11292,6 +15333,8 @@ def mobile_login():
                 "dept_name": user.get("dept_name"),
                 "position_name": user.get("position_name"),
                 "role_name": user.get("role_name"),
+                "company_id": int(user.get("company_id") or 0),
+                "company_slug": user.get("company_slug"),
             },
         }), 200
 
@@ -11341,8 +15384,13 @@ def mobile_user_profile():
             LEFT JOIN positions p ON u.position_id = p.position_id
             LEFT JOIN roles r ON u.role_id = r.role_id
             WHERE u.email = %s
+              AND (%s = 0 OR COALESCE(u.company_id, 0) = %s)
         """,
-            (request.user_email,),
+            (
+                request.user_email,
+                int(getattr(request, "user_company_id", 0) or 0),
+                int(getattr(request, "user_company_id", 0) or 0),
+            ),
         )
         row = cursor.fetchone()
         if not row:
@@ -11358,7 +15406,10 @@ def mobile_user_profile():
 @app.route("/api/mobile/requests", methods=["GET"])
 @require_token
 def mobile_requests():
-    user_id = get_user_id(request.user_email)
+    user_id = get_user_id_for_company(
+        request.user_email,
+        int(getattr(request, "user_company_id", 0) or 0),
+    )
     if not user_id:
         return jsonify({"error": "User ID not found"})
 
@@ -11393,7 +15444,10 @@ def mobile_requests():
 @app.route("/api/mobile/notifications", methods=["GET"])
 @require_token
 def mobile_notifications():
-    user_id = get_user_id(request.user_email)
+    user_id = get_user_id_for_company(
+        request.user_email,
+        int(getattr(request, "user_company_id", 0) or 0),
+    )
     if not user_id:
         return jsonify([])
 
@@ -11435,10 +15489,489 @@ def mobile_notifications():
                 notif["message"] = f"Rejected: {req['rejection_message']}"
             notifications.append(notif)
 
+        broadcast_rows = fetch_system_broadcast_rows(cursor, limit=80)
+        for row in reversed(broadcast_rows):
+            created_at = row.get("created_at")
+            if hasattr(created_at, "strftime"):
+                display_time = created_at.strftime("%b %d, %H:%M")
+            else:
+                display_time = ""
+
+            notifications.append(
+                {
+                    "id": row.get("id"),
+                    "title": row.get("title") or "System Broadcast",
+                    "time": display_time,
+                    "type": "info",
+                    "message": row.get("description") or "",
+                }
+            )
+
         return jsonify(notifications)
     finally:
         cursor.close()
         conn.close()
+
+
+def _parse_sse_since_datetime(raw_value):
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _get_latest_notification_timestamp(user_id):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """
+            SELECT created_at
+            FROM notifications
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+        """,
+            (user_id,),
+        )
+        row = cursor.fetchone() or {}
+        created_at = row.get("created_at")
+        if isinstance(created_at, datetime.datetime):
+            if created_at.tzinfo is not None:
+                created_at = created_at.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            return created_at
+        return None
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _notification_stream_generator(user_id, initial_since=None, poll_interval_seconds=2, timeout_seconds=120):
+    since_dt = initial_since
+    deadline = time.time() + timeout_seconds
+
+    yield "event: ready\ndata: {}\n\n"
+
+    while time.time() < deadline:
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        rows = []
+        try:
+            if since_dt is None:
+                cursor.execute(
+                    """
+                    SELECT message, created_at
+                    FROM notifications
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """,
+                    (user_id,),
+                )
+                latest_only = cursor.fetchall() or []
+                rows = list(reversed(latest_only))
+            else:
+                cursor.execute(
+                    """
+                    SELECT message, created_at
+                    FROM notifications
+                    WHERE user_id = %s AND created_at > %s
+                    ORDER BY created_at ASC
+                    LIMIT 200
+                """,
+                    (user_id, since_dt),
+                )
+                rows = cursor.fetchall() or []
+        except Exception:
+            logger.exception("SSE notification stream query failed")
+            yield "event: error\ndata: {\"error\":\"stream_query_failed\"}\n\n"
+            break
+        finally:
+            cursor.close()
+            conn.close()
+
+        emitted = False
+        for row in rows:
+            created_at = row.get("created_at")
+            if isinstance(created_at, datetime.datetime):
+                normalized_created_at = created_at
+                if normalized_created_at.tzinfo is not None:
+                    normalized_created_at = normalized_created_at.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+                since_dt = normalized_created_at
+                created_iso = normalized_created_at.isoformat()
+            else:
+                created_iso = ""
+
+            payload = {
+                "message": str(row.get("message") or "").strip(),
+                "created_at": created_iso,
+            }
+            yield f"event: notification\\ndata: {json.dumps(payload)}\\n\\n"
+            emitted = True
+
+        if not emitted:
+            yield ": keep-alive\n\n"
+
+        time.sleep(poll_interval_seconds)
+
+    yield "event: end\ndata: {}\n\n"
+
+
+def _build_notification_sse_response(user_id):
+    since_raw = request.args.get("since")
+    interval_raw = request.args.get("interval", "2")
+    timeout_raw = request.args.get("timeout", "120")
+
+    try:
+        interval_seconds = int(interval_raw)
+    except Exception:
+        interval_seconds = 2
+    interval_seconds = max(1, min(interval_seconds, 10))
+
+    try:
+        timeout_seconds = int(timeout_raw)
+    except Exception:
+        timeout_seconds = 120
+    timeout_seconds = max(30, min(timeout_seconds, 600))
+
+    since_dt = _parse_sse_since_datetime(since_raw)
+    if since_dt is None:
+        since_dt = _get_latest_notification_timestamp(user_id)
+
+    return Response(
+        stream_with_context(
+            _notification_stream_generator(
+                user_id=user_id,
+                initial_since=since_dt,
+                poll_interval_seconds=interval_seconds,
+                timeout_seconds=timeout_seconds,
+            )
+        ),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _build_openapi_spec():
+    base_url = (request.url_root or "").rstrip("/") if has_request_context() else ""
+
+    return {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "Requesting and Approval SaaS API",
+            "version": "1.0.0",
+            "description": "Core API contract for authentication, request workflows, and real-time notification streams.",
+        },
+        "servers": [{"url": base_url}] if base_url else [],
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT",
+                }
+            },
+            "schemas": {
+                "Error": {
+                    "type": "object",
+                    "properties": {
+                        "error": {"type": "string"},
+                    },
+                },
+                "MobileLoginRequest": {
+                    "type": "object",
+                    "required": ["email", "password"],
+                    "properties": {
+                        "email": {"type": "string", "format": "email"},
+                        "password": {"type": "string"},
+                        "company_slug": {"type": "string"},
+                    },
+                },
+                "MobileLoginResponse": {
+                    "type": "object",
+                    "properties": {
+                        "token": {"type": "string"},
+                        "user": {
+                            "type": "object",
+                            "properties": {
+                                "email": {"type": "string"},
+                                "dept_name": {"type": "string"},
+                                "position_name": {"type": "string"},
+                                "role_name": {"type": "string"},
+                                "company_id": {"type": "integer"},
+                                "company_slug": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+                "UpdateRequestStatusRequest": {
+                    "type": "object",
+                    "required": ["status"],
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["PENDING", "IN PROGRESS", "APPROVED", "REJECTED", "COMPLETED"],
+                        },
+                        "message": {"type": "string"},
+                        "comment": {"type": "string"},
+                    },
+                },
+            },
+        },
+        "paths": {
+            "/api/mobile/signup": {
+                "post": {
+                    "tags": ["Mobile Auth"],
+                    "summary": "Sign up a mobile user within a tenant",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "email",
+                                        "password",
+                                        "confirmpassword",
+                                        "department",
+                                        "signup_otp_token",
+                                        "company_slug",
+                                    ],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "201": {"description": "Account created"},
+                        "400": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    },
+                }
+            },
+            "/api/mobile/login": {
+                "post": {
+                    "tags": ["Mobile Auth"],
+                    "summary": "Authenticate mobile user and return bearer token",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/MobileLoginRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Authenticated",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/MobileLoginResponse"}
+                                }
+                            },
+                        },
+                        "401": {"description": "Invalid credentials"},
+                    },
+                }
+            },
+            "/api/mobile/requests": {
+                "get": {
+                    "tags": ["Mobile Requests"],
+                    "summary": "List current user requests",
+                    "security": [{"bearerAuth": []}],
+                    "responses": {
+                        "200": {"description": "Request list"},
+                        "401": {"description": "Unauthorized"},
+                    },
+                }
+            },
+            "/api/mobile/notifications": {
+                "get": {
+                    "tags": ["Mobile Notifications"],
+                    "summary": "List current user notifications",
+                    "security": [{"bearerAuth": []}],
+                    "responses": {
+                        "200": {"description": "Notification list"},
+                        "401": {"description": "Unauthorized"},
+                    },
+                }
+            },
+            "/api/request/{request_id}/status": {
+                "post": {
+                    "tags": ["Workflow"],
+                    "summary": "Approve/reject/progress a request",
+                    "parameters": [
+                        {
+                            "name": "request_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "integer"},
+                        }
+                    ],
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/UpdateRequestStatusRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {"description": "Status updated"},
+                        "400": {"description": "Invalid input"},
+                        "403": {"description": "Forbidden"},
+                        "404": {"description": "Request not found"},
+                    },
+                }
+            },
+            "/api/stream/notifications": {
+                "get": {
+                    "tags": ["Realtime"],
+                    "summary": "Server-sent events stream for web notifications",
+                    "parameters": [
+                        {"name": "since", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                        {"name": "interval", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 10}},
+                        {"name": "timeout", "in": "query", "schema": {"type": "integer", "minimum": 30, "maximum": 600}},
+                    ],
+                    "responses": {
+                        "200": {"description": "SSE stream", "content": {"text/event-stream": {}}},
+                        "401": {"description": "Unauthorized"},
+                    },
+                }
+            },
+            "/api/mobile/stream/notifications": {
+                "get": {
+                    "tags": ["Realtime"],
+                    "summary": "Server-sent events stream for mobile notifications",
+                    "security": [{"bearerAuth": []}],
+                    "parameters": [
+                        {"name": "since", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                        {"name": "interval", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 10}},
+                        {"name": "timeout", "in": "query", "schema": {"type": "integer", "minimum": 30, "maximum": 600}},
+                    ],
+                    "responses": {
+                        "200": {"description": "SSE stream", "content": {"text/event-stream": {}}},
+                        "401": {"description": "Unauthorized"},
+                    },
+                }
+            },
+        },
+    }
+
+
+@app.route("/api/openapi.json", methods=["GET"])
+def openapi_spec():
+    return jsonify(_build_openapi_spec())
+
+
+@app.route("/api/docs", methods=["GET"])
+def openapi_docs():
+    html = """
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>API Docs</title>
+  <style>
+    body { font-family: Segoe UI, Tahoma, sans-serif; margin: 24px; color: #1a1a1a; }
+    h1 { margin-bottom: 8px; }
+    .muted { color: #666; margin-bottom: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+    .method { font-weight: 700; color: #0b5fff; }
+    .path { font-family: Consolas, monospace; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .tag { background: #eef3ff; border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+    pre { background: #f7f7f8; border: 1px solid #eee; border-radius: 8px; padding: 12px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Requesting and Approval SaaS API</h1>
+  <div class=\"muted\">OpenAPI JSON: <a href=\"/api/openapi.json\">/api/openapi.json</a></div>
+  <div id=\"routes\"></div>
+  <h2>Raw OpenAPI</h2>
+  <pre id=\"raw\">Loading...</pre>
+  <script>
+    async function loadDocs() {
+      const res = await fetch('/api/openapi.json');
+      const spec = await res.json();
+      const routesEl = document.getElementById('routes');
+      const rawEl = document.getElementById('raw');
+
+      const paths = spec.paths || {};
+      Object.keys(paths).sort().forEach((path) => {
+        const methods = paths[path] || {};
+        Object.keys(methods).forEach((method) => {
+          const op = methods[method] || {};
+          const tags = (op.tags || []).map(t => `<span class=\"tag\">${t}</span>`).join('');
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `
+            <div class=\"row\"><span class=\"method\">${method.toUpperCase()}</span><span class=\"path\">${path}</span>${tags}</div>
+            <div>${op.summary || ''}</div>
+          `;
+          routesEl.appendChild(card);
+        });
+      });
+
+      rawEl.textContent = JSON.stringify(spec, null, 2);
+    }
+    loadDocs().catch((err) => {
+      document.getElementById('raw').textContent = 'Failed to load docs: ' + err;
+    });
+  </script>
+</body>
+</html>
+    """.strip()
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/api/stream/notifications", methods=["GET"])
+@login_required
+def stream_notifications():
+    user_id = int(session.get("user_id") or 0)
+    if user_id <= 0:
+        user_id = int(
+            get_user_id_for_company(
+                session.get("email"),
+                int(session.get("company_id") or 0),
+            )
+            or 0
+        )
+
+    if user_id <= 0:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    return _build_notification_sse_response(user_id)
+
+
+@app.route("/api/mobile/stream/notifications", methods=["GET"])
+@require_token
+def mobile_stream_notifications():
+    user_id = int(
+        get_user_id_for_company(
+            request.user_email,
+            int(getattr(request, "user_company_id", 0) or 0),
+        )
+        or 0
+    )
+    if user_id <= 0:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    return _build_notification_sse_response(user_id)
 
 
 @app.route("/logout")

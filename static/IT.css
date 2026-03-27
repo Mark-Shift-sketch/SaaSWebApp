@@ -112,6 +112,12 @@ body {
   color: var(--green);
 }
 
+.subtitle {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+}
+
 /* HEADER  */
 
 header {

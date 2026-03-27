@@ -122,15 +122,40 @@ a {
     border-top: 1px solid var(--border-color);
 }
 
-.logout-link {
+.sidebar-footer .footer-bug-btn,
+.sidebar-footer .logout-link {
     display: flex;
     align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 10px;
+}
+
+.sidebar-footer .footer-bug-btn {
+    background: transparent;
+    border: 0;
+    color: var(--text-light);
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-align: left;
+}
+
+.sidebar-footer .footer-bug-btn:hover {
+    background: #eff6ff;
+    color: var(--primary-blue);
+}
+
+.logout-link {
+    text-decoration: none;
     color: #ef4444;
     font-weight: 500;
     font-size: 0.875rem;
 }
 
 .logout-link:hover {
+    background: #fef2f2;
     color: #b91c1c;
 }
 

@@ -13,6 +13,7 @@
     <script src="{{ url_for('static', filename='user/user.js') }}?v=20260312a"></script>
     <script src="{{ url_for('static', filename='user/sweetalert.js') }}"></script>
     <script src="{{ url_for('static', filename='alltoast/toast.js') }}"></script>
+    <script src="{{ url_for('static', filename='vendor/lucide.min.js') }}"></script>
 
 
   </head>
@@ -48,14 +49,19 @@
       <nav id="mobileNavMenu" class="mobile-nav-menu">
         <a onclick="switchView('dashboard'); closeMobileMenu();">Dashboard</a>
 
-        {% if session['role'] == 'AssistantAdmin' and session['dept'] == "Finance"%}
+        {% if can_manage_request_types %}
         <a onclick="switchView('requests'); closeMobileMenu();">Request Type Management</a>
         {% endif %}
         {% if (session.get('role') == 'AssistantAdmin' and session.get('position') == "SBO" and (session.get('dept') or '')|trim) or (session.get('role') == 'SBO' and (session.get('dept') or '')|trim) %}
           <a onclick="switchView('budgetreports'); closeMobileMenu();">Budget Reports</a>
           {% endif %}
 
+        {% if can_view_reports %}
         <a onclick="switchView('reports'); closeMobileMenu();">Reports</a>
+        {% endif %}
+        {% if can_manage_budget %}
+        <a onclick="switchView('budgetmanage'); closeMobileMenu();">Budget Management</a>
+        {% endif %}
         <a onclick="switchView('notifications'); closeMobileMenu();">
           <span>Notifications</span>
           <span id="admin-mobile-notification-badge" class="badge-nav" style="display:none;">0</span>
@@ -86,8 +92,7 @@
           </div>
         </a>
 
-        {% if session['role'] == 'AssistantAdmin' and session['dept'] ==
-        "Finance" %}
+        {% if can_manage_request_types %}
         <a id="nav-requests" class="nav-item" onclick="switchView('requests')">
           <div class="nav-item-content">
             <i class="fa-solid fa-file-invoice-dollar"></i>
@@ -96,6 +101,7 @@
         </a>
         {% endif %}
 
+        {% if can_view_reports %}
         <a
           id="nav-reports"
           class="nav-item"
@@ -106,6 +112,20 @@
             <span>Reports</span>
           </div>
         </a>
+        {% endif %}
+
+        {% if can_manage_budget %}
+        <a
+          id="nav-budgetmanage"
+          class="nav-item"
+          onclick="switchView('budgetmanage')"
+        >
+          <div class="nav-item-content">
+            <i class="fa-solid fa-sack-dollar"></i>
+            <span>Budget Management</span>
+          </div>
+        </a>
+        {% endif %}
 
         {% if (session.get('role') == 'AssistantAdmin' and session.get('position') == "SBO" and (session.get('dept') or '')|trim) or (session.get('role') == "SBO" and (session.get('dept') or '')|trim) %}
           <a
@@ -132,6 +152,18 @@
           </div>
           <span id="admin-notification-badge" class="badge-nav" style="display:none;">0</span>
         </a>
+<!-- Soon will Implemented
+        <a
+          id="nav-histoy"
+          class="nav-item"
+          onclick="switchView('history')"
+        >
+          <div class="nav-item-content">
+            <i class="fa-solid fa-clock-rotate-left"></i>
+            <span>History</span>
+          </div>
+          <span id="admin-notification-badge" class="badge-nav" style="display:none;">0</span>
+        </a> -->
 
         <a id="nav-settings" class="nav-item" onclick="switchView('settings')">
           <div class="nav-item-content">
@@ -144,11 +176,10 @@
       </nav>
 
       <div class="sidebar-footer">
-        <div style="padding: 0 20px 10px 20px; color: #9ca3af; font-size: 12px">
-          Logged in as: <br />
-          <strong style="color: white">{{ session['role'] }}</strong><br />
-          <span style="color: #6b7280">{{ session['position'] }}</span>
-        </div>
+
+        <button class="footer-bug-btn" onclick="switchView('bugs')" id="nav-bugs">
+          <i data-lucide="bug"></i> Report Bug
+        </button>
 
         <a href="/logout" class="logout-link">
           <i
@@ -563,8 +594,36 @@
   </div>
 </div>
 
+
+      <div id="view-bugs" class="view-section" style="display: none;">
+            <div class="card" style="max-width:760px;">
+              <div class="card-header" style="display:block;">
+                <h2 class="text-xl font-bold" style="margin:0 0 8px;">Report a Bug</h2>
+                <p class="text-muted" style="margin:0;">Share what happened. You can include a screenshot, but image upload is optional.</p>
+              </div>
+
+              <form id="bug-report-form" class="mt-4" enctype="multipart/form-data">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <div class="form-group-wrapper">
+                  <div class="form-group">
+                    <label for="bug-description">Bug Description</label>
+                    <textarea id="bug-description" name="description" rows="6" placeholder="Describe the bug, steps to reproduce, and expected result..." required></textarea>
+                  </div>
+                  <div class="form-group">
+                    <label for="bug-image">Screenshot (Optional)</label>
+                    <input id="bug-image" name="image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+                    <p class="text-muted text-sm mt-2">Allowed: PNG, JPG, JPEG, WEBP, GIF (max 5MB).</p>
+                  </div>
+                  <div class="modal-actions" style="justify-content:flex-start; padding-top:4px;">
+                    <button type="submit" class="btn-submit">Submit Bug Report</button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+
       <!-- REQUEST TYPE MANAGEMENT -->
-      {% if session['role'] == 'AssistantAdmin' %}
+      {% if can_manage_request_types %}
       <div id="view-requests" class="view-section" style="display: none">
         <header class="top-header">
           <div class="header-title"><h2>Request Type Management</h2></div>
@@ -791,6 +850,7 @@
       </div>
       {% endif %}
 
+      {% if can_view_reports %}
       <div id="view-reports" class="view-section" style="display:none">
 
 <header class="top-header">
@@ -850,6 +910,85 @@
 </div>
 </div>
 </div>
+  {% endif %}
+
+      {% if can_manage_budget %}
+      <div id="view-budgetmanage" class="view-section" style="display:none">
+        <header class="top-header">
+          <div class="header-title">
+            <h2>Budget Management</h2>
+            <p>Virtual budget transfer and budget type setup</p>
+          </div>
+          <div class="header-actions">
+            <div class="date-widget">
+              <i class="fa-regular fa-calendar" style="margin-right: 8px"></i>
+              <span class="current-date-display"></span>
+            </div>
+          </div>
+        </header>
+
+        <div class="content-scroll custom-scrollbar">
+          <div class="form-grid">
+            <div class="form-card">
+              <h3>Send Virtual Budget</h3>
+              <br />
+              <form id="budgetTransferForm" onsubmit="submitBudgetTransfer(event)">
+                <div class="form-group">
+                  <label>Department</label>
+                  <select id="budgetTransferDepartment" required>
+                    <option value="" disabled selected>Select Department</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Budget Type</label>
+                  <select id="budgetTransferType" required>
+                    <option value="" disabled selected>Select Budget Type</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Amount</label>
+                  <input id="budgetTransferAmount" type="number" min="0.01" step="0.01" placeholder="0.00" required />
+                </div>
+                <button type="submit" class="btn-primary">Send Budget</button>
+              </form>
+            </div>
+
+            <div class="form-card">
+              <h3>Budget Type Setup</h3>
+              <br />
+              <form id="budgetTypeCreateForm" onsubmit="createBudgetType(event)">
+                <div class="form-group">
+                  <label>Budget Type Name</label>
+                  <input id="budgetTypeName" type="text" placeholder="e.g., Department Budget" required />
+                </div>
+                <button type="submit" class="btn-primary">Add Budget Type</button>
+              </form>
+            </div>
+
+            <div class="form-card" style="grid-column: 1 / -1;">
+              <h3>Existing Budget Types</h3>
+              <br />
+              <div class="table-container" style="margin-top:0; padding:0; box-shadow:none;">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Created</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="budgetTypeTableBody">
+                    <tr>
+                      <td colspan="3" style="text-align:center;color:#64748b;">Loading...</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endif %}
 
       <div id="view-budgetreports" class="view-section" style="display:none">
         <header class="top-header">
@@ -1019,6 +1158,101 @@
             <div class="notification-list" id="notifList">
               <div style="text-align: center; color: #6b7280; padding: 20px">Loading...</div>
             </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- HISTORY -->
+      <div id="view-history" class="view-section" style="display: none">
+        <header class="top-header">
+          <div class="header-title">
+            <h2>History</h2>
+            <p>Approved / Rejected request history</p>
+          </div>
+
+          <div class="header-actions">
+            <div class="date-widget">
+              <i class="fa-regular fa-calendar" style="margin-right: 8px"></i>
+              <span class="current-date-display"></span>
+            </div>
+          </div>
+        </header>
+
+        <div class="content-scroll custom-scrollbar">
+          <div class="card-container">
+            <div class="table-header">
+              <div class="table-title">
+                <h3>Request Actions</h3>
+                <span class="count-badge" id="history-count">
+                  {{ history_rows|length if history_rows else 0 }}
+                </span>
+              </div>
+
+              <div class="table-actions">
+                <div class="search-box">
+                  <i class="fa-solid fa-search"></i>
+                  <input
+                    type="text"
+                    id="history-search"
+                    placeholder="Search history..."
+                    class="search-input"
+                    oninput="filterHistory()"
+                  />
+                </div>
+
+                <select
+                  id="history-filter"
+                  class="filter-select"
+                  onchange="filterHistory()"
+                >
+                  <option value="">All</option>
+                  <option value="APPROVED">Approved</option>
+                  <option value="REJECTED">Rejected</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Request ID</th>
+                    <th>Action</th>
+                    <th>By</th>
+                    <th>Message</th>
+                    <th>Date</th>
+                  </tr>
+                </thead>
+
+                <tbody id="history-body">
+                  {% if history_rows %} {% for h in history_rows %}
+                  <tr
+                    class="history-row"
+                    data-action="{{ (h.action or '')|upper }}"
+                  >
+                    <td>REQ#{{ h.request_id }}</td>
+                    <td>
+                      <span class="status-badge status-{{ h.action|lower }}">
+                        {{ h.action }}
+                      </span>
+                    </td>
+                    <td>{{ h.actor_email or '-' }}</td>
+                    <td>{{ h.message or '-' }}</td>
+                    <td>{{ h.created_at }}</td>
+                  </tr>
+                  {% endfor %} {% else %}
+                  <tr>
+                    <td
+                      colspan="5"
+                      style="text-align: center; color: #6b7280; padding: 20px"
+                    >
+                      No history yet.
+                    </td>
+                  </tr>
+                  {% endif %}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

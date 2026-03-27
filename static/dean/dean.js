@@ -1,3 +1,86 @@
+// --- Bug Report Section Logic ---
+function showSection(section) {
+    ['dashboard', 'notifications', 'history', 'settings', 'bugs'].forEach(s => {
+        const el = document.getElementById(`section-${s}`);
+        if (el) el.classList.add('hidden');
+    });
+    const showEl = document.getElementById(`section-${section}`);
+    if (showEl) showEl.classList.remove('hidden');
+
+    document.querySelectorAll('.sidebar-nav a, .sidebar-footer button').forEach(link => link.classList.remove('active'));
+    const nav = document.getElementById(`nav-${section}`);
+    if (nav) nav.classList.add('active');
+
+    const pageTitle = document.getElementById('page-title');
+    if (pageTitle) pageTitle.textContent = section.charAt(0).toUpperCase() + section.slice(1);
+}
+
+function bindBugReportSubmitHandler() {
+    const form = document.getElementById('bug-report-form');
+    if (!form) return;
+
+    const imageInput = document.getElementById('bug-image');
+    const descInput = document.getElementById('bug-description');
+
+    if (imageInput) {
+        imageInput.addEventListener('change', () => {
+            const f = imageInput.files && imageInput.files[0] ? imageInput.files[0] : null;
+            if (!f) return;
+            const maxBytes = 5 * 1024 * 1024;
+            if (f.size > maxBytes) {
+                showStatus('Image is too large. Maximum size is 5MB.');
+                imageInput.value = '';
+                return;
+            }
+
+            const okTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+            if (f.type && !okTypes.includes(String(f.type).toLowerCase())) {
+                showStatus('Supported image formats: PNG, JPG, JPEG, WEBP, GIF.');
+                imageInput.value = '';
+            }
+        });
+    }
+
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+
+        const description = String(descInput?.value || '').trim();
+        if (description.length < 5) {
+            showStatus('Please provide a clear bug description.');
+            descInput?.focus();
+            return;
+        }
+
+        const formData = new FormData(form);
+        const csrfToken = String(document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '').trim();
+
+        try {
+            const res = await fetch('/api/bugs/report', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    ...(csrfToken ? { 'X-CSRFToken': csrfToken } : {}),
+                },
+                body: formData,
+            });
+
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+                showStatus(data.error || 'Failed to submit bug report.');
+                return;
+            }
+
+            showStatus(data.message || 'Bug report submitted successfully.', 'success');
+            form.reset();
+        } catch (err) {
+            showStatus('Failed to submit bug report.', 'error');
+        }
+    });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    bindBugReportSubmitHandler();
+});
 window.onload = function () {
     const options = {
         weekday: "long",

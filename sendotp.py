@@ -1,10 +1,21 @@
-from flask import Flask, session, redirect, request, render_template, url_for
+from flask import session, request
 from config import Email, password, get_connection
 import smtplib
 from email.message import EmailMessage
-import secrets
 import hmac
 import random
+
+
+ALLOWED_EMAIL_DOMAIN = "phinmaed.com"
+EMAIL_DOMAIN_HELPER_MESSAGE = "Please use youre phinmaed email"
+
+
+def _is_allowed_system_email(email):
+    normalized_email = (email or "").strip().lower()
+    if "@" not in normalized_email:
+        return False
+    local_part, domain = normalized_email.rsplit("@", 1)
+    return bool(local_part) and domain == ALLOWED_EMAIL_DOMAIN
 
 
 def sent_otp(receiver, otp):
@@ -45,6 +56,8 @@ def request_signup_otp(email):
     email = (email or "").strip().lower()
     if not email:
         return "Email is required", False
+    if not _is_allowed_system_email(email):
+        return EMAIL_DOMAIN_HELPER_MESSAGE, False
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -91,6 +104,8 @@ def verify_signup_otp(email, userotp, consume=True):
 
     if not email or not userotp:
         return "Email and OTP are required", False
+    if not _is_allowed_system_email(email):
+        return EMAIL_DOMAIN_HELPER_MESSAGE, False
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -118,43 +133,6 @@ def verify_signup_otp(email, userotp, consume=True):
         conn.close()
     
     
-# resend otp if more than 2 minute not recieve 
-def c():
-    email = request.form['email']
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT 1 FROM users WHERE email=%s", (email,))
-    if cursor.fetchone():
-        # Generic response to avoid account enumeration
-        return "If eligible, OTP will be sent"
-
-    cursor.execute("""SELECT TIMESTAMPDIFF(SECOND, created_at, NOW())
-        FROM otp_codes WHERE email=%s
-    """, (email,))
-    rs = cursor.fetchone()
-
-    if rs and rs[0] < 120:
-        return f"Please wait {120 - rs[0]} seconds before resending"
-
-    otp = secrets.randbelow(900000) + 100000
-
-    cursor.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
-    cursor.execute(
-        "INSERT INTO otp_codes (email, otp) VALUES (%s, %s)",
-        (email, otp)
-    )
-    conn.commit()
-
-    sent_otp(email, otp)
-
-    cursor.close()
-    conn.close()
-
-    return "If eligible, OTP will be sent"
-
-
 def srotp():
     email = _get_request_value("email").lower()
     message, _ok = request_signup_otp(email)
@@ -182,7 +160,7 @@ def send_request_email(receiver, status):
 
         if status == 'APPROVED':
             subject = "Request Approved"
-            body = f"""Good day,
+            body = """Good day,
 
             Your request has been APPROVED. 
             Please check the web app for details.
@@ -190,7 +168,7 @@ def send_request_email(receiver, status):
             This is an automated message. Do not reply."""
         else:
             subject = "Request Rejected"
-            body = f"""Good day,
+            body = """Good day,
 
             Your request has been REJECTED. 
             Please check the web app for details.

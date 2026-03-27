@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SaaS Owner Dashboard</title>
+    <style>
+        :root {
+            --bg: #f4f7fb;
+            --card: #ffffff;
+            --line: #e2e8f0;
+            --text: #1f2937;
+            --muted: #64748b;
+            --primary: #0b63f3;
+            --primary-dark: #0849b7;
+            --ok: #11845b;
+            --warn: #a06705;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background: radial-gradient(circle at top right, #e8f0ff 0%, #f7faff 40%, var(--bg) 100%);
+            color: var(--text);
+        }
+
+        .shell {
+            max-width: 1160px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+
+        .title {
+            margin: 0;
+            font-size: 1.7rem;
+        }
+
+        .subtitle {
+            margin: 4px 0 0;
+            color: var(--muted);
+            font-size: 0.95rem;
+        }
+
+        .btn {
+            border: 0;
+            border-radius: 10px;
+            padding: 10px 14px;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: #fff;
+        }
+
+        .btn-primary:hover { background: var(--primary-dark); }
+
+        .btn-soft {
+            background: #e9f0ff;
+            color: #1e3a8a;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 16px;
+        }
+
+        .metric-label {
+            font-size: 0.85rem;
+            color: var(--muted);
+            margin-bottom: 6px;
+        }
+
+        .metric-value {
+            font-size: 1.55rem;
+            font-weight: 700;
+        }
+
+        .section-title {
+            margin: 0 0 10px;
+            font-size: 1.05rem;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.93rem;
+        }
+
+        th, td {
+            border-bottom: 1px solid var(--line);
+            text-align: left;
+            padding: 10px 8px;
+            vertical-align: middle;
+        }
+
+        th {
+            color: var(--muted);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .pill {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 700;
+        }
+
+        .pill-ok {
+            background: #daf6eb;
+            color: var(--ok);
+        }
+
+        .pill-off {
+            background: #f3e5e5;
+            color: #9f2d2d;
+        }
+
+        .inline-select {
+            padding: 6px 8px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+        }
+
+        .muted {
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
+
+        .error {
+            color: #b42318;
+            font-size: 0.9rem;
+            margin-top: 8px;
+        }
+
+        @media (max-width: 740px) {
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <div class="header">
+            <div>
+                <h1 class="title">Super Admin (SaaS Owner)</h1>
+                <p class="subtitle">Signed in as {{ email or "N/A" }}. Manage tenants, plans, and system analytics.</p>
+            </div>
+            <div class="toolbar">
+                <a class="btn btn-soft" href="{{ url_for('dev_dashboard') }}">Developer Home</a>
+                <a class="btn btn-soft" href="{{ url_for('bug_reports_dashboard') }}">Bug Reports</a>
+                <button class="btn btn-primary" id="refreshAll">Refresh</button>
+            </div>
+        </div>
+
+        <section class="grid" id="metrics"></section>
+
+        <section class="card">
+            <h2 class="section-title">Subscription Plans</h2>
+            <div id="plans" class="muted">Loading plans...</div>
+        </section>
+
+        <section class="card" style="margin-top: 14px;">
+            <h2 class="section-title">All Companies (Tenants)</h2>
+            <div class="muted" style="margin-bottom: 8px;">Pause/resume organizations and assign plan tiers.</div>
+            <div style="overflow:auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Company</th>
+                            <th>Plan</th>
+                            <th>Status</th>
+                            <th>Users</th>
+                            <th>Requests</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="companyRows"></tbody>
+                </table>
+            </div>
+            <p id="errorText" class="error" style="display:none;"></p>
+        </section>
+    </div>
+
+    <script>
+        const plans = ["FREE", "PRO", "ENTERPRISE"];
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
+
+        async function fetchJson(url, options) {
+            const requestOptions = options ? {...options} : {};
+            const method = String(requestOptions.method || "GET").toUpperCase();
+            requestOptions.headers = requestOptions.headers ? {...requestOptions.headers} : {};
+
+            if (method !== "GET" && method !== "HEAD" && csrfToken) {
+                requestOptions.headers["X-CSRFToken"] = csrfToken;
+            }
+
+            const response = await fetch(url, requestOptions);
+            const data = await response.json();
+            if (!response.ok || data.success === false) {
+                throw new Error(data.error || data.message || "Request failed");
+            }
+            return data;
+        }
+
+        function renderMetrics(summary) {
+            const metrics = [
+                ["Total Companies", summary.total_companies || 0],
+                ["Active Companies", summary.active_companies || 0],
+                ["Inactive Companies", summary.inactive_companies || 0],
+                ["Total Users", summary.total_users || 0],
+                ["Total Requests", summary.total_requests || 0],
+            ];
+            const html = metrics.map(([label, value]) => `
+                <article class="card">
+                    <div class="metric-label">${label}</div>
+                    <div class="metric-value">${value}</div>
+                </article>
+            `).join("");
+            document.getElementById("metrics").innerHTML = html;
+        }
+
+        function renderPlans(planRows) {
+            if (!planRows.length) {
+                document.getElementById("plans").textContent = "No plan definitions available.";
+                return;
+            }
+            document.getElementById("plans").innerHTML = planRows.map((plan) => (
+                `<div style="margin-bottom:6px;"><strong>${plan.plan_name}</strong> - ` +
+                `Price: ${Number(plan.monthly_price || 0).toFixed(2)} / mo, ` +
+                `Seats: ${plan.seats_limit}, Requests: ${plan.requests_limit}</div>`
+            )).join("");
+        }
+
+        function renderCompanies(rows) {
+            const tbody = document.getElementById("companyRows");
+            if (!rows.length) {
+                tbody.innerHTML = `<tr><td colspan="6" class="muted">No companies found.</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = rows.map((row) => {
+                const isActive = Number(row.is_active || 0) === 1;
+                const badge = isActive
+                    ? `<span class="pill pill-ok">ACTIVE</span>`
+                    : `<span class="pill pill-off">INACTIVE</span>`;
+                const planOptions = plans.map((p) => `<option value="${p}" ${p === row.plan_name ? "selected" : ""}>${p}</option>`).join("");
+
+                return `
+                    <tr data-company-id="${row.company_id}">
+                        <td>
+                            <div><strong>${row.company_name || "-"}</strong></div>
+                            <div class="muted">${row.company_slug || ""}</div>
+                        </td>
+                        <td>
+                            <select class="inline-select planSelect">${planOptions}</select>
+                        </td>
+                        <td>${badge}</td>
+                        <td>${row.user_count || 0}</td>
+                        <td>${row.request_count || 0}</td>
+                        <td>
+                            <button class="btn btn-soft toggleStatusBtn">${isActive ? "Pause" : "Resume"}</button>
+                            <button class="btn btn-primary savePlanBtn">Save Plan</button>
+                        </td>
+                    </tr>
+                `;
+            }).join("");
+        }
+
+        async function loadDashboard() {
+            document.getElementById("errorText").style.display = "none";
+            const [analytics, plansData, companies] = await Promise.all([
+                fetchJson("/api/saas/analytics"),
+                fetchJson("/api/saas/subscription/plans"),
+                fetchJson("/api/saas/companies"),
+            ]);
+            renderMetrics(analytics.summary || {});
+            renderPlans(plansData.plans || []);
+            renderCompanies(companies.companies || []);
+        }
+
+        document.getElementById("companyRows").addEventListener("click", async (event) => {
+            const target = event.target;
+            const row = target.closest("tr[data-company-id]");
+            if (!row) return;
+
+            const companyId = Number(row.getAttribute("data-company-id"));
+            const errorText = document.getElementById("errorText");
+            errorText.style.display = "none";
+
+            try {
+                if (target.classList.contains("toggleStatusBtn")) {
+                    const currentlyActive = target.textContent.trim().toLowerCase() === "pause";
+                    await fetchJson(`/api/saas/companies/${companyId}/status`, {
+                        method: "POST",
+                        headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({is_active: !currentlyActive}),
+                    });
+                    await loadDashboard();
+                }
+
+                if (target.classList.contains("savePlanBtn")) {
+                    const selectedPlan = row.querySelector(".planSelect").value;
+                    await fetchJson("/api/saas/subscription/assign", {
+                        method: "POST",
+                        headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({company_id: companyId, plan_name: selectedPlan, subscription_status: "ACTIVE"}),
+                    });
+                    await loadDashboard();
+                }
+            } catch (error) {
+                errorText.style.display = "block";
+                errorText.textContent = error.message || "Action failed";
+            }
+        });
+
+        document.getElementById("refreshAll").addEventListener("click", loadDashboard);
+
+        loadDashboard().catch((error) => {
+            const errorText = document.getElementById("errorText");
+            errorText.style.display = "block";
+            errorText.textContent = error.message || "Failed to load dashboard";
+        });
+    </script>
+</body>
+</html>

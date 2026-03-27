@@ -5,105 +5,124 @@
     <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sign Up</title>
-    <link rel="stylesheet" href="/static/signup.css">
     <link rel="stylesheet" href="/static/login.css">
+  <link rel="stylesheet" href="/static/signup.css">
     <script src="/static/login.js"></script>
 </head>
 
-<body>
-<div class="container">
+<body class="signup-page">
+<div class="page-shell">
+  <div class="container">
+    <aside class="logo-side">
+      <div class="brand-content">
+        <img class="logo" src="/static/PHINMAEd_Logo.png" alt="PHINMA COC Logo">
+        <h1>PHINMA COC</h1>
+        <p class="campus">Cagayan de Oro College</p>
+        <div class="accent-line"></div>
+        <p class="portal">Finance Department Portal</p>
+      </div>
+      <p class="values">Excellence · Integrity · Professionalism</p>
+    </aside>
 
-    <div class="form-side">
-        {% if message %}
-            <p class="em">{{ message }}</p>
-        {% endif %}
+    <section class="form-side signup-form-side">
+      <h2 class="title">Create Your Account</h2>
+      <p class="subtitle">Sign up to access the Finance Portal</p>
+      <div class="heading-line"></div>
 
-        <h1 class="signuplogo">Sign Up</h1>
+      {% if message %}
+        <p class="em">{{ message }}</p>
+      {% endif %}
 
-        <form method="POST" action="/signup">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <form method="POST" action="/signup">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
-            <input type="email" id="email" name="email" placeholder="Email" required>
-
-            <div class="icon">
-                <input type="password" id="pass1" name="pass" placeholder="Password" required>
-                <i id="eye1" class="TP" onclick="TTP('pass1', 'eye1')">
-                    <img src="/static/eye.png" alt="show Password">
-                </i>
-            </div>
-
-            <div class="icon">
-                <input type="password" id="pass2" name="cpass" placeholder="Confirm Password" required>
-                <i id="eye2" class="TP" onclick="TTP('pass2', 'eye2')">
-                    <img src="/static/eye.png" alt="show Password">
-                </i>
-            </div>
-
-            <select class="dept" name="dept" id="dept" required>
-                <option value="">Select Department</option>
-                {% for d in departments %}
-                    <option value="{{ d['dept_name'] }}">{{ d['dept_name'] }}</option>
-                {% endfor %}
-            </select>
-
-            <button type="button" class="go" id="getOtpBtn">Get OTP</button>
-
-            <div class="overlay" id="overlay">
-                <div class="confirmation-modal">
-                    <h2>Verification</h2>
-                    <p>Enter 6-digit OTP sent to your email</p>
-
-                    <div class="otpE">
-                        <input class="Eotp" maxlength="1">
-                        <input class="Eotp" maxlength="1">
-                        <input class="Eotp" maxlength="1">
-                        <input class="Eotp" maxlength="1">
-                        <input class="Eotp" maxlength="1">
-                        <input class="Eotp" maxlength="1">
-                    </div>
-
-                    <button type="button" id="verifyOtpBtn">Verify OTP</button>
-                </div>
-            </div>
-
-            <button class="signup" id="signupBtn" type="submit" disabled>
-                Sign Me Up
-            </button>
-
-            <div class="sign">
-                <p>
-                    Already have Account?
-                    <a href="{{ url_for('login') }}" class="a">Log in</a>
-                </p>
-            </div>
-        </form>
-    </div>
-
-    <div class="logo-side">
-            <img class="logo" src="/static/PHINMAEd_Logo.png" alt="Logo">
-            <h1>PHINMA COC</h1>
-            <p>Cagayan de ORO College</p>
+        <label for="company_slug" class="field-label">Organization / Company</label>
+        <div class="input-wrap select-wrap">
+          <select class="dept" name="company_slug" id="company_slug" required>
+            <option value="">Select Company</option>
+            {% for c in companies or [] %}
+              <option value="{{ c['company_slug'] }}" {% if selected_company_slug == c['company_slug'] %}selected{% endif %}>{{ c['company_name'] }}</option>
+            {% endfor %}
+          </select>
         </div>
 
+        <label for="email" class="field-label">Email Address</label>
+        <div class="input-wrap">
+          <span class="input-icon">&#9993;</span>
+          <input type="email" id="email" name="email" placeholder="name@phinmaed.com" required>
+        </div>
+        <small id="emailDomainHelper" class="security-note" style="display:block;margin-top:-8px;margin-bottom:10px;">Use your @phinmaed.com email.</small>
+
+        <label for="pass1" class="field-label">Password</label>
+        <div class="input-wrap icon">
+          <span class="input-icon">&#128274;</span>
+          <input type="password" id="pass1" name="pass" placeholder="Create a password" required>
+          <i id="eye1" class="TP" onclick="TTP('pass1', 'eye1')">
+            <img src="/static/eye.png" alt="Show Password">
+          </i>
+        </div>
+
+        <div class="input-wrap icon">
+          <span class="input-icon">&#128274;</span>
+          <input type="password" id="pass2" name="cpass" placeholder="Confirm your password" required>
+          <i id="eye2" class="TP" onclick="TTP('pass2', 'eye2')">
+            <img src="/static/eye.png" alt="Show Password">
+          </i>
+        </div>
+
+        <label for="dept" class="field-label">Department</label>
+        <div class="input-wrap select-wrap">
+          <select class="dept" name="dept" id="dept" required>
+            <option value="">Select Department</option>
+            {% for d in departments %}
+              <option value="{{ d['dept_name'] }}" {% if selected_dept_name == d['dept_name'] %}selected{% endif %}>{{ d['dept_name'] }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="otp-action-row">
+          <button type="button" class="go" id="getOtpBtn">Get OTP</button>
+          <span id="otpCountdown" class="otp-countdown" aria-live="polite"></span>
+        </div>
+
+        <div class="overlay" id="overlay">
+          <div class="confirmation-modal">
+            <h2>Verification</h2>
+            <p>Enter 6-digit OTP sent to your email</p>
+
+            <div class="otpE">
+              <input class="Eotp" maxlength="1">
+              <input class="Eotp" maxlength="1">
+              <input class="Eotp" maxlength="1">
+              <input class="Eotp" maxlength="1">
+              <input class="Eotp" maxlength="1">
+              <input class="Eotp" maxlength="1">
+            </div>
+
+            <button type="button" id="verifyOtpBtn">Verify OTP</button>
+          </div>
+        </div>
+
+        <p class="terms">By signing up, you agree to the Terms and Conditions of PHINMA COC</p>
+
+        <button class="signup" id="signupBtn" type="submit" disabled>
+          Create Account
+        </button>
+
+        <div class="sign">
+          <p>
+            Already have an account?
+            <a href="{{ url_for('login') }}" class="a">Sign In</a>
+          </p>
+        </div>
+
+        <p class="security-note">Secure · Protected · PHINMA Network</p>
+      </form>
+    </section>
+  </div>
 </div>
 
 <script>
-function TTP(fieldId, togleId) {
-  const field = document.getElementById(fieldId);
-  const toggle = document.getElementById(togleId)?.querySelector("img");
-  if (!field || !toggle) return;
-
-  if (field.type === "password") {
-    field.type = "text";
-    toggle.src = "/static/hide.png";
-    toggle.alt = "Hide Password";
-  } else {
-    field.type = "password";
-    toggle.src = "/static/eye.png";
-    toggle.alt = "Show Password";
-  }
-}
-
 function getCsrfToken() {
   const el = document.querySelector('meta[name="csrf-token"]');
   return el ? el.getAttribute("content") : "";
@@ -167,14 +186,49 @@ function setupOtpInputs() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  const REQUIRED_EMAIL_DOMAIN = "@phinmaed.com";
+  const DOMAIN_HELPER_MESSAGE = "Please use youre phinmaed email";
   const getOtpBtn = document.getElementById("getOtpBtn");
   const verifyOtpBtn = document.getElementById("verifyOtpBtn");
   const overlay = document.getElementById("overlay");
   const signupBtn = document.getElementById("signupBtn");
+  const signupForm = document.querySelector('form[action="/signup"]');
   const emailEl = document.getElementById("email");
+  const companyEl = document.getElementById("company_slug");
+  const deptEl = document.getElementById("dept");
+  const otpCountdownEl = document.getElementById("otpCountdown");
   const loginLink = document.querySelector('a[href*="login"]');
+  let otpCountdownTimer = null;
+  let otpSecondsRemaining = 0;
 
   setupOtpInputs();
+
+  function isAllowedDomainEmail(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    return normalized.endsWith(REQUIRED_EMAIL_DOMAIN) && normalized.length > REQUIRED_EMAIL_DOMAIN.length;
+  }
+
+  function ensureAllowedDomainEmail(showMessage = true) {
+    const email = (emailEl?.value || "").trim();
+    if (!email) {
+      return false;
+    }
+    if (isAllowedDomainEmail(email)) {
+      if (emailEl) emailEl.setCustomValidity("");
+      return true;
+    }
+    if (emailEl) emailEl.setCustomValidity(DOMAIN_HELPER_MESSAGE);
+    if (showMessage) showSignupStatus(DOMAIN_HELPER_MESSAGE, "error");
+    return false;
+  }
+
+  if (emailEl) {
+    emailEl.addEventListener("input", () => {
+      if (isAllowedDomainEmail(emailEl.value)) {
+        emailEl.setCustomValidity("");
+      }
+    });
+  }
 
 
   function showOverlay() {
@@ -193,10 +247,116 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  function setDeptOptions(departments, keepSelected = "") {
+    if (!deptEl) return;
+    const previous = keepSelected || deptEl.value || "";
+    deptEl.innerHTML = "";
+
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Select Department";
+    deptEl.appendChild(placeholder);
+
+    (departments || []).forEach((name) => {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      if (previous && previous === name) {
+        opt.selected = true;
+      }
+      deptEl.appendChild(opt);
+    });
+  }
+
+  async function refreshDepartmentsForCompany() {
+    if (!companyEl || !deptEl) return;
+
+    const companySlug = (companyEl.value || "").trim();
+    if (!companySlug) {
+      setDeptOptions([]);
+      return;
+    }
+
+    try {
+      deptEl.disabled = true;
+      const res = await fetch(`/api/mobile/departments?company_slug=${encodeURIComponent(companySlug)}`, {
+        method: "GET",
+        credentials: "same-origin",
+      });
+
+      if (!res.ok) {
+        throw new Error(`Failed to load departments (${res.status})`);
+      }
+
+      const data = await res.json();
+      setDeptOptions(data?.departments || []);
+    } catch (err) {
+      showSignupStatus(String(err || "Failed to load departments"), "error");
+      setDeptOptions([]);
+    } finally {
+      deptEl.disabled = false;
+    }
+  }
+
+  if (companyEl) {
+    companyEl.addEventListener("change", refreshDepartmentsForCompany);
+  }
+
+  function parseOtpCooldownSeconds(message) {
+    const msg = String(message || "");
+    const matched = msg.match(/please\s+wait\s+(\d+)\s+seconds?/i);
+    return matched ? parseInt(matched[1], 10) : 0;
+  }
+
+  function renderOtpCountdown() {
+    if (!otpCountdownEl) return;
+    if (otpSecondsRemaining > 0) {
+      otpCountdownEl.textContent = `Resend in ${otpSecondsRemaining}s`;
+      otpCountdownEl.style.display = "inline";
+      return;
+    }
+    otpCountdownEl.textContent = "";
+    otpCountdownEl.style.display = "none";
+  }
+
+  function startOtpCountdown(seconds) {
+    const normalized = Number(seconds);
+    otpSecondsRemaining = Number.isFinite(normalized) ? Math.max(0, Math.floor(normalized)) : 0;
+
+    if (otpCountdownTimer) {
+      clearInterval(otpCountdownTimer);
+      otpCountdownTimer = null;
+    }
+
+    renderOtpCountdown();
+
+    if (otpSecondsRemaining <= 0) {
+      if (getOtpBtn) getOtpBtn.disabled = false;
+      return;
+    }
+
+    if (getOtpBtn) getOtpBtn.disabled = true;
+    otpCountdownTimer = setInterval(() => {
+      otpSecondsRemaining = Math.max(0, otpSecondsRemaining - 1);
+      renderOtpCountdown();
+      if (otpSecondsRemaining <= 0) {
+        clearInterval(otpCountdownTimer);
+        otpCountdownTimer = null;
+        if (getOtpBtn) getOtpBtn.disabled = false;
+      }
+    }, 1000);
+  }
+
   if (getOtpBtn) {
     getOtpBtn.addEventListener("click", async () => {
+      if (otpSecondsRemaining > 0) {
+        showSignupStatus(`Please wait ${otpSecondsRemaining} seconds before resending`, "error");
+        return;
+      }
+
       const email = (emailEl?.value || "").trim();
       if (!email) return showSignupStatus("Enter email first", "error");
+      if (!ensureAllowedDomainEmail()) return;
 
       try {
         getOtpBtn.disabled = true;
@@ -212,13 +372,16 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         const msg = await res.text();
+        const cooldownSeconds = parseOtpCooldownSeconds(msg);
 
         if (!res.ok) {
           showSignupStatus(msg || `Request failed (${res.status})`, "error");
+          if (cooldownSeconds > 0) startOtpCountdown(cooldownSeconds);
           return;
         }
 
         showSignupStatus(msg || "OTP request sent.", "success");
+        if (cooldownSeconds > 0) startOtpCountdown(cooldownSeconds);
 
         if (msg.toLowerCase().includes("otp sent") || msg.toLowerCase().includes("success")) {
           showOverlay();
@@ -226,7 +389,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (err) {
         showSignupStatus("Network error: " + err, "error");
       } finally {
-        getOtpBtn.disabled = false;
+        if (otpSecondsRemaining <= 0) getOtpBtn.disabled = false;
       }
     });
   }
@@ -237,6 +400,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const otp = getOtpValue();
 
       if (!email) return showSignupStatus("Enter email first", "error");
+      if (!ensureAllowedDomainEmail()) return;
       if (otp.length !== 6) return showSignupStatus("Enter 6-digit OTP", "error");
 
       try {
@@ -269,6 +433,21 @@ document.addEventListener("DOMContentLoaded", () => {
         showSignupStatus("Network error: " + err, "error");
       } finally {
         verifyOtpBtn.disabled = false;
+      }
+    });
+  }
+
+  if (companyEl?.value) {
+    refreshDepartmentsForCompany();
+  }
+
+  if (signupForm) {
+    signupForm.addEventListener("submit", (event) => {
+      const email = (emailEl?.value || "").trim();
+      if (!email) return;
+      if (!ensureAllowedDomainEmail()) {
+        event.preventDefault();
+        emailEl?.focus();
       }
     });
   }

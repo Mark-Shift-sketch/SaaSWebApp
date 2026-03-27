@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="csrf-token" content="{{ csrf_token() }}">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Developer Dashboard</title>
+	<style>
+		:root {
+			--bg: #f3f6fb;
+			--card: #ffffff;
+			--text: #1a1f36;
+			--muted: #5a6478;
+			--accent: #0f6aef;
+			--accent-dark: #0a4bb0;
+			--line: #e4e9f2;
+		}
+
+		* { box-sizing: border-box; }
+
+		body {
+			margin: 0;
+			min-height: 100vh;
+			font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+			background: linear-gradient(160deg, #eef3fb 0%, #f8fbff 60%, #f2f7ff 100%);
+			color: var(--text);
+			padding: 0;
+		}
+
+		.page-shell {
+			min-height: 100vh;
+			width: 100%;
+			padding: 20px;
+		}
+
+		.card {
+			width: 100%;
+			max-width: 1180px;
+			margin: 0 auto;
+			background: var(--card);
+			border: 1px solid var(--line);
+			border-radius: 16px;
+			box-shadow: 0 10px 35px rgba(18, 52, 95, 0.1);
+			padding: 24px;
+		}
+
+		.header-row {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			gap: 14px;
+			flex-wrap: wrap;
+		}
+
+		h1 {
+			margin: 0;
+			font-size: 1.6rem;
+		}
+
+		.subtitle {
+			margin: 8px 0 0;
+			color: var(--muted);
+		}
+
+		.meta {
+			margin-top: 20px;
+			padding: 14px;
+			border: 1px solid var(--line);
+			border-radius: 12px;
+			background: #fafcff;
+			color: var(--muted);
+		}
+
+		.meta strong {
+			color: var(--text);
+		}
+
+		.actions {
+			margin-top: 22px;
+			display: flex;
+			flex-wrap: wrap;
+			gap: 12px;
+		}
+
+		.btn {
+			display: inline-block;
+			text-decoration: none;
+			border-radius: 10px;
+			padding: 11px 16px;
+			font-weight: 600;
+			transition: background-color 0.2s ease, transform 0.2s ease;
+		}
+
+		.btn-primary {
+			background: var(--accent);
+			color: #fff;
+		}
+
+		.btn-primary:hover {
+			background: var(--accent-dark);
+			transform: translateY(-1px);
+		}
+
+		.btn-secondary {
+			background: #eef3ff;
+			color: #10326b;
+		}
+
+		.btn-secondary:hover {
+			background: #dde8ff;
+		}
+
+		.maintenance {
+			margin-top: 0;
+			padding: 16px;
+			border: 1px solid var(--line);
+			border-radius: 12px;
+			background: #f8fbff;
+		}
+
+		.maintenance h2 {
+			margin: 0 0 8px;
+			font-size: 1.1rem;
+		}
+
+		.maintenance-status {
+			display: inline-flex;
+			align-items: center;
+			padding: 4px 10px;
+			border-radius: 999px;
+			font-size: 0.85rem;
+			font-weight: 700;
+			margin-bottom: 10px;
+		}
+
+		.status-on {
+			background: #ffe8e6;
+			color: #a12315;
+		}
+
+		.status-off {
+			background: #e7f7ec;
+			color: #176a31;
+		}
+
+		.field-label {
+			display: block;
+			margin: 8px 0 6px;
+			font-weight: 600;
+			color: var(--text);
+		}
+
+		textarea {
+			width: 100%;
+			min-height: 86px;
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			padding: 10px;
+			font: inherit;
+			resize: vertical;
+		}
+
+		.helper {
+			margin-top: 8px;
+			color: var(--muted);
+			font-size: 0.9rem;
+		}
+
+		.maintenance-actions {
+			margin-top: 12px;
+			display: flex;
+			gap: 10px;
+			flex-wrap: wrap;
+		}
+
+		.maintenance-meta {
+			margin-top: 8px;
+			color: var(--muted);
+			font-size: 0.88rem;
+		}
+
+		.broadcast {
+			margin-top: 0;
+			padding: 16px;
+			border: 1px solid var(--line);
+			border-radius: 12px;
+			background: #fff;
+		}
+
+		.broadcast h2 {
+			margin: 0 0 8px;
+			font-size: 1.1rem;
+		}
+
+		.broadcast-meta {
+			margin-top: 8px;
+			color: var(--muted);
+			font-size: 0.88rem;
+		}
+
+		.dashboard-grid {
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+			gap: 16px;
+			margin-top: 20px;
+		}
+
+		.org-pause {
+			margin-top: 18px;
+			padding: 16px;
+			border: 1px solid var(--line);
+			border-radius: 12px;
+			background: #fff;
+		}
+
+		.org-pause h2 {
+			margin: 0 0 8px;
+			font-size: 1.1rem;
+		}
+
+		.org-row {
+			display: flex;
+			gap: 10px;
+			flex-wrap: wrap;
+			align-items: center;
+		}
+
+		.select-field {
+			flex: 1;
+			min-width: 240px;
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			padding: 10px;
+			font: inherit;
+			background: #fff;
+		}
+
+		.org-meta {
+			margin-top: 8px;
+			color: var(--muted);
+			font-size: 0.88rem;
+		}
+
+		@media (max-width: 980px) {
+			.page-shell {
+				padding: 16px;
+			}
+
+			.card {
+				padding: 18px;
+			}
+
+			.dashboard-grid {
+				grid-template-columns: 1fr;
+			}
+		}
+
+		@media (max-width: 560px) {
+			.page-shell {
+				padding: 10px;
+			}
+
+			h1 {
+				font-size: 1.35rem;
+			}
+
+			.subtitle {
+				font-size: 0.92rem;
+			}
+
+			.btn {
+				width: 100%;
+				text-align: center;
+			}
+		}
+	</style>
+</head>
+<body>
+	<div class="page-shell">
+	<section class="card">
+		<div class="header-row">
+			<div>
+				<h1>Developer Dashboard</h1>
+				<p class="subtitle">Company workspace setup and test access for development users.</p>
+			</div>
+		</div>
+
+		<div class="meta">
+			<div><strong>Signed in as:</strong> {{ email or "N/A" }}</div>
+			<div><strong>Current company:</strong> {{ company_name or "Not assigned" }}</div>
+		</div>
+
+		<div class="dashboard-grid">
+		<div class="maintenance">
+			<h2>System Maintenance Mode</h2>
+			<div id="maintenanceStatus" class="maintenance-status">Loading...</div>
+			<label class="field-label" for="maintenanceReason">Maintenance reason</label>
+			<textarea id="maintenanceReason" maxlength="500" placeholder="Example: System paused for maintenance, bug fix, and database update.">{{ maintenance_reason or "" }}</textarea>
+			<div class="helper">When enabled, normal users are paused with a maintenance message while Dev access remains available.</div>
+			<div class="maintenance-actions">
+				<button class="btn btn-primary" type="button" onclick="setMaintenanceMode(true)">Pause System</button>
+				<button class="btn btn-secondary" type="button" onclick="setMaintenanceMode(false)">Resume System</button>
+				<button class="btn btn-secondary" type="button" onclick="loadMaintenanceState()">Refresh Status</button>
+			</div>
+			<div id="maintenanceMeta" class="maintenance-meta"></div>
+		</div>
+
+		<div class="broadcast">
+			<h2>Global Notification Broadcast</h2>
+			<label class="field-label" for="broadcastTitle">Title</label>
+			<input id="broadcastTitle" type="text" maxlength="120" value="System Broadcast" style="width:100%;border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;" />
+			<label class="field-label" for="broadcastMessage">Message to all users</label>
+			<textarea id="broadcastMessage" maxlength="1000" placeholder="Example: The system will restart at 7:00 PM for maintenance and bug fixes."></textarea>
+			<div class="maintenance-actions">
+				<button class="btn btn-primary" type="button" onclick="sendGlobalBroadcast()">Send To All Users</button>
+			</div>
+			<div id="broadcastMeta" class="broadcast-meta"></div>
+		</div>
+		</div>
+
+		<div class="org-pause">
+			<h2>Pause Specific Organization</h2>
+			<p class="subtitle" style="margin-top:0;">Pause or resume one organization without affecting others.</p>
+			<div class="org-row">
+				<select id="orgPauseSelect" class="select-field">
+					<option value="">Loading organizations...</option>
+				</select>
+				<button class="btn btn-primary" type="button" onclick="setOrganizationPause(false)">Pause Organization</button>
+				<button class="btn btn-secondary" type="button" onclick="setOrganizationPause(true)">Resume Organization</button>
+				<button class="btn btn-secondary" type="button" onclick="loadOrganizationsForPauseControl()">Refresh List</button>
+			</div>
+			<div id="orgPauseMeta" class="org-meta"></div>
+		</div>
+
+		<div class="actions">
+			<a class="btn btn-primary" href="{{ url_for('company_register') }}">Register Company</a>
+			<a class="btn btn-secondary" href="{{ url_for('saas_admin_dashboard') }}">Open SaaS Admin</a>
+			<a class="btn btn-secondary" href="{{ url_for('bug_reports_dashboard') }}">View Bug Reports</a>
+			<a class="btn btn-secondary" href="{{ url_for('logout') }}">Log Out</a>
+		</div>
+	</section>
+	</div>
+
+	<script>
+		const maintenanceStatusEl = document.getElementById("maintenanceStatus");
+		const maintenanceReasonEl = document.getElementById("maintenanceReason");
+		const maintenanceMetaEl = document.getElementById("maintenanceMeta");
+		const broadcastTitleEl = document.getElementById("broadcastTitle");
+		const broadcastMessageEl = document.getElementById("broadcastMessage");
+		const broadcastMetaEl = document.getElementById("broadcastMeta");
+		const orgPauseSelectEl = document.getElementById("orgPauseSelect");
+		const orgPauseMetaEl = document.getElementById("orgPauseMeta");
+		const currentCompanyId = Number({{ company_id or 0 }});
+
+		function getCsrfToken() {
+			return document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
+		}
+
+		function renderMaintenanceState(state) {
+			const enabled = !!state.enabled;
+			maintenanceStatusEl.textContent = enabled ? "PAUSED" : "RUNNING";
+			maintenanceStatusEl.className = `maintenance-status ${enabled ? "status-on" : "status-off"}`;
+			maintenanceReasonEl.value = state.reason || "";
+
+			const updatedBy = state.updated_by ? ` by ${state.updated_by}` : "";
+			const updatedAt = state.updated_at ? ` at ${state.updated_at}` : "";
+			maintenanceMetaEl.textContent = `Last updated${updatedBy}${updatedAt}`;
+		}
+
+		async function loadMaintenanceState() {
+			try {
+				const res = await fetch("/api/dev/system-maintenance", {
+					method: "GET",
+					headers: { "Accept": "application/json" },
+				});
+				const data = await res.json();
+				if (!res.ok || !data.success) {
+					throw new Error(data.error || "Failed to load maintenance state");
+				}
+				renderMaintenanceState(data);
+			} catch (err) {
+				maintenanceStatusEl.textContent = "ERROR";
+				maintenanceStatusEl.className = "maintenance-status status-on";
+				maintenanceMetaEl.textContent = String(err && err.message ? err.message : err);
+			}
+		}
+
+		async function setMaintenanceMode(enabled) {
+			const reason = (maintenanceReasonEl.value || "").trim();
+			if (enabled && !reason) {
+				alert("Please provide a maintenance reason before pausing the system.");
+				maintenanceReasonEl.focus();
+				return;
+			}
+
+			try {
+				const csrfToken = getCsrfToken();
+				const res = await fetch("/api/dev/system-maintenance", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"Accept": "application/json",
+						...(csrfToken ? { "X-CSRFToken": csrfToken } : {}),
+					},
+					body: JSON.stringify({ enabled, reason }),
+				});
+				const data = await res.json();
+				if (!res.ok || !data.success) {
+					throw new Error(data.error || "Failed to update maintenance mode");
+				}
+				renderMaintenanceState(data);
+				alert(enabled ? "System is now paused." : "System is now running.");
+			} catch (err) {
+				alert(String(err && err.message ? err.message : err));
+			}
+		}
+
+		async function sendGlobalBroadcast() {
+			const title = (broadcastTitleEl.value || "").trim() || "System Broadcast";
+			const message = (broadcastMessageEl.value || "").trim();
+
+			if (!message) {
+				alert("Please enter a message to broadcast.");
+				broadcastMessageEl.focus();
+				return;
+			}
+
+			try {
+				const csrfToken = getCsrfToken();
+				const res = await fetch("/api/dev/system-broadcast", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"Accept": "application/json",
+						...(csrfToken ? { "X-CSRFToken": csrfToken } : {}),
+					},
+					body: JSON.stringify({ title, message }),
+				});
+				const data = await res.json();
+				if (!res.ok || !data.success) {
+					throw new Error(data.error || "Failed to send broadcast");
+				}
+
+				broadcastMetaEl.textContent = `Broadcast sent successfully at ${new Date().toLocaleString()}.`;
+				broadcastMessageEl.value = "";
+				alert("Broadcast notification sent to all users.");
+			} catch (err) {
+				broadcastMetaEl.textContent = String(err && err.message ? err.message : err);
+				alert(String(err && err.message ? err.message : err));
+			}
+		}
+
+		function renderOrganizationOptions(companies) {
+			if (!orgPauseSelectEl) return;
+			const list = Array.isArray(companies) ? companies : [];
+			if (!list.length) {
+				orgPauseSelectEl.innerHTML = '<option value="">No organizations available</option>';
+				return;
+			}
+
+			orgPauseSelectEl.innerHTML = list.map((c) => {
+				const id = Number(c.company_id || 0);
+				const active = Number(c.is_active || 0) === 1;
+				const status = active ? "Active" : "Paused";
+				const selected = currentCompanyId > 0 && currentCompanyId === id ? "selected" : "";
+				return `<option value="${id}" ${selected}>${c.company_name || "Organization"} (${status})</option>`;
+			}).join("");
+
+			if (!(currentCompanyId > 0 && list.some((c) => Number(c.company_id || 0) === currentCompanyId))) {
+				orgPauseSelectEl.value = String(list[0].company_id || "");
+			}
+		}
+
+		async function loadOrganizationsForPauseControl() {
+			try {
+				const res = await fetch("/api/saas/companies", {
+					method: "GET",
+					headers: { "Accept": "application/json" },
+				});
+				const data = await res.json();
+				if (!res.ok || !data.success) {
+					throw new Error(data.error || "Failed to load organizations");
+				}
+				renderOrganizationOptions(data.companies || []);
+				orgPauseMetaEl.textContent = "Organization list refreshed.";
+			} catch (err) {
+				orgPauseMetaEl.textContent = String(err && err.message ? err.message : err);
+			}
+		}
+
+		async function setOrganizationPause(shouldBeActive) {
+			const companyId = Number(orgPauseSelectEl?.value || 0);
+			if (companyId <= 0) {
+				alert("Please select an organization first.");
+				return;
+			}
+
+			try {
+				const csrfToken = getCsrfToken();
+				const res = await fetch(`/api/saas/companies/${companyId}/status`, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"Accept": "application/json",
+						...(csrfToken ? { "X-CSRFToken": csrfToken } : {}),
+					},
+					body: JSON.stringify({ is_active: !!shouldBeActive }),
+				});
+				const data = await res.json();
+				if (!res.ok || !data.success) {
+					throw new Error(data.error || "Failed to update organization status");
+				}
+				orgPauseMetaEl.textContent = shouldBeActive
+					? "Organization resumed successfully."
+					: "Organization paused successfully.";
+				await loadOrganizationsForPauseControl();
+			} catch (err) {
+				orgPauseMetaEl.textContent = String(err && err.message ? err.message : err);
+			}
+		}
+
+		renderMaintenanceState({
+			enabled: {{ 1 if maintenance_mode_enabled else 0 }},
+			reason: {{ (maintenance_reason or "")|tojson }},
+			updated_by: {{ (maintenance_updated_by or "")|tojson }},
+			updated_at: {{ (maintenance_updated_at or "")|tojson }}
+		});
+		loadOrganizationsForPauseControl();
+	</script>
+</body>
+</html>

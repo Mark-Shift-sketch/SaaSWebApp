@@ -128,6 +128,8 @@
       .sig-img {
         display: block;
         cursor: move;
+        image-rendering: -webkit-optimize-contrast;
+        image-rendering: crisp-edges;
       }
 
       .draw-layer {
@@ -182,6 +184,7 @@
       window.CURRENT_ACTOR_USER_ID = {{ session.get('user_id')|tojson }};
       window.CURRENT_ACTOR_POSITION_ID = {{ session.get('position_id')|tojson }};
       window.CURRENT_ACTOR_EMAIL = {{ session.get('email')|tojson }};
+      window.CURRENT_ACTOR_ROLE = {{ session.get('role')|tojson }};
     </script>
 
     <div class="topbar">
@@ -241,6 +244,23 @@
         <input id="sigUpload" type="file" accept="image/*" />
 
         <button class="btn btn-primary" id="saveBtn" type="button">Save</button>
+
+        <button
+          class="btn btn-primary"
+          id="saveMySigBtn"
+          type="button"
+        >
+          Save My Signature
+        </button>
+
+        <button
+          class="btn btn-gray"
+          id="useMySavedSigBtn"
+          type="button"
+          style="display: none"
+        >
+          Use My Saved Signature
+        </button>
 
         <a
           class="btn btn-gray"
@@ -390,9 +410,9 @@
 
       async function compressImageDataUrl(
         dataUrl,
-        maxW = 1400,
-        maxH = 1400,
-        quality = 0.85,
+        maxW = 2200,
+        maxH = 2200,
+        quality = 0.95,
       ) {
         return await new Promise((resolve, reject) => {
           const img = new Image();
@@ -405,7 +425,17 @@
             const c = document.createElement("canvas");
             c.width = w;
             c.height = h;
-            c.getContext("2d").drawImage(img, 0, 0, w, h);
+            const ctx = c.getContext("2d");
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = "high";
+            ctx.drawImage(img, 0, 0, w, h);
+
+            const srcIsPng = /^data:image\/png/i.test(String(dataUrl || ""));
+            if (srcIsPng) {
+              resolve(c.toDataURL("image/png"));
+              return;
+            }
+
             resolve(c.toDataURL("image/jpeg", quality));
           };
           img.onerror = reject;
@@ -432,6 +462,8 @@
             c.width = w;
             c.height = h;
             const ctx = c.getContext("2d", { willReadFrequently: true });
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = "high";
             ctx.clearRect(0, 0, w, h);
             ctx.drawImage(img, 0, 0, w, h);
 
@@ -471,17 +503,24 @@
         return (v || "").toString().trim().toLowerCase() || null;
       }
 
+      function normalizeRole(v) {
+        return (v || "").toString().trim().toLowerCase();
+      }
+
       const CURRENT_ACTOR = {
         userId: toIntOrNull(window.CURRENT_ACTOR_USER_ID),
         positionId: toIntOrNull(window.CURRENT_ACTOR_POSITION_ID),
         email: normalizeEmail(window.CURRENT_ACTOR_EMAIL),
       };
 
+      const CURRENT_ACTOR_ROLE = normalizeRole(window.CURRENT_ACTOR_ROLE);
+
       pdfjsLib.GlobalWorkerOptions.workerSrc =
         "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
       let pdfDoc = null;
-      let scale = 1.35;
+      let scale = 1.85;
+      let SAVED_SIGNATURE_DATA_URL = null;
 
       const pageMeta = [];
       let objects = [];
@@ -542,6 +581,7 @@
           objects = objects.filter((o) => o.id !== id);
           selectedEl.remove();
           selectedEl = null;
+          refreshMySignatureButtonState();
         }
 
         if (!selectedEl || !canEditElement(selectedEl)) return;
@@ -823,6 +863,7 @@
 
           objects = (data.annotations || []).map((o) => ({ ...o }));
           objects.forEach(renderObject);
+          refreshMySignatureButtonState();
         } catch (err) {
           console.warn("Could not load previous annotations.", err);
         }
@@ -878,6 +919,193 @@
         }
       }
 
+      function actorSignatureObjects() {
+        return objects.filter(
+          (o) =>
+            o &&
+            o.type === "image" &&
+            o.imageDataUrl &&
+            actorOwnsObject(o),
+        );
+      }
+
+      async function toPngDataUrl(dataUrl) {
+        return await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement("canvas");
+            c.width = Math.max(1, img.width);
+            c.height = Math.max(1, img.height);
+            const ctx = c.getContext("2d");
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = "high";
+            ctx.clearRect(0, 0, c.width, c.height);
+            ctx.drawImage(img, 0, 0);
+            resolve(c.toDataURL("image/png"));
+          };
+          img.onerror = reject;
+          img.src = dataUrl;
+        });
+      }
+
+      function resolveSignatureActorType() {
+        if (CURRENT_ACTOR_ROLE === "approver") return "approver";
+        if (CURRENT_ACTOR_ROLE === "reviewer") return "reviewer";
+        if (["admin", "superadmin", "assistantadmin", "dean"].includes(CURRENT_ACTOR_ROLE)) {
+          return "reviewer";
+        }
+        return null;
+      }
+
+      function refreshMySignatureButtonState() {
+        const saveBtn = document.getElementById("saveMySigBtn");
+        const useBtn = document.getElementById("useMySavedSigBtn");
+        if (!saveBtn || !useBtn) return;
+
+        const actorType = resolveSignatureActorType();
+        const hasSignature = actorSignatureObjects().length > 0;
+        const canRole = !window.IS_SIGNED && !!actorType;
+
+        if (!canRole) {
+          saveBtn.disabled = true;
+          useBtn.disabled = true;
+          useBtn.style.display = "none";
+          return;
+        }
+
+        saveBtn.disabled = !hasSignature;
+        useBtn.style.display = "inline-block";
+        useBtn.disabled = !SAVED_SIGNATURE_DATA_URL;
+      }
+
+      async function loadMySavedSignature() {
+        try {
+          const res = await fetch("/api/annotations/my-signature", {
+            cache: "no-store",
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) return;
+          if (data.has_signature && data.signature_png_base64) {
+            SAVED_SIGNATURE_DATA_URL = String(data.signature_png_base64);
+          }
+        } catch (_) {
+          // Keep silent; user can still draw/upload.
+        }
+        refreshMySignatureButtonState();
+      }
+
+      function addSignatureToActivePage(imageDataUrl) {
+        const pageIndex = getActivePageIndex();
+        const place = createVisiblePlacement(pageIndex, 0.25, 60);
+        const obj = {
+          id: uid(),
+          type: "image",
+          page: pageIndex,
+          x: place.x,
+          y: place.y,
+          w: place.w,
+          h: place.h,
+          imageDataUrl,
+          actor_user_id: CURRENT_ACTOR.userId,
+          actor_position_id: CURRENT_ACTOR.positionId,
+          actor_email: CURRENT_ACTOR.email,
+        };
+        objects.push(obj);
+        renderObject(obj);
+        refreshMySignatureButtonState();
+      }
+
+      async function saveMySignature() {
+        if (window.IS_SIGNED) {
+          showAnnotateStatus("This document is already saved/final. Open View PDF.", "error");
+          return;
+        }
+
+        const who = resolveSignatureActorType();
+        if (!who) {
+          showAnnotateStatus("Your role cannot save a reviewer/approver signature here.", "error");
+          return;
+        }
+
+        const mySignatures = actorSignatureObjects();
+        if (!mySignatures.length) {
+          showAnnotateStatus("Add your signature first (Draw Signature or Upload Signature).", "error");
+          return;
+        }
+
+        const newestSignature = mySignatures[mySignatures.length - 1];
+        let signaturePng = newestSignature.imageDataUrl;
+        if (!String(signaturePng).startsWith("data:image/png;base64,")) {
+          signaturePng = await toPngDataUrl(signaturePng);
+        }
+
+        const csrf = getCsrfToken();
+        const res = await fetch(`/api/request/${REQUEST_ID}/annotate`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRFToken": csrf,
+            "X-CSRF-Token": csrf,
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          body: JSON.stringify({
+            who,
+            signature_png_base64: signaturePng,
+          }),
+        });
+
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(out.error || "Signature save failed");
+        }
+
+        SAVED_SIGNATURE_DATA_URL = signaturePng;
+        refreshMySignatureButtonState();
+
+        showAnnotateStatus("Signature saved. You can now use your signature.", "success");
+      }
+
+      async function maybePromptSaveMySignature() {
+        if (window.IS_SIGNED) return;
+        refreshMySignatureButtonState();
+
+        if (!actorSignatureObjects().length) return;
+        const shouldSave = window.confirm("Save your signature?");
+        if (!shouldSave) return;
+
+        try {
+          await saveMySignature();
+        } catch (err) {
+          showAnnotateStatus("Failed to save your signature: " + err.message, "error");
+        }
+      }
+
+      function setupMySignatureAction() {
+        const btn = document.getElementById("saveMySigBtn");
+        const useBtn = document.getElementById("useMySavedSigBtn");
+        if (!btn || !useBtn) return;
+
+        btn.addEventListener("click", async () => {
+          try {
+            await saveMySignature();
+          } catch (err) {
+            showAnnotateStatus("Failed to save your signature: " + err.message, "error");
+          }
+        });
+
+        useBtn.addEventListener("click", () => {
+          if (!SAVED_SIGNATURE_DATA_URL) {
+            showAnnotateStatus("No saved signature yet. Save one first.", "error");
+            return;
+          }
+          addSignatureToActivePage(SAVED_SIGNATURE_DATA_URL);
+          showAnnotateStatus("Saved signature added to this request.", "success");
+        });
+
+        refreshMySignatureButtonState();
+      }
+
       // =========================
       // PDF Rendering + Draw Layers
       // =========================
@@ -886,6 +1114,7 @@
         try {
           const loadingTask = pdfjsLib.getDocument(PDF_URL);
           pdfDoc = await loadingTask.promise;
+          const outputScale = window.devicePixelRatio || 1;
 
           pagesDiv.innerHTML = "";
 
@@ -900,16 +1129,20 @@
 
             const canvas = document.createElement("canvas");
             const ctx = canvas.getContext("2d");
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
+            canvas.width = Math.floor(viewport.width * outputScale);
+            canvas.height = Math.floor(viewport.height * outputScale);
+            canvas.style.width = `${viewport.width}px`;
+            canvas.style.height = `${viewport.height}px`;
 
             const overlay = document.createElement("div");
             overlay.className = "overlay";
 
             const drawLayer = document.createElement("canvas");
             drawLayer.className = "draw-layer";
-            drawLayer.width = viewport.width;
-            drawLayer.height = viewport.height;
+            drawLayer.width = Math.floor(viewport.width * outputScale);
+            drawLayer.height = Math.floor(viewport.height * outputScale);
+            drawLayer.style.width = `${viewport.width}px`;
+            drawLayer.style.height = `${viewport.height}px`;
             drawLayer.dataset.pageIndex = String(i - 1);
 
             wrap.appendChild(canvas);
@@ -924,7 +1157,16 @@
               pdfHeight: baseViewport.height,
             };
 
-            await page.render({ canvasContext: ctx, viewport }).promise;
+            await page
+              .render({
+                canvasContext: ctx,
+                viewport,
+                transform:
+                  outputScale !== 1
+                    ? [outputScale, 0, 0, outputScale, 0, 0]
+                    : null,
+              })
+              .promise;
           }
 
           if (!window.IS_SIGNED) await loadSaved();
@@ -975,9 +1217,9 @@
           const place = createVisiblePlacement(pageIndex, 0.25, 60);
           const compressed = await compressImageDataUrl(
             reader.result,
+            1600,
             900,
-            400,
-            0.75,
+            0.98,
           );
 
           const obj = {
@@ -996,6 +1238,8 @@
 
           objects.push(obj);
           renderObject(obj);
+          refreshMySignatureButtonState();
+          maybePromptSaveMySignature();
         };
         reader.readAsDataURL(f);
         e.target.value = "";
@@ -1118,7 +1362,9 @@
 
           objects.push(obj);
           renderObject(obj);
+          refreshMySignatureButtonState();
           closeSigModal();
+          maybePromptSaveMySignature();
         });
 
       sigModal.addEventListener("click", (e) => {
@@ -1397,6 +1643,8 @@
         document.getElementById("drawModeBtn").disabled = true;
         document.getElementById("drawSigBtn").disabled = true;
         document.getElementById("saveBtn").disabled = true;
+        document.getElementById("saveMySigBtn").disabled = true;
+        document.getElementById("useMySavedSigBtn").disabled = true;
         document.getElementById("sigUpload").disabled = true;
         document.getElementById("uploadSigLabel").style.opacity = "0.55";
         document.getElementById("uploadSigLabel").style.cursor = "not-allowed";
@@ -1405,9 +1653,11 @@
       // init
       clearSigCanvas();
       lockUiIfSigned();
+      setupMySignatureAction();
 
       (async () => {
         await renderPDF();
+        await loadMySavedSignature();
         bindDrawEvents();
       })();
     </script>

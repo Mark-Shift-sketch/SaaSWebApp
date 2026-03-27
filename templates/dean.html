@@ -50,6 +50,7 @@
           <span>Notifications</span>
           <span id="dean-mobile-notification-badge" class="badge-nav" style="display:none;">0</span>
         </a>
+        <a onclick="switchView('history'); closeMobileMenu();">History</a>
         <a onclick="switchView('settings'); closeMobileMenu();">Settings</a>
         <a href="/logout" class="mobile-nav-logout">Logout</a>
       </nav>
@@ -91,6 +92,13 @@
           </div>
           <span id="dean-notification-badge" class="badge-nav" style="display:none;">0</span>
         </a>
+<!-- Soon will Implemented
+        <a id="nav-history" class="nav-item" onclick="switchView('history')">
+          <div class="nav-item-content">
+            <i data-lucide="clock"></i>
+            <span>History</span>
+          </div>
+        </a> -->
 
         <a id="nav-settings" class="nav-item" onclick="switchView('settings')">
           <div class="nav-item-content">
@@ -101,11 +109,10 @@
       </nav>
 
       <div class="sidebar-footer">
-        <div style="padding: 0 20px 10px 20px; color: #9ca3af; font-size: 12px">
-          Logged in as:<br />
-          <strong style="color: white">{{ session['role'] }}</strong><br />
-          <span style="color: #6b7280">{{ session['position'] }}</span>
-        </div>
+      
+        <button class="footer-bug-btn" onclick="showSection('bugs')" id="nav-bugs">
+          <i data-lucide="bug"></i> Report Bug
+        </button>
         <a href="/logout" class="logout-link">
           <i
             class="fa-solid fa-arrow-right-from-bracket"
@@ -307,6 +314,100 @@
         <header class="top-header">
           <div class="header-title"><h2>Notifications</h2></div>
           <div class="header-actions">
+      <!-- HISTORY -->
+      <div id="view-history" class="view-section" style="display: none">
+        <header class="top-header">
+          <div class="header-title">
+            <h2>History</h2>
+            <p>Approved / Rejected request history</p>
+          </div>
+
+          <div class="header-actions">
+            <div class="date-widget">
+              <i class="fa-regular fa-calendar" style="margin-right: 8px"></i>
+              <span class="current-date-display"></span>
+            </div>
+          </div>
+        </header>
+
+        <div class="content-scroll custom-scrollbar">
+          <div class="card-container">
+            <div class="table-header">
+              <div class="table-title">
+                <h3>Request Actions</h3>
+                <span class="count-badge" id="history-count">
+                  {{ history_rows|length if history_rows else 0 }}
+                </span>
+              </div>
+
+              <div class="table-actions">
+                <div class="search-box">
+                  <i class="fa-solid fa-search"></i>
+                  <input
+                    type="text"
+                    id="history-search"
+                    placeholder="Search history..."
+                    class="search-input"
+                    oninput="filterHistory()"
+                  />
+                </div>
+
+                <select
+                  id="history-filter"
+                  class="filter-select"
+                  onchange="filterHistory()"
+                >
+                  <option value="">All</option>
+                  <option value="APPROVED">Approved</option>
+                  <option value="REJECTED">Rejected</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Request ID</th>
+                    <th>Action</th>
+                    <th>By</th>
+                    <th>Message</th>
+                    <th>Date</th>
+                  </tr>
+                </thead>
+
+                <tbody id="history-body">
+                  {% if history_rows %} {% for h in history_rows %}
+                  <tr
+                    class="history-row"
+                    data-action="{{ (h.action or '')|upper }}"
+                  >
+                    <td>REQ#{{ h.request_id }}</td>
+                    <td>
+                      <span class="status-badge status-{{ h.action|lower }}">
+                        {{ h.action }}
+                      </span>
+                    </td>
+                    <td>{{ h.actor_email or '-' }}</td>
+                    <td>{{ h.message or '-' }}</td>
+                    <td>{{ h.created_at }}</td>
+                  </tr>
+                  {% endfor %} {% else %}
+                  <tr>
+                    <td
+                      colspan="5"
+                      style="text-align: center; color: #6b7280; padding: 20px"
+                    >
+                      No history yet.
+                    </td>
+                  </tr>
+                  {% endif %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
             <div class="date-widget">
               <i class="fa-regular fa-calendar" style="margin-right: 8px"></i>
               <span class="current-date-display"></span>

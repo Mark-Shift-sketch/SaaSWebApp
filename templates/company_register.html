@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register Company</title>
+    <link rel="stylesheet" href="/static/login.css">
+</head>
+<body>
+    <div class="page-shell">
+        <div class="container">
+            <aside class="logo-side">
+                <div class="brand-content">
+                    <img class="logo" src="/static/PHINMAEd_Logo.png" alt="Logo">
+                    <h1>Tenant Onboarding</h1>
+                    <p class="portal">Create isolated organization workspace</p>
+                </div>
+            </aside>
+
+            <section class="form-side">
+                <h2 class="title">Register Organization</h2>
+                <p class="subtitle">Set up company, admin account, and initial department</p>
+                <div class="heading-line"></div>
+
+                {% if message %}
+                    <p class="em">{{ message }}</p>
+                {% endif %}
+
+                <form action="{{ url_for('company_register') }}" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                    <label for="company_name" class="field-label">Company Name</label>
+                    <div class="input-wrap">
+                        <input id="company_name" type="text" name="company_name" placeholder="Acme Corp" required>
+                    </div>
+
+                    <label for="admin_email" class="field-label">Admin Email</label>
+                    <div class="input-wrap">
+                        <input id="admin_email" type="email" name="admin_email" placeholder="admin@company.com" required>
+                    </div>
+
+                    <label for="first_department" class="field-label">Initial Department</label>
+                    <div class="input-wrap">
+                        <input id="first_department" type="text" name="first_department" placeholder="IT" value="General" required>
+                    </div>
+
+                    <label for="pass" class="field-label">Password</label>
+                    <div class="input-wrap">
+                        <input id="pass" type="password" name="pass" required>
+                    </div>
+
+                    <label for="cpass" class="field-label">Confirm Password</label>
+                    <div class="input-wrap">
+                        <input id="cpass" type="password" name="cpass" required>
+                    </div>
+
+                    <button type="submit">Create Organization</button>
+
+                    <div class="sign" style="margin-top: 12px;">
+                        <p><a href="{{ url_for('login') }}" class="a">Back to Login</a></p>
+                    </div>
+                </form>
+            </section>
+        </div>
+    </div>
+</body>
+</html>

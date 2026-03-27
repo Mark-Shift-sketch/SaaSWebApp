@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchNotifications();
     startUserAutoRefresh();
     bindFileInputValidation();
+    bindBugReportSubmitHandler();
     bindNewRequestSubmitHandler();
     initTemplateEditorMessageBridge();
     initTemplateEditorTabFromQuery();
@@ -175,7 +176,8 @@ async function fetchRequests() {
 
 function normalizeStatusName(value) {
     return String(value || '').trim().toLowerCase();
-}
+} 
+
 
 function parseRequestTimestamp(raw) {
     const text = String(raw || '').trim();
@@ -572,11 +574,6 @@ function bindNewRequestSubmitHandler() {
         const fileInput = form.querySelector('input[name="file"]');
         const selectedFile = fileInput && fileInput.files ? fileInput.files[0] : null;
 
-        if (selectedMode === 'FILLABLE' && selectedFile) {
-            showSystemStatus('For fillable requests, use the representative uploaded template form only. Remove the manual file upload.');
-            return;
-        }
-
         if (selectedFile) {
             const maxSize = 20 * 1024 * 1024;
             if (selectedFile.size > maxSize) {
@@ -819,10 +816,32 @@ function getTemplatePageForBlock(block) {
     return Math.floor(raw) + 1;
 }
 
+function getTemplateOverlayPosition(block) {
+    const box = block?.pdf_overlay?.box || {};
+    const y = Number(box?.y);
+    const x = Number(box?.x);
+    return {
+        y: Number.isFinite(y) ? y : Number.POSITIVE_INFINITY,
+        x: Number.isFinite(x) ? x : Number.POSITIVE_INFINITY,
+    };
+}
+
 function getBlocksForSelectedTemplatePage(blocks, selectedPage) {
     const page = Number.isInteger(selectedPage) && selectedPage > 0 ? selectedPage : 1;
     const normalizedBlocks = Array.isArray(blocks) ? blocks : [];
-    return normalizedBlocks.filter((block) => getTemplatePageForBlock(block) === page);
+    const pageBlocks = normalizedBlocks.filter((block) => getTemplatePageForBlock(block) === page);
+
+    // Match representative layout by ordering controls in template placement order.
+    return pageBlocks
+        .map((block, idx) => ({ block, idx }))
+        .sort((a, b) => {
+            const posA = getTemplateOverlayPosition(a.block);
+            const posB = getTemplateOverlayPosition(b.block);
+            if (posA.y !== posB.y) return posA.y - posB.y;
+            if (posA.x !== posB.x) return posA.x - posB.x;
+            return a.idx - b.idx;
+        })
+        .map((entry) => entry.block);
 }
 
 function updateTemplateCopyIndicator() {
@@ -1356,15 +1375,12 @@ async function checkTemplate() {
 
         if (msg) {
             msg.textContent = hasFormSchema
-                ? 'Fill the representative uploaded template form. Click Fill Form.'
-                : 'Fill the representative uploaded template form. Click Fill Form.';
+                ? 'Fill the representative uploaded template form. Click Fill Form. You may also attach an optional PDF.'
+                : 'Fill the representative uploaded template form. Click Fill Form. You may also attach an optional PDF.';
         }
         if (amountInput) amountInput.readOnly = false;
-        if (fileInput) {
-            fileInput.value = '';
-            fileInput.required = false;
-        }
-        if (fileInputGroup) fileInputGroup.style.display = 'none';
+        if (fileInput) fileInput.required = false;
+        if (fileInputGroup) fileInputGroup.style.display = '';
     } else {
         if (msg) msg.textContent = 'You may download the PDF template and attach it (optional).';
         if (btnDownload) btnDownload.href = `/download_template/${typeId}`;
@@ -2180,15 +2196,78 @@ function markAllRead() {
 }
 
 function showSection(section) {
-    ['dashboard', 'notifications', 'history', 'settings'].forEach(s => {
+    ['dashboard', 'notifications', 'history', 'settings', 'bugs'].forEach(s => {
         document.getElementById(`section-${s}`).classList.add('hidden');
     });
     document.getElementById(`section-${section}`).classList.remove('hidden');
 
-    document.querySelectorAll('.sidebar-nav a').forEach(link => link.classList.remove('active'));
-    document.getElementById(`nav-${section}`).classList.add('active');
+    document.querySelectorAll('.sidebar-nav a, .sidebar-footer button').forEach(link => link.classList.remove('active'));
+    document.getElementById(`nav-${section}`)?.classList.add('active');
 
     document.getElementById('page-title').textContent = section.charAt(0).toUpperCase() + section.slice(1);
+}
+
+function bindBugReportSubmitHandler() {
+    const form = document.getElementById('bug-report-form');
+    if (!form) return;
+
+    const imageInput = document.getElementById('bug-image');
+    const descInput = document.getElementById('bug-description');
+
+    if (imageInput) {
+        imageInput.addEventListener('change', () => {
+            const f = imageInput.files && imageInput.files[0] ? imageInput.files[0] : null;
+            if (!f) return;
+            const maxBytes = 5 * 1024 * 1024;
+            if (f.size > maxBytes) {
+                showSystemStatus('Image is too large. Maximum size is 5MB.');
+                imageInput.value = '';
+                return;
+            }
+
+            const okTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+            if (f.type && !okTypes.includes(String(f.type).toLowerCase())) {
+                showSystemStatus('Supported image formats: PNG, JPG, JPEG, WEBP, GIF.');
+                imageInput.value = '';
+            }
+        });
+    }
+
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+
+        const description = String(descInput?.value || '').trim();
+        if (description.length < 5) {
+            showSystemStatus('Please provide a clear bug description.');
+            descInput?.focus();
+            return;
+        }
+
+        const formData = new FormData(form);
+        const csrfToken = String(document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '').trim();
+
+        try {
+            const res = await fetch('/api/bugs/report', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    ...(csrfToken ? { 'X-CSRFToken': csrfToken } : {}),
+                },
+                body: formData,
+            });
+
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+                showSystemStatus(data.error || 'Failed to submit bug report.');
+                return;
+            }
+
+            showSystemStatus(data.message || 'Bug report submitted successfully.');
+            form.reset();
+        } catch (err) {
+            showSystemStatus('Failed to submit bug report.');
+        }
+    });
 }
 
 function filterRequests(type) {

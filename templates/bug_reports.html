@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bug Reports</title>
+    <style>
+        :root {
+            --bg: #f4f7fb;
+            --card: #ffffff;
+            --line: #dbe3f0;
+            --text: #182033;
+            --muted: #5f6d84;
+            --primary: #165ef0;
+            --primary-dark: #0b44b7;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .shell {
+            max-width: 1180px;
+            margin: 0 auto;
+            padding: 22px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.6rem;
+        }
+
+        .subtitle {
+            margin: 6px 0 0;
+            color: var(--muted);
+            font-size: 0.92rem;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-block;
+            text-decoration: none;
+            border-radius: 10px;
+            padding: 10px 14px;
+            font-weight: 600;
+            border: 0;
+            cursor: pointer;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: #fff;
+        }
+
+        .btn-primary:hover { background: var(--primary-dark); }
+
+        .btn-soft {
+            background: #e9f0ff;
+            color: #1d3f81;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 14px;
+            overflow: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 900px;
+        }
+
+        th, td {
+            border-bottom: 1px solid var(--line);
+            text-align: left;
+            padding: 10px 8px;
+            vertical-align: top;
+        }
+
+        th {
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            color: var(--muted);
+            font-size: 0.78rem;
+        }
+
+        .desc {
+            max-width: 460px;
+            white-space: pre-wrap;
+            line-height: 1.45;
+        }
+
+        .thumb-wrap {
+            width: 140px;
+            height: 90px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            overflow: hidden;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: #fff;
+        }
+
+        .thumb-wrap img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .empty {
+            color: var(--muted);
+            padding: 14px 8px;
+        }
+
+        @media (max-width: 760px) {
+            .header { flex-direction: column; align-items: flex-start; }
+            .toolbar { width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <div class="header">
+            <div>
+                <h1>Reported Bugs</h1>
+                <p class="subtitle">Signed in as {{ email or "N/A" }}. Review all submitted bug reports.</p>
+            </div>
+            <div class="toolbar">
+                <a class="btn btn-soft" href="{{ url_for('dev_dashboard') }}">Developer Home</a>
+                <a class="btn btn-soft" href="{{ url_for('saas_admin_dashboard') }}">SaaS Admin</a>
+                <a class="btn btn-primary" href="{{ url_for('logout') }}">Logout</a>
+            </div>
+        </div>
+
+        <section class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>When</th>
+                        <th>Reporter</th>
+                        <th>Company</th>
+                        <th>Description</th>
+                        <th>Image</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% if bug_reports %}
+                        {% for bug in bug_reports %}
+                        <tr>
+                            <td>{{ bug.id }}</td>
+                            <td>{{ bug.created_at }}</td>
+                            <td>
+                                <div><strong>{{ bug.reporter_email }}</strong></div>
+                                <div class="subtitle" style="margin-top:3px;">Role: {{ bug.reporter_role or 'N/A' }}</div>
+                            </td>
+                            <td>
+                                {% if bug.company_name %}
+                                    {{ bug.company_name }}
+                                {% elif bug.company_id %}
+                                    Company #{{ bug.company_id }}
+                                {% else %}
+                                    N/A
+                                {% endif %}
+                            </td>
+                            <td class="desc">{{ bug.description }}</td>
+                            <td>
+                                {% if bug.has_image %}
+                                    <a class="thumb-wrap" target="_blank" href="{{ url_for('bug_report_image', report_id=bug.id) }}">
+                                        <img src="{{ url_for('bug_report_image', report_id=bug.id) }}" alt="Bug screenshot {{ bug.id }}" />
+                                    </a>
+                                {% else %}
+                                    <span class="empty">No image</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                        <tr>
+                            <td colspan="6" class="empty">No bug reports found.</td>
+                        </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </section>
+    </div>
+</body>
+</html>

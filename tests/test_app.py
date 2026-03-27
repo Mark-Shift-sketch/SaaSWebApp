@@ -290,3 +290,85 @@ def test_reset_password_invalid_token_message(client):
     assert r.status_code == 200
     body = r.get_data(as_text=True)
     assert "Invalid reset link" in body
+
+
+def test_check_company_user_seat_capacity_blocks_when_limit_reached():
+    import main
+
+    class _Cursor:
+        def __init__(self):
+            self._last_query = ""
+
+        def execute(self, query, params=None):
+            self._last_query = " ".join(str(query).split()).lower()
+
+        def fetchone(self):
+            if "from tenant_subscriptions" in self._last_query:
+                return {
+                    "plan_name": "FREE",
+                    "subscription_status": "ACTIVE",
+                    "seats_limit": 1,
+                    "requests_limit": 200,
+                }
+            if "count(*) as count from users" in self._last_query:
+                return {"count": 1}
+            return {}
+
+    ok, msg = main.check_company_user_seat_capacity(_Cursor(), 10)
+    assert ok is False
+    assert "Seat limit reached" in msg
+
+
+def test_check_company_request_capacity_blocks_when_monthly_limit_reached():
+    import main
+
+    class _Cursor:
+        def __init__(self):
+            self._last_query = ""
+
+        def execute(self, query, params=None):
+            self._last_query = " ".join(str(query).split()).lower()
+
+        def fetchone(self):
+            if "from tenant_subscriptions" in self._last_query:
+                return {
+                    "plan_name": "FREE",
+                    "subscription_status": "ACTIVE",
+                    "seats_limit": 10,
+                    "requests_limit": 2,
+                }
+            if "from requests" in self._last_query and "count(*) as count" in self._last_query:
+                return {"count": 2}
+            return {}
+
+    ok, msg = main.check_company_request_capacity(_Cursor(), 10)
+    assert ok is False
+    assert "Monthly request limit reached" in msg
+
+
+def test_check_company_capacity_rejects_inactive_subscription():
+    import main
+
+    class _Cursor:
+        def __init__(self):
+            self._last_query = ""
+
+        def execute(self, query, params=None):
+            self._last_query = " ".join(str(query).split()).lower()
+
+        def fetchone(self):
+            if "from tenant_subscriptions" in self._last_query:
+                return {
+                    "plan_name": "PRO",
+                    "subscription_status": "SUSPENDED",
+                    "seats_limit": 100,
+                    "requests_limit": 5000,
+                }
+            return {}
+
+    user_ok, user_msg = main.check_company_user_seat_capacity(_Cursor(), 10)
+    req_ok, req_msg = main.check_company_request_capacity(_Cursor(), 10)
+    assert user_ok is False
+    assert req_ok is False
+    assert "Subscription is not active" in user_msg
+    assert "Subscription is not active" in req_msg

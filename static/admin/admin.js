@@ -176,6 +176,9 @@ function switchView(viewName, pushUrl = true) {
   if (viewName === "reports") {
     requestAnimationFrame(() => loadreports());
   }
+  if (viewName === "budgetmanage") {
+    requestAnimationFrame(() => loadBudgetManagement());
+  }
   if (viewName === "budgetreports") {
     requestAnimationFrame(() => loadBudgetReports());
   }
@@ -1579,8 +1582,250 @@ const budgetReportState = {
   studentTotalCost: 0,
   departmentTotalCost: 0,
   studentDepartmentTotalCost: 0,
+  studentAvailableTotal: 0,
+  departmentAvailableTotal: 0,
   records: [],
 };
+
+const budgetManagementState = {
+  initialized: false,
+  budgetTypes: [],
+  departments: [],
+};
+
+async function fetchBudgetTypes() {
+  const res = await fetch("/api/budget/types", {
+    method: "GET",
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.success === false) {
+    throw new Error(data.error || data.message || "Failed to load budget types");
+  }
+  return Array.isArray(data.items) ? data.items : [];
+}
+
+async function fetchBudgetDepartments() {
+  const res = await fetch("/api/budget/departments", {
+    method: "GET",
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.success === false) {
+    throw new Error(data.error || data.message || "Failed to load departments");
+  }
+  return Array.isArray(data.items) ? data.items : [];
+}
+
+function renderBudgetTypeSelect(items) {
+  const select = document.getElementById("budgetTransferType");
+  if (!select) return;
+  const options = (Array.isArray(items) ? items : [])
+    .map((item) => `<option value="${Number(item.id)}">${escapeHtml(String(item.type_name || ""))}</option>`)
+    .join("");
+  select.innerHTML = `<option value="" disabled selected>Select Budget Type</option>${options}`;
+}
+
+function renderBudgetDepartmentSelect(items) {
+  const select = document.getElementById("budgetTransferDepartment");
+  if (!select) return;
+  const options = (Array.isArray(items) ? items : [])
+    .map((item) => `<option value="${escapeHtml(String(item.department || ""))}">${escapeHtml(String(item.department || ""))}</option>`)
+    .join("");
+  select.innerHTML = `<option value="" disabled selected>Select Department</option>${options}`;
+}
+
+function renderBudgetTypeTable(items) {
+  const tbody = document.getElementById("budgetTypeTableBody");
+  if (!tbody) return;
+
+  const rows = (Array.isArray(items) ? items : [])
+    .map((item) => {
+      const id = Number(item.id);
+      const name = String(item.type_name || "").trim();
+      const created = String(item.created_at || "-");
+      return `
+        <tr>
+          <td>${escapeHtml(name || "-")}</td>
+          <td>${escapeHtml(created)}</td>
+          <td>
+            <div class="action-group">
+              <button class="action-icon-btn" title="Edit" onclick="editBudgetType(${id}, '${escapeHtml(name)}')">
+                <i class="fa-regular fa-pen-to-square"></i>
+              </button>
+              <button class="action-icon-btn icon-delete" title="Delete" onclick="deleteBudgetType(${id}, '${escapeHtml(name)}')">
+                <i class="fa-regular fa-trash-can"></i>
+              </button>
+            </div>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  tbody.innerHTML = rows || `
+    <tr>
+      <td colspan="3" style="text-align:center;color:#64748b;">No budget types found.</td>
+    </tr>
+  `;
+}
+
+async function loadBudgetManagement() {
+  const view = document.getElementById("view-budgetmanage");
+  if (!view) return;
+
+  try {
+    const [budgetTypes, departments] = await Promise.all([fetchBudgetTypes(), fetchBudgetDepartments()]);
+    budgetManagementState.budgetTypes = budgetTypes;
+    budgetManagementState.departments = departments;
+    renderBudgetTypeSelect(budgetTypes);
+    renderBudgetDepartmentSelect(departments);
+    renderBudgetTypeTable(budgetTypes);
+    budgetManagementState.initialized = true;
+  } catch (err) {
+    console.error("Budget management load error:", err);
+    openSysPopup("Error", err.message || "Failed to load budget management.", false);
+  }
+}
+
+async function submitBudgetTransfer(event) {
+  if (event) event.preventDefault();
+  const department = String(document.getElementById("budgetTransferDepartment")?.value || "").trim();
+  const budgetTypeId = String(document.getElementById("budgetTransferType")?.value || "").trim();
+  const amount = Number(document.getElementById("budgetTransferAmount")?.value || 0);
+
+  if (!department || !budgetTypeId || !Number.isFinite(amount) || amount <= 0) {
+    openSysPopup("Required", "Please select department, budget type, and valid amount.", false);
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/budget/transfer", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": getCsrfToken(),
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        department,
+        budget_type_id: Number(budgetTypeId),
+        amount,
+      }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      throw new Error(data.error || data.message || "Failed to send budget");
+    }
+
+    openSysPopup("Success", data.message || "Budget sent successfully.", true);
+    const form = document.getElementById("budgetTransferForm");
+    if (form) form.reset();
+    await loadBudgetManagement();
+
+    const canAccessBudgetReports = Boolean(document.getElementById("nav-budgetreports"));
+    if (canAccessBudgetReports && typeof loadBudgetReports === "function") {
+      await loadBudgetReports();
+    }
+  } catch (err) {
+    console.error("submitBudgetTransfer failed:", err);
+    openSysPopup("Error", err.message || "Failed to send budget.", false);
+  }
+}
+
+async function createBudgetType(event) {
+  if (event) event.preventDefault();
+  const input = document.getElementById("budgetTypeName");
+  const typeName = String(input?.value || "").trim();
+  if (!typeName) {
+    openSysPopup("Required", "Please enter budget type name.", false);
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/budget/types", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": getCsrfToken(),
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ type_name: typeName }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      throw new Error(data.error || data.message || "Failed to create budget type");
+    }
+
+    if (input) input.value = "";
+    openSysPopup("Success", data.message || "Budget type created.", true);
+    await loadBudgetManagement();
+  } catch (err) {
+    console.error("createBudgetType failed:", err);
+    openSysPopup("Error", err.message || "Failed to create budget type.", false);
+  }
+}
+
+async function editBudgetType(typeId, currentName) {
+  const nextName = window.prompt("Enter new budget type name:", String(currentName || ""));
+  if (nextName === null) return;
+  const normalized = String(nextName).trim();
+  if (!normalized) {
+    openSysPopup("Required", "Budget type name is required.", false);
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/budget/types/${Number(typeId)}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": getCsrfToken(),
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ type_name: normalized }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      throw new Error(data.error || data.message || "Failed to update budget type");
+    }
+    openSysPopup("Success", data.message || "Budget type updated.", true);
+    await loadBudgetManagement();
+  } catch (err) {
+    console.error("editBudgetType failed:", err);
+    openSysPopup("Error", err.message || "Failed to update budget type.", false);
+  }
+}
+
+function deleteBudgetType(typeId, typeName) {
+  openConfirm(
+    "Delete Budget Type",
+    `Delete budget type "${typeName}"?`,
+    async () => {
+      try {
+        const res = await fetch(`/api/budget/types/${Number(typeId)}`, {
+          method: "DELETE",
+          headers: {
+            "X-CSRFToken": getCsrfToken(),
+          },
+          credentials: "same-origin",
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.success === false) {
+          throw new Error(data.error || data.message || "Failed to delete budget type");
+        }
+        openSysPopup("Success", data.message || "Budget type deleted.", true);
+        await loadBudgetManagement();
+      } catch (err) {
+        console.error("deleteBudgetType failed:", err);
+        openSysPopup("Error", err.message || "Failed to delete budget type.", false);
+      }
+    }
+  );
+}
 
 const REPORT_PIE_COLORS = [
   "#2563eb",
@@ -1701,6 +1946,8 @@ async function fetchBudgetOverviewData() {
   const studentDepartmentTotalCost = Number.isFinite(Number(data.student_department_total_cost))
     ? parseMoneyValue(data.student_department_total_cost)
     : studentTotalCost + departmentTotalCost;
+  const studentAvailableTotal = parseMoneyValue(data.student_available_total);
+  const departmentAvailableTotal = parseMoneyValue(data.department_available_total);
 
   return {
     totalBudget,
@@ -1708,18 +1955,24 @@ async function fetchBudgetOverviewData() {
     studentTotalCost,
     departmentTotalCost,
     studentDepartmentTotalCost,
+    studentAvailableTotal,
+    departmentAvailableTotal,
     records,
     monthlyTotals,
   };
 }
 
-function renderBudgetOverviewCards(totalBudget, studentTotalCost, departmentTotalCost, studentDepartmentTotalCost) {
+function renderBudgetOverviewCards(totalBudget, studentTotalCost, departmentTotalCost, studentDepartmentTotalCost, studentAvailableTotal, departmentAvailableTotal) {
   const totalCostEl = document.getElementById("budgetTotalCost");
   const departmentRemainingEl = document.getElementById("budgetDepartmentRemaining");
   const studentRemainingEl = document.getElementById("budgetStudentRemaining");
 
-  const departmentRemaining = Math.max(0, parseMoneyValue(totalBudget) - parseMoneyValue(departmentTotalCost));
-  const studentRemaining = Math.max(0, parseMoneyValue(totalBudget) - parseMoneyValue(studentTotalCost));
+  const departmentRemaining = Number.isFinite(Number(departmentAvailableTotal))
+    ? Math.max(0, parseMoneyValue(departmentAvailableTotal))
+    : Math.max(0, parseMoneyValue(totalBudget) - parseMoneyValue(departmentTotalCost));
+  const studentRemaining = Number.isFinite(Number(studentAvailableTotal))
+    ? Math.max(0, parseMoneyValue(studentAvailableTotal))
+    : Math.max(0, parseMoneyValue(totalBudget) - parseMoneyValue(studentTotalCost));
 
   if (totalCostEl) totalCostEl.textContent = formatPhp(studentDepartmentTotalCost);
   if (departmentRemainingEl) departmentRemainingEl.textContent = formatPhp(departmentRemaining);
@@ -1891,13 +2144,17 @@ async function loadBudgetReports() {
     budgetReportState.studentTotalCost = overview.studentTotalCost;
     budgetReportState.departmentTotalCost = overview.departmentTotalCost;
     budgetReportState.studentDepartmentTotalCost = overview.studentDepartmentTotalCost;
+    budgetReportState.studentAvailableTotal = overview.studentAvailableTotal;
+    budgetReportState.departmentAvailableTotal = overview.departmentAvailableTotal;
     budgetReportState.records = overview.records;
 
     renderBudgetOverviewCards(
       budgetReportState.totalBudget,
       budgetReportState.studentTotalCost,
       budgetReportState.departmentTotalCost,
-      budgetReportState.studentDepartmentTotalCost
+      budgetReportState.studentDepartmentTotalCost,
+      budgetReportState.studentAvailableTotal,
+      budgetReportState.departmentAvailableTotal
     );
     renderBudgetLineChart(overview.monthlyTotals);
     populateBudgetCategoryFilter(budgetReportState.records);
@@ -2967,3 +3224,67 @@ document.addEventListener("DOMContentLoaded", () => {
   applyAdminPinSettingsUI();
   loadAdminPinStatus(false);
 });
+
+
+function bindBugReportSubmitHandler() {
+    const form = document.getElementById('bug-report-form');
+    if (!form) return;
+
+    const imageInput = document.getElementById('bug-image');
+    const descInput = document.getElementById('bug-description');
+
+    if (imageInput) {
+        imageInput.addEventListener('change', () => {
+            const f = imageInput.files && imageInput.files[0] ? imageInput.files[0] : null;
+            if (!f) return;
+            const maxBytes = 5 * 1024 * 1024;
+            if (f.size > maxBytes) {
+                showSystemStatus('Image is too large. Maximum size is 5MB.');
+                imageInput.value = '';
+                return;
+            }
+
+            const okTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+            if (f.type && !okTypes.includes(String(f.type).toLowerCase())) {
+                showSystemStatus('Supported image formats: PNG, JPG, JPEG, WEBP, GIF.');
+                imageInput.value = '';
+            }
+        });
+    }
+
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+
+        const description = String(descInput?.value || '').trim();
+        if (description.length < 5) {
+            showSystemStatus('Please provide a clear bug description.');
+            descInput?.focus();
+            return;
+        }
+
+        const formData = new FormData(form);
+        const csrfToken = String(document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '').trim();
+
+        try {
+            const res = await fetch('/api/bugs/report', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    ...(csrfToken ? { 'X-CSRFToken': csrfToken } : {}),
+                },
+                body: formData,
+            });
+
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+                showSystemStatus(data.error || 'Failed to submit bug report.');
+                return;
+            }
+
+            showSystemStatus(data.message || 'Bug report submitted successfully.');
+            form.reset();
+        } catch (err) {
+            showSystemStatus('Failed to submit bug report.');
+        }
+    });
+}

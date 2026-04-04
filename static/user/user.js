@@ -229,10 +229,21 @@ function renderRequests(filter) {
 
     sorted.forEach(req => {
         const tr = document.createElement('tr');
+        const statusLower = normalizeStatusName(req && req.status_name);
 
         const fileCell = req.filename
             ? `<a href="/download_attachment/${req.request_id}" target="_blank" class="file-link">${req.filename}</a>`
             : `<span class="text-muted">No file</span>`;
+
+        let actionHtml = `<span class="text-muted">-</span>`;
+        if (statusLower === 'pending_user') {
+            actionHtml = `<button onclick="userComplete('${req.request_id}')" class="btn-link">Confirm Complete</button>`;
+        } else if (statusLower === 'draft') {
+            actionHtml = `
+                <button onclick="continueDraftRequest('${req.request_id}')" class="btn-link">Continue Draft</button>
+                <button onclick="submitDraftRequest('${req.request_id}')" class="btn-link">Submit Draft</button>
+            `;
+        }
 
         tr.innerHTML = `
         <td>${req.request_id}</td>
@@ -244,12 +255,7 @@ function renderRequests(filter) {
         ${filter === 'rejected' ? `<td>${req.rejection_message || '-'}</td>` : ''}
         <td>${new Date(req.created_at).toLocaleDateString()}</td>
         <td class="text-right">
-            ${(req.status_name || '').toLowerCase() === 'pending_user'
-                ? `<button onclick="userComplete('${req.request_id}')" class="btn-link">
-                    Confirm Complete
-                </button>`
-                : `<span class="text-muted">-</span>`
-            }
+            ${actionHtml}
         </td>
         `;
         tbody.appendChild(tr);
@@ -284,6 +290,114 @@ async function userComplete(requestId) {
 
     showSystemStatus(data.message || "Request updated.");
     refreshDashboard();
+}
+
+async function submitDraftRequest(requestId) {
+    const confirmed = await showSystemConfirm(
+        'Submit this draft now? It will enter the approval workflow.',
+        'Submit Draft'
+    );
+    if (!confirmed) return;
+
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+
+    let res;
+    let data;
+    try {
+        res = await fetch(`/api/request/${requestId}/submit-draft`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+            },
+        });
+        data = await res.json();
+    } catch (_) {
+        showSystemStatus('Failed to submit draft request.');
+        return;
+    }
+
+    if (!res.ok) {
+        showSystemStatus((data && (data.message || data.error)) || 'Failed to submit draft request.');
+        return;
+    }
+
+    showSystemStatus((data && (data.message || data.success)) || 'Draft submitted successfully.');
+    refreshDashboard();
+}
+
+async function continueDraftRequest(requestId) {
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+
+    let res;
+    let data;
+    try {
+        res = await fetch(`/api/request/${requestId}/draft-data`, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+            },
+        });
+        data = await res.json();
+    } catch (_) {
+        showSystemStatus('Failed to load draft details.');
+        return;
+    }
+
+    if (!res.ok) {
+        showSystemStatus((data && (data.message || data.error)) || 'Failed to load draft details.');
+        return;
+    }
+
+    const form = document.getElementById('new-request-form');
+    const requestModal = document.getElementById('request-modal');
+    if (!form || !requestModal) {
+        showSystemStatus('Request form is not available right now.');
+        return;
+    }
+
+    const reqTypeSelect = document.getElementById('modal-req-type');
+    const amountInput = document.getElementById('modal-amount');
+    const purposeInput = document.getElementById('modal-purpose');
+    const budgetInput = document.getElementById('modal-request-budget');
+    const deptInput = document.getElementById('modal-request-department');
+    const dataJsonEl = document.getElementById('template_data_json');
+    const totalEl = document.getElementById('template_total');
+    const badgeEl = document.getElementById('templateFilledBadge');
+    const actionInput = document.getElementById('request_action');
+    const draftIdInput = document.getElementById('draft_request_id');
+
+    if (reqTypeSelect) {
+        reqTypeSelect.value = String(data.request_type_id || '');
+    }
+
+    await checkTemplate();
+
+    const amountValue = Number(data.amount || 0);
+    if (amountInput) amountInput.value = Number.isFinite(amountValue) ? amountValue.toFixed(2) : '';
+    if (purposeInput) purposeInput.value = String(data.purpose || '');
+    if (budgetInput && data.request_budget) budgetInput.value = String(data.request_budget || '');
+    if (deptInput && data.request_department) deptInput.value = String(data.request_department || '');
+
+    if (dataJsonEl) dataJsonEl.value = String(data.template_data_json || '');
+    if (totalEl) totalEl.value = Number.isFinite(amountValue) ? amountValue.toFixed(2) : '0.00';
+
+    if (badgeEl) {
+        badgeEl.style.display = String(data.template_data_json || '').trim() ? 'inline' : 'none';
+    }
+
+    if (actionInput) {
+        actionInput.value = 'submit';
+    }
+
+    if (draftIdInput) {
+        draftIdInput.value = String(data.request_id || requestId || '');
+    }
+
+    requestModal.classList.add('show');
+    showSystemStatus(`Draft #${requestId} loaded. Continue editing then submit when ready.`);
 }
 
 
@@ -478,10 +592,12 @@ async function fetchFillableReviewPreviewUrl(requestTypeId, templateDataJson) {
     }
 }
 
-async function confirmRequestSubmissionReview(formData, selectedOption, selectedMode, selectedFile) {
+async function confirmRequestSubmissionReview(formData, selectedOption, selectedMode, selectedFile, requestAction = 'submit') {
     const details = buildRequestReviewDetails(formData, selectedOption, selectedMode, selectedFile);
     const requestTypeId = String(selectedOption?.value || '').trim();
     const templateDataJson = String(formData.get('template_data_json') || '').trim();
+    const action = String(requestAction || 'submit').trim().toLowerCase();
+    const isDraft = action === 'draft';
     const previewUrl = selectedMode === 'FILLABLE'
         ? await fetchFillableReviewPreviewUrl(requestTypeId, templateDataJson)
         : '';
@@ -503,12 +619,14 @@ async function confirmRequestSubmissionReview(formData, selectedOption, selected
                 : '');
 
         const result = await window.Swal.fire({
-            title: 'Review Request Before Submit',
+            title: isDraft ? 'Review Draft Before Save' : 'Review Request Before Submit',
             html: `${previewHtml}${details.html}`,
             icon: 'info',
             showCancelButton: true,
-            confirmButtonText: 'Submit Request',
-            cancelButtonText: 'Back to Edit',
+            showDenyButton: selectedMode === 'FILLABLE',
+            confirmButtonText: isDraft ? 'Save Draft' : 'Submit Request',
+            cancelButtonText: 'Back',
+            denyButtonText: 'Edit Template',
             focusConfirm: false,
             width: 980,
         });
@@ -517,14 +635,24 @@ async function confirmRequestSubmissionReview(formData, selectedOption, selected
             URL.revokeObjectURL(previewUrl);
         }
 
-        return !!result.isConfirmed;
+        return {
+            confirmed: !!result.isConfirmed,
+            editTemplateRequested: !!result.isDenied,
+        };
     }
 
     if (previewUrl) {
         URL.revokeObjectURL(previewUrl);
     }
 
-    return showSystemConfirm(details.plainText, 'Submit Request');
+    const fallbackConfirmed = await showSystemConfirm(
+        details.plainText,
+        isDraft ? 'Save Draft' : 'Submit Request',
+    );
+    return {
+        confirmed: !!fallbackConfirmed,
+        editTemplateRequested: false,
+    };
 }
 
 function bindNewRequestSubmitHandler() {
@@ -537,6 +665,8 @@ function bindNewRequestSubmitHandler() {
         const canRequestBudget = String(form.dataset.canRequestBudget || '0') === '1';
 
         const formData = new FormData(form);
+        const requestAction = String(formData.get('request_action') || 'submit').trim().toLowerCase();
+        const isDraft = requestAction === 'draft';
         const reqTypeSelect = document.getElementById('modal-req-type');
         const selectedOption = reqTypeSelect && reqTypeSelect.selectedIndex >= 0
             ? reqTypeSelect.options[reqTypeSelect.selectedIndex]
@@ -546,7 +676,7 @@ function bindNewRequestSubmitHandler() {
         const requestBudget = String(formData.get('request_budget') || '').trim();
         const requestDepartment = String(formData.get('request_department') || '').trim();
 
-        if (canRequestBudget) {
+        if (canRequestBudget && !isDraft) {
             if (!requestBudget) {
                 showSystemStatus('Please choose Request Budget before submitting.');
                 return;
@@ -558,7 +688,7 @@ function bindNewRequestSubmitHandler() {
             }
         }
 
-        if (selectedMode === 'FILLABLE') {
+        if (selectedMode === 'FILLABLE' && !isDraft) {
             if (!hasRepresentativeTemplate) {
                 showSystemStatus('Representative template is missing for this fillable request type. Please contact the representative/admin.');
                 return;
@@ -592,13 +722,20 @@ function bindNewRequestSubmitHandler() {
             }
         }
 
-        const reviewConfirmed = await confirmRequestSubmissionReview(
+        const reviewResult = await confirmRequestSubmissionReview(
             formData,
             selectedOption,
             selectedMode,
             selectedFile,
+            requestAction,
         );
-        if (!reviewConfirmed) {
+
+        if (reviewResult.editTemplateRequested) {
+            await openTemplateFormInline();
+            return;
+        }
+
+        if (!reviewResult.confirmed) {
             return;
         }
 
@@ -630,7 +767,15 @@ function bindNewRequestSubmitHandler() {
                 return;
             }
 
-            showSystemStatus("Request submitted successfully.");
+            if (isDraft) {
+                showSystemStatus("Draft request saved successfully.");
+                const draftIdInput = document.getElementById('draft_request_id');
+                if (draftIdInput && data && data.request_id) {
+                    draftIdInput.value = String(data.request_id);
+                }
+            } else {
+                showSystemStatus("Request submitted successfully.");
+            }
             closeRequestModal();
             refreshDashboard();
 
@@ -2283,8 +2428,34 @@ function viewRejection(msg) {
 }
 
 function closeRejectionModal() { document.getElementById('rejection-modal').classList.remove('show'); }
-function createNewRequest() { document.getElementById('request-modal').classList.add('show'); }
+function createNewRequest() {
+    const actionInput = document.getElementById('request_action');
+    if (actionInput) {
+        actionInput.value = 'submit';
+    }
+
+    const draftIdInput = document.getElementById('draft_request_id');
+    if (draftIdInput) {
+        draftIdInput.value = '';
+    }
+
+    document.getElementById('request-modal').classList.add('show');
+}
 function closeRequestModal() { document.getElementById('request-modal').classList.remove('show'); }
+
+function submitNewRequestAsDraft() {
+    const form = document.getElementById('new-request-form');
+    if (!form) return;
+
+    const actionInput = document.getElementById('request_action');
+    if (!actionInput) return;
+
+    actionInput.value = 'draft';
+    form.requestSubmit();
+    setTimeout(() => {
+        actionInput.value = 'submit';
+    }, 0);
+}
 
 function showToast(title, message, type) {
     const toast = document.getElementById('toast');

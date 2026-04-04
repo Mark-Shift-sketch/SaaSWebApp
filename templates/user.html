@@ -547,6 +547,8 @@
             id="template_data_json"
           />
           <input type="hidden" name="template_total" id="template_total" />
+          <input type="hidden" name="request_action" id="request_action" value="submit" />
+          <input type="hidden" name="draft_request_id" id="draft_request_id" value="" />
 
           <div class="form-group">
             <label>Upload Document (Optional PDF)</label>
@@ -561,6 +563,7 @@
             >
               Cancel
             </button>
+            <button type="button" class="btn-cancel" onclick="submitNewRequestAsDraft()">Save Draft</button>
             <button type="submit" class="btn-submit">Submit Request</button>
           </div>
         </form>

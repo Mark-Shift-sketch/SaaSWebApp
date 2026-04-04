@@ -507,7 +507,7 @@ def set_security_headers(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     allow_same_origin_frame = request.path.startswith("/download_template/")
     resp.headers["X-Frame-Options"] = "SAMEORIGIN" if allow_same_origin_frame else "DENY"
-    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     resp.headers["Cross-Origin-Resource-Policy"] = "same-site"
     # Basic CSP 
     resp.headers["Content-Security-Policy"] = (
@@ -7228,7 +7228,6 @@ def inv_delete(pid):
 
 # Admin Dashboard
 
-
 @app.route("/admin")
 def admin_dashboard():
     if "email" not in session:
@@ -8435,6 +8434,17 @@ def create_request():
     request_purpose = (request.form.get("purpose") or "").strip()
     request_budget = normalize_request_budget(request.form.get("request_budget"))
     request_department = (session.get("dept") or "").strip()
+    request_action = str(request.form.get("request_action") or "submit").strip().lower()
+    is_draft = request_action == "draft"
+    draft_request_id_raw = str(request.form.get("draft_request_id") or "").strip()
+    draft_request_id = None
+    if draft_request_id_raw:
+        try:
+            parsed_draft_request_id = int(draft_request_id_raw)
+            if parsed_draft_request_id > 0:
+                draft_request_id = parsed_draft_request_id
+        except (TypeError, ValueError):
+            draft_request_id = None
     wfor = request_purpose or request_budget
     file = request.files.get("file")
 
@@ -8506,7 +8516,36 @@ def create_request():
             flash(requests_msg, "danger")
             return redirect(request.referrer or "/udashboard")
 
-        if can_request_budget:
+        existing_draft_request_id = None
+        existing_draft_filename = None
+        existing_draft_attachment = None
+        if draft_request_id is not None:
+            cursor.execute(
+                """
+                SELECT r.request_id, r.filename, r.attachment
+                FROM requests r
+                JOIN request_status rs ON rs.status_id = r.status_id
+                WHERE r.request_id = %s
+                  AND r.user_id = %s
+                  AND r.company_id = %s
+                  AND UPPER(COALESCE(rs.status_name, '')) = 'DRAFT'
+                LIMIT 1
+                """,
+                (draft_request_id, user_id, company_id),
+            )
+            existing_draft_row = cursor.fetchone() or {}
+            if not existing_draft_row:
+                msg = "Selected draft no longer exists or is already submitted."
+                if request.headers.get("X-Requested-With") == "fetch":
+                    return jsonify({"success": False, "message": msg}), 400
+                flash(msg, "danger")
+                return redirect(request.referrer or "/udashboard")
+
+            existing_draft_request_id = int(existing_draft_row.get("request_id") or 0)
+            existing_draft_filename = existing_draft_row.get("filename")
+            existing_draft_attachment = existing_draft_row.get("attachment")
+
+        if can_request_budget and not is_draft:
             if not request_budget:
                 msg = "Request budget is required."
                 if request.headers.get("X-Requested-With") == "fetch":
@@ -8554,27 +8593,20 @@ def create_request():
         request_type_template_blob = request_type_row.get("template_file")
 
         if template_mode == "FILLABLE":
-            if not request_type_template_blob:
+            if not request_type_template_blob and not is_draft:
                 msg = "Representative template is missing for this fillable request type. Please contact the representative/admin."
                 if request.headers.get("X-Requested-With") == "fetch":
                     return jsonify({"success": False, "message": msg}), 400
                 flash(msg, "danger")
                 return redirect(request.referrer or "/udashboard")
 
-            schema = get_request_type_fillable_schema(cursor, request_type_id)
-            cleaned_payload, computed_total, has_total_sources, validation_error = validate_fillable_submission(
-                schema,
-                template_data_json,
-            )
-            if validation_error:
-                if request.headers.get("X-Requested-With") == "fetch":
-                    return jsonify({"success": False, "message": validation_error}), 400
-                flash(validation_error, "danger")
-                return redirect(request.referrer or "/udashboard")
-
-            validated_template_payload_json = json.dumps(cleaned_payload, ensure_ascii=True)
-
-            if has_total_sources:
+            if is_draft:
+                if template_data_json:
+                    try:
+                        parsed_payload = json.loads(template_data_json)
+                        validated_template_payload_json = json.dumps(parsed_payload, ensure_ascii=True)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        validated_template_payload_json = ""
                 if amount_raw:
                     try:
                         amount = float(amount_raw)
@@ -8584,36 +8616,63 @@ def create_request():
                             return jsonify({"success": False, "message": msg}), 400
                         flash(msg, "danger")
                         return redirect(request.referrer or "/udashboard")
-                else:
-                    amount = float(computed_total)
-
-            if request_type_template_blob and not file_blob:
-                file_blob = build_filled_pdf_from_submission(
-                    request_type_template_blob,
+            else:
+                schema = get_request_type_fillable_schema(cursor, request_type_id)
+                cleaned_payload, computed_total, has_total_sources, validation_error = validate_fillable_submission(
                     schema,
-                    cleaned_payload,
-                    total_amount=computed_total if has_total_sources else None,
-                    total_amount_scope=total_amount_scope,
-                    total_amount_template_page=total_amount_template_page,
+                    template_data_json,
                 )
-                filename = request_type_template_name or f"request_type_{request_type_id}_template.pdf"
+                if validation_error:
+                    if request.headers.get("X-Requested-With") == "fetch":
+                        return jsonify({"success": False, "message": validation_error}), 400
+                    flash(validation_error, "danger")
+                    return redirect(request.referrer or "/udashboard")
+
+                validated_template_payload_json = json.dumps(cleaned_payload, ensure_ascii=True)
+
+                if has_total_sources:
+                    if amount_raw:
+                        try:
+                            amount = float(amount_raw)
+                        except (TypeError, ValueError):
+                            msg = "Invalid amount value."
+                            if request.headers.get("X-Requested-With") == "fetch":
+                                return jsonify({"success": False, "message": msg}), 400
+                            flash(msg, "danger")
+                            return redirect(request.referrer or "/udashboard")
+                    else:
+                        amount = float(computed_total)
+
+                if request_type_template_blob and not file_blob:
+                    file_blob = build_filled_pdf_from_submission(
+                        request_type_template_blob,
+                        schema,
+                        cleaned_payload,
+                        total_amount=computed_total if has_total_sources else None,
+                        total_amount_scope=total_amount_scope,
+                        total_amount_template_page=total_amount_template_page,
+                    )
+                    filename = request_type_template_name or f"request_type_{request_type_id}_template.pdf"
 
         if amount is None:
             if not amount_raw:
-                msg = "Amount is required."
-                if request.headers.get("X-Requested-With") == "fetch":
-                    return jsonify({"success": False, "message": msg}), 400
-                flash(msg, "danger")
-                return redirect(request.referrer or "/udashboard")
-
-            try:
-                amount = float(amount_raw)
-            except (TypeError, ValueError):
-                msg = "Invalid amount value."
-                if request.headers.get("X-Requested-With") == "fetch":
-                    return jsonify({"success": False, "message": msg}), 400
-                flash(msg, "danger")
-                return redirect(request.referrer or "/udashboard")
+                if is_draft:
+                    amount = 0.0
+                else:
+                    msg = "Amount is required."
+                    if request.headers.get("X-Requested-With") == "fetch":
+                        return jsonify({"success": False, "message": msg}), 400
+                    flash(msg, "danger")
+                    return redirect(request.referrer or "/udashboard")
+            else:
+                try:
+                    amount = float(amount_raw)
+                except (TypeError, ValueError):
+                    msg = "Invalid amount value."
+                    if request.headers.get("X-Requested-With") == "fetch":
+                        return jsonify({"success": False, "message": msg}), 400
+                    flash(msg, "danger")
+                    return redirect(request.referrer or "/udashboard")
 
         if amount < 0:
             msg = "Amount cannot be negative."
@@ -8622,33 +8681,56 @@ def create_request():
             flash(msg, "danger")
             return redirect(request.referrer or "/udashboard")
 
-        # Find first REVIEWER
-        cursor.execute("""
-            SELECT position_id
-            FROM request_type_reviewers
-            WHERE request_type_id = %s
-            ORDER BY order_no ASC
-            LIMIT 1
-        """, (request_type_id,))
-        reviewer = cursor.fetchone()
-
-        if reviewer:
-            stage_position_id = reviewer["position_id"]
-        else:
+        stage_position_id = None
+        if not is_draft:
+            # Find first REVIEWER
             cursor.execute("""
                 SELECT position_id
-                FROM request_type_approvers
+                FROM request_type_reviewers
                 WHERE request_type_id = %s
                 ORDER BY order_no ASC
                 LIMIT 1
             """, (request_type_id,))
-            approver = cursor.fetchone()
-            stage_position_id = approver["position_id"] if approver else None
+            reviewer = cursor.fetchone()
 
-        if stage_position_id is None:
-            msg = "No reviewers/approvers configured for this request type."
+            if reviewer:
+                stage_position_id = reviewer["position_id"]
+            else:
+                cursor.execute("""
+                    SELECT position_id
+                    FROM request_type_approvers
+                    WHERE request_type_id = %s
+                    ORDER BY order_no ASC
+                    LIMIT 1
+                """, (request_type_id,))
+                approver = cursor.fetchone()
+                stage_position_id = approver["position_id"] if approver else None
+
+            if stage_position_id is None:
+                msg = "No reviewers/approvers configured for this request type."
+                if request.headers.get("X-Requested-With") == "fetch":
+                    return jsonify({"success": False, "message": msg}), 400
+                flash(msg, "danger")
+                return redirect(request.referrer or "/udashboard")
+
+        target_status_name = "DRAFT" if is_draft else "PENDING"
+        cursor.execute(
+            "SELECT status_id FROM request_status WHERE UPPER(status_name) = %s LIMIT 1",
+            (target_status_name,),
+        )
+        status_row = cursor.fetchone() or {}
+        status_id = status_row.get("status_id")
+
+        if status_id is None and is_draft:
+            cursor.execute(
+                "INSERT INTO request_status (status_name) VALUES ('DRAFT')"
+            )
+            status_id = cursor.lastrowid
+
+        if status_id is None:
+            msg = f"{target_status_name.title()} status is not configured in DB."
             if request.headers.get("X-Requested-With") == "fetch":
-                return jsonify({"success": False, "message": msg}), 400
+                return jsonify({"success": False, "message": msg}), 500
             flash(msg, "danger")
             return redirect(request.referrer or "/udashboard")
 
@@ -8684,13 +8766,46 @@ def create_request():
         if not wfor:
             wfor = "General Request"
 
-        # Insert Request
-        cursor.execute("""
-            INSERT INTO requests (user_id, request_type_id, wfor, filename, attachment, amount, status_id, stage_position_id, company_id)
-            VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s)
-        """, (user_id, request_type_id, wfor, filename, file_blob, amount, stage_position_id, company_id))
+        if existing_draft_request_id and filename is None and file_blob is None:
+            filename = existing_draft_filename
+            file_blob = existing_draft_attachment
 
-        request_id = cursor.lastrowid
+        if existing_draft_request_id:
+            cursor.execute(
+                """
+                UPDATE requests
+                SET
+                    request_type_id = %s,
+                    wfor = %s,
+                    filename = %s,
+                    attachment = %s,
+                    amount = %s,
+                    status_id = %s,
+                    stage_position_id = %s
+                WHERE request_id = %s AND user_id = %s AND company_id = %s
+                """,
+                (
+                    request_type_id,
+                    wfor,
+                    filename,
+                    file_blob,
+                    amount,
+                    status_id,
+                    stage_position_id,
+                    existing_draft_request_id,
+                    user_id,
+                    company_id,
+                ),
+            )
+            request_id = existing_draft_request_id
+        else:
+            # Insert Request
+            cursor.execute("""
+                INSERT INTO requests (user_id, request_type_id, wfor, filename, attachment, amount, status_id, stage_position_id, company_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (user_id, request_type_id, wfor, filename, file_blob, amount, status_id, stage_position_id, company_id))
+
+            request_id = cursor.lastrowid
 
         if can_request_budget and request_budget and request_department:
             cursor.execute(
@@ -8722,7 +8837,7 @@ def create_request():
 
         # return JSON for fetch
         if request.headers.get("X-Requested-With") == "fetch":
-            return jsonify({"success": True, "request_id": request_id}), 200
+            return jsonify({"success": True, "request_id": request_id, "saved_as": "draft" if is_draft else "submitted"}), 200
 
         flash("Request submitted successfully!", "success")
         return redirect("/udashboard")
@@ -13792,6 +13907,8 @@ def api_requests():
                         total_amount_template_page = None
             request_budget = normalize_request_budget(request.form.get("request_budget"))
             request_department = (session.get("dept") or "").strip()
+            request_action = str(request.form.get("request_action") or "submit").strip().lower()
+            is_draft = request_action == "draft"
             wfor = request_budget
 
             if not req_type_id_raw:
@@ -13816,7 +13933,7 @@ def api_requests():
             ensure_request_form_submission_table(cursor, conn)
             ensure_budget_request_schema(cursor, conn)
 
-            if can_request_budget:
+            if can_request_budget and not is_draft:
                 if not request_budget:
                     return jsonify({"error": "Request budget is required"}), 400
 
@@ -13850,77 +13967,100 @@ def api_requests():
             validated_template_payload_json = ""
 
             if template_mode == "FILLABLE":
-                if not request_type_template_blob:
+                if not request_type_template_blob and not is_draft:
                     return jsonify({"error": "Representative template is missing for this fillable request type."}), 400
 
-                schema = get_request_type_fillable_schema(cursor, req_type_id)
-                cleaned_payload, computed_total, has_total_sources, validation_error = validate_fillable_submission(
-                    schema,
-                    template_data_json,
-                )
-                if validation_error:
-                    return jsonify({"error": validation_error}), 400
-
-                validated_template_payload_json = json.dumps(cleaned_payload, ensure_ascii=True)
-                if has_total_sources:
+                if is_draft:
+                    if template_data_json:
+                        try:
+                            parsed_payload = json.loads(template_data_json)
+                            validated_template_payload_json = json.dumps(parsed_payload, ensure_ascii=True)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            validated_template_payload_json = ""
                     if amount_raw:
                         try:
                             amount = float(amount_raw)
                         except (TypeError, ValueError):
                             return jsonify({"error": "Invalid amount value"}), 400
-                    else:
-                        amount = float(computed_total)
-
-                if request_type_template_blob:
-                    file_data = build_filled_pdf_from_submission(
-                        request_type_template_blob,
+                else:
+                    schema = get_request_type_fillable_schema(cursor, req_type_id)
+                    cleaned_payload, computed_total, has_total_sources, validation_error = validate_fillable_submission(
                         schema,
-                        cleaned_payload,
-                        total_amount=computed_total if has_total_sources else None,
-                        total_amount_scope=total_amount_scope,
-                        total_amount_template_page=total_amount_template_page,
+                        template_data_json,
                     )
-                    filename = request_type_template_name or f"request_type_{req_type_id}_template.pdf"
+                    if validation_error:
+                        return jsonify({"error": validation_error}), 400
+
+                    validated_template_payload_json = json.dumps(cleaned_payload, ensure_ascii=True)
+                    if has_total_sources:
+                        if amount_raw:
+                            try:
+                                amount = float(amount_raw)
+                            except (TypeError, ValueError):
+                                return jsonify({"error": "Invalid amount value"}), 400
+                        else:
+                            amount = float(computed_total)
+
+                    if request_type_template_blob:
+                        file_data = build_filled_pdf_from_submission(
+                            request_type_template_blob,
+                            schema,
+                            cleaned_payload,
+                            total_amount=computed_total if has_total_sources else None,
+                            total_amount_scope=total_amount_scope,
+                            total_amount_template_page=total_amount_template_page,
+                        )
+                        filename = request_type_template_name or f"request_type_{req_type_id}_template.pdf"
 
             if amount is None:
                 if not amount_raw:
-                    return jsonify({"error": "Amount is required"}), 400
-
-                try:
-                    amount = float(amount_raw)
-                except (TypeError, ValueError):
-                    return jsonify({"error": "Invalid amount value"}), 400
+                    if is_draft:
+                        amount = 0.0
+                    else:
+                        return jsonify({"error": "Amount is required"}), 400
+                else:
+                    try:
+                        amount = float(amount_raw)
+                    except (TypeError, ValueError):
+                        return jsonify({"error": "Invalid amount value"}), 400
 
             if amount < 0:
                 return jsonify({"error": "Amount cannot be negative"}), 400
 
-            # Find Approver
-            cursor.execute(
-                """
-                SELECT position_id FROM request_type_approvers 
-                WHERE request_type_id = %s ORDER BY id ASC LIMIT 1
-            """,
-                (req_type_id,),
-            )
-            approver = cursor.fetchone()
-
-            if not approver:
-                return (
-                    jsonify({"error": "No approver configured for this request type"}),
-                    400,
+            stage_position_id = None
+            if not is_draft:
+                # Find Approver
+                cursor.execute(
+                    """
+                    SELECT position_id FROM request_type_approvers 
+                    WHERE request_type_id = %s ORDER BY id ASC LIMIT 1
+                """,
+                    (req_type_id,),
                 )
+                approver = cursor.fetchone()
 
-            stage_position_id = approver["position_id"]
+                if not approver:
+                    return (
+                        jsonify({"error": "No approver configured for this request type"}),
+                        400,
+                    )
 
-            # Get PENDING Status ID
+                stage_position_id = approver["position_id"]
+
+            target_status_name = "DRAFT" if is_draft else "PENDING"
             cursor.execute(
-                "SELECT status_id FROM request_status WHERE status_name='PENDING'"
+                "SELECT status_id FROM request_status WHERE UPPER(status_name)=%s LIMIT 1",
+                (target_status_name,),
             )
-            status_row = cursor.fetchone()
-            if not status_row:
-                return jsonify({"error": "Pending status not configured in DB"}), 500
+            status_row = cursor.fetchone() or {}
+            status_id = status_row.get("status_id")
 
-            status_id = status_row["status_id"]
+            if status_id is None and is_draft:
+                cursor.execute("INSERT INTO request_status (status_name) VALUES ('DRAFT')")
+                status_id = cursor.lastrowid
+
+            if status_id is None:
+                return jsonify({"error": f"{target_status_name.title()} status not configured in DB"}), 500
 
             if not wfor:
                 try:
@@ -14000,7 +14140,7 @@ def api_requests():
                 )
 
             conn.commit()
-            return jsonify({"message": "Request created successfully"}), 201
+            return jsonify({"message": "Draft request saved successfully" if is_draft else "Request created successfully", "saved_as": "draft" if is_draft else "submitted"}), 201
 
         except Exception as e:
             print(f"Error creating request: {e}")
@@ -14265,6 +14405,350 @@ def user_complete_request(request_id):
     except Exception as e:
         conn.rollback()
         return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.route("/api/request/<int:request_id>/submit-draft", methods=["POST"])
+def submit_draft_request(request_id):
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    role_name = (session.get("role") or "").strip()
+    position_name = (session.get("position") or "").strip()
+    can_request_budget = can_use_secretary_budget_fields(role_name, position_name)
+
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+
+    try:
+        ensure_tenant_schema(cur, conn)
+        ensure_saas_owner_schema(cur, conn)
+        ensure_request_type_form_schema_table(cur, conn)
+        ensure_request_form_submission_table(cur, conn)
+        ensure_budget_request_schema(cur, conn)
+
+        company_id = ensure_session_company_context(cur)
+        if company_id <= 0:
+            return jsonify({"error": "No company context found"}), 403
+
+        user_id = get_user_id_for_company(session.get("email"), company_id)
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 404
+
+        cur.execute(
+            """
+            SELECT
+                r.request_id,
+                r.user_id,
+                r.request_type_id,
+                r.wfor,
+                r.filename,
+                r.attachment,
+                r.amount,
+                rs.status_name
+            FROM requests r
+            JOIN request_status rs ON rs.status_id = r.status_id
+            WHERE r.request_id = %s AND r.company_id = %s
+            LIMIT 1
+            """,
+            (request_id, company_id),
+        )
+        draft_row = cur.fetchone() or {}
+        if not draft_row:
+            return jsonify({"error": "Draft request not found"}), 404
+
+        if int(draft_row.get("user_id") or 0) != int(user_id):
+            return jsonify({"error": "Only requester can submit this draft"}), 403
+
+        if str(draft_row.get("status_name") or "").strip().upper() != "DRAFT":
+            return jsonify({"error": "Only draft requests can be submitted with this action"}), 400
+
+        request_type_id = int(draft_row.get("request_type_id") or 0)
+        if request_type_id <= 0:
+            return jsonify({"error": "Invalid request type for this draft"}), 400
+
+        cur.execute(
+            """
+            SELECT request_type_id, template_mode, template_filename, template_file
+            FROM request_types
+            WHERE request_type_id = %s AND company_id = %s
+            LIMIT 1
+            """,
+            (request_type_id, company_id),
+        )
+        request_type_row = cur.fetchone() or {}
+        if not request_type_row:
+            return jsonify({"error": "Request type not found"}), 400
+
+        template_mode = str(request_type_row.get("template_mode") or "").strip().upper()
+        request_type_template_name = (request_type_row.get("template_filename") or "").strip()
+        request_type_template_blob = request_type_row.get("template_file")
+
+        filename = draft_row.get("filename")
+        file_blob = draft_row.get("attachment")
+        amount = float(draft_row.get("amount") or 0)
+        wfor = str(draft_row.get("wfor") or "").strip()
+
+        request_budget = ""
+        request_department = ""
+        if can_request_budget:
+            cur.execute(
+                """
+                SELECT budget_type, target_department
+                FROM request_budget_metadata
+                WHERE request_id = %s
+                LIMIT 1
+                """,
+                (request_id,),
+            )
+            metadata_row = cur.fetchone() or {}
+            request_budget = normalize_request_budget(metadata_row.get("budget_type"))
+            request_department = str(metadata_row.get("target_department") or "").strip()
+
+            if not request_budget or not request_department:
+                return jsonify({"error": "Draft is missing request budget details. Edit draft and add Request Budget + Target Department."}), 400
+
+            cur.execute(
+                "SELECT dept_name FROM departments WHERE dept_name = %s AND company_id = %s LIMIT 1",
+                (request_department, company_id),
+            )
+            if not (cur.fetchone() or {}).get("dept_name"):
+                return jsonify({"error": "Draft target department is no longer valid."}), 400
+
+        validated_template_payload_json = ""
+        if template_mode == "FILLABLE":
+            if not request_type_template_blob:
+                return jsonify({"error": "Representative template is missing for this fillable request type."}), 400
+
+            cur.execute(
+                """
+                SELECT form_data_json
+                FROM request_form_submissions
+                WHERE request_id = %s AND request_type_id = %s
+                LIMIT 1
+                """,
+                (request_id, request_type_id),
+            )
+            submission_row = cur.fetchone() or {}
+            template_data_json = str(submission_row.get("form_data_json") or "").strip()
+
+            schema = get_request_type_fillable_schema(cur, request_type_id)
+            cleaned_payload, computed_total, has_total_sources, validation_error = validate_fillable_submission(
+                schema,
+                template_data_json,
+            )
+            if validation_error:
+                return jsonify({"error": validation_error}), 400
+
+            validated_template_payload_json = json.dumps(cleaned_payload, ensure_ascii=True)
+
+            if has_total_sources:
+                amount = float(computed_total)
+
+            file_blob = build_filled_pdf_from_submission(
+                request_type_template_blob,
+                schema,
+                cleaned_payload,
+                total_amount=computed_total if has_total_sources else None,
+            )
+            filename = request_type_template_name or f"request_type_{request_type_id}_template.pdf"
+
+        if amount < 0:
+            return jsonify({"error": "Amount cannot be negative"}), 400
+
+        stage_position_id = None
+        cur.execute(
+            """
+            SELECT position_id
+            FROM request_type_reviewers
+            WHERE request_type_id = %s
+            ORDER BY order_no ASC
+            LIMIT 1
+            """,
+            (request_type_id,),
+        )
+        reviewer = cur.fetchone()
+
+        if reviewer:
+            stage_position_id = reviewer["position_id"]
+        else:
+            cur.execute(
+                """
+                SELECT position_id
+                FROM request_type_approvers
+                WHERE request_type_id = %s
+                ORDER BY order_no ASC
+                LIMIT 1
+                """,
+                (request_type_id,),
+            )
+            approver = cur.fetchone()
+            stage_position_id = approver["position_id"] if approver else None
+
+        if stage_position_id is None:
+            return jsonify({"error": "No reviewers/approvers configured for this request type."}), 400
+
+        cur.execute(
+            "SELECT status_id FROM request_status WHERE UPPER(status_name) = 'PENDING' LIMIT 1"
+        )
+        pending_row = cur.fetchone() or {}
+        pending_status_id = pending_row.get("status_id")
+        if pending_status_id is None:
+            return jsonify({"error": "PENDING status is not configured in DB."}), 500
+
+        if not wfor:
+            wfor = request_budget
+        if not wfor:
+            try:
+                cur.execute(
+                    """
+                    SELECT wfor
+                    FROM request_types
+                    WHERE request_type_id = %s AND company_id = %s
+                    LIMIT 1
+                    """,
+                    (request_type_id, company_id),
+                )
+                request_type_wfor_row = cur.fetchone() or {}
+                wfor = (request_type_wfor_row.get("wfor") or "").strip()
+            except Exception:
+                try:
+                    cur.execute(
+                        """
+                        SELECT `for` AS wfor
+                        FROM request_types
+                        WHERE request_type_id = %s AND company_id = %s
+                        LIMIT 1
+                        """,
+                        (request_type_id, company_id),
+                    )
+                    request_type_wfor_row = cur.fetchone() or {}
+                    wfor = (request_type_wfor_row.get("wfor") or "").strip()
+                except Exception:
+                    wfor = ""
+
+        if not wfor:
+            wfor = "General Request"
+
+        cur.execute(
+            """
+            UPDATE requests
+            SET
+                wfor = %s,
+                filename = %s,
+                attachment = %s,
+                amount = %s,
+                status_id = %s,
+                stage_position_id = %s
+            WHERE request_id = %s AND company_id = %s
+            """,
+            (
+                wfor,
+                filename,
+                file_blob,
+                amount,
+                pending_status_id,
+                stage_position_id,
+                request_id,
+                company_id,
+            ),
+        )
+
+        if validated_template_payload_json:
+            cur.execute(
+                """
+                INSERT INTO request_form_submissions (request_id, request_type_id, form_data_json)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    form_data_json = VALUES(form_data_json),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (request_id, request_type_id, validated_template_payload_json),
+            )
+
+        conn.commit()
+        return jsonify({"success": True, "message": "Draft submitted successfully."}), 200
+
+    except Exception as exc:
+        conn.rollback()
+        logger.exception("submit_draft_request failed")
+        return jsonify({"error": "Failed to submit draft request."}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.route("/api/request/<int:request_id>/draft-data", methods=["GET"])
+def get_draft_request_data(request_id):
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+
+    try:
+        ensure_tenant_schema(cur, conn)
+        ensure_saas_owner_schema(cur, conn)
+        ensure_request_form_submission_table(cur, conn)
+        ensure_budget_request_schema(cur, conn)
+
+        company_id = ensure_session_company_context(cur)
+        if company_id <= 0:
+            return jsonify({"error": "No company context found"}), 403
+
+        user_id = get_user_id_for_company(session.get("email"), company_id)
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 404
+
+        cur.execute(
+            """
+            SELECT
+                r.request_id,
+                r.user_id,
+                r.request_type_id,
+                r.wfor,
+                r.amount,
+                rs.status_name,
+                rfs.form_data_json,
+                rbm.budget_type,
+                rbm.target_department
+            FROM requests r
+            JOIN request_status rs ON rs.status_id = r.status_id
+            LEFT JOIN request_form_submissions rfs ON rfs.request_id = r.request_id
+            LEFT JOIN request_budget_metadata rbm ON rbm.request_id = r.request_id
+            WHERE r.request_id = %s AND r.company_id = %s
+            LIMIT 1
+            """,
+            (request_id, company_id),
+        )
+        row = cur.fetchone() or {}
+        if not row:
+            return jsonify({"error": "Draft request not found"}), 404
+
+        if int(row.get("user_id") or 0) != int(user_id):
+            return jsonify({"error": "Only requester can access this draft"}), 403
+
+        if str(row.get("status_name") or "").strip().upper() != "DRAFT":
+            return jsonify({"error": "Only draft requests can be continued"}), 400
+
+        return jsonify(
+            {
+                "success": True,
+                "request_id": int(row.get("request_id") or 0),
+                "request_type_id": int(row.get("request_type_id") or 0),
+                "purpose": str(row.get("wfor") or "").strip(),
+                "amount": float(row.get("amount") or 0),
+                "template_data_json": str(row.get("form_data_json") or "").strip(),
+                "request_budget": normalize_request_budget(row.get("budget_type")),
+                "request_department": str(row.get("target_department") or "").strip(),
+            }
+        ), 200
+
+    except Exception:
+        logger.exception("get_draft_request_data failed")
+        return jsonify({"error": "Failed to load draft request details."}), 500
     finally:
         cur.close()
         conn.close()
@@ -16124,58 +16608,12 @@ def make_grid_overlay_for_pdf(pdf_path: str, out_path: str, step: int = 40) -> N
         writer.write(f)
 
 
-CDR_FIELDS = {
-    "date_needed": (0, 180, 310, 12),
-    "requesting_dept": (0, 300, 310, 14),
-    "cdr_number": (0, 440, 310, 10),
-    "payee": (0, 110, 280, 10),
-    "requested_by_name": (0, 270, 80, 9),
-    "requested_by_date": (0, 280, 70, 9),
-    "approved_by_name": (0, 400, 80, 9),
-    "approved_by_date": (0, 400, 70, 9),
-}
-
-PR_FIELDS = {
-    "to": (0, 50, 530, 10),
-    "date_prepared": (0, 40, 480, 12),
-    "date_required": (0, 130, 480, 10),
-    "requested_by": (0, 30, 400, 10),
-    "date": (0, 45, 380, 10),
-    "dept": (0, 75, 370, 10),
-}
-
-
-def generate_test_cdr_stamped_pdf(
-    template_path="CHECK DISBURSEMENT REQUEST.pdf", out_path="CDR_test_stamped.pdf"
-):
-    with open(template_path, "rb") as f:
-        template_bytes = f.read()
-
-    values = {
-        "date_needed": "date_needed",
-        "requesting_dept": "dept",
-        "cdr_number": "CDR-0001",
-        "payee": "payee",
-        "requested_by_name": "request_name",
-        "requested_by_date": "current_date",
-        "signature": "app/revsignature",
-        "approved_by_date": "presentdate",
-    }
-
-    text_items = build_text_items_from_field_map(CDR_FIELDS, values)
-    overlay_bytes = make_overlay_pdf(
-        template_bytes, text_items=text_items, image_items=[]
-    )
-    final_bytes = merge_overlay(template_bytes, overlay_bytes)
-
-    with open(out_path, "wb") as f:
-        f.write(final_bytes)
 
 
     
 
 if __name__ == "__main__":
-    debug_mode = (os.environ.get("FLASK_DEBUG", "true").strip().lower() == "true")
+    debug_mode = (os.environ.get("FLASK_DEBUG", "false").strip().lower() == "false")
     app.run(
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "5000")),

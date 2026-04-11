@@ -482,6 +482,9 @@
               id="modal-request-department"
               value="{{ session.get('dept') or '' }}"
             />
+            {% else %}
+            <label>Request Budget</label>
+            <input type="text" value="Feature Not yet Available" readonly />
             {% endif %}
           </div>
 

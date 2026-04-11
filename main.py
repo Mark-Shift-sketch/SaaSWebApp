@@ -8,6 +8,7 @@ from flask import (
     session,
     redirect,
     request,
+    g,
     render_template,
     url_for,
     flash,
@@ -55,6 +56,7 @@ import textwrap
 import base64
 import time
 import random
+import secrets
 from threading import Thread
 from io import BytesIO, StringIO
 from flask import send_file
@@ -502,20 +504,33 @@ def role_required(*roles):
 
 
 # Security headers
+@app.before_request
+def ensure_csp_nonce():
+    if not getattr(g, "csp_nonce", None):
+        g.csp_nonce = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+
+
+@app.context_processor
+def inject_csp_nonce():
+    return {"csp_nonce": getattr(g, "csp_nonce", "")}
+
+
 @app.after_request
 def set_security_headers(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
-    allow_same_origin_frame = request.path.startswith("/download_template/")
+    allow_same_origin_frame = request.path.startswith("/download_template/") or request.path.endswith("/filled-preview")
     resp.headers["X-Frame-Options"] = "SAMEORIGIN" if allow_same_origin_frame else "DENY"
     resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     resp.headers["Cross-Origin-Resource-Policy"] = "same-site"
-    # Basic CSP 
     resp.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "img-src 'self' data:; "
-        "frame-src 'self' blob:; "
-        "style-src 'self' 'unsafe-inline' https:; "
-        "script-src 'self' 'unsafe-inline' https:;"
+        "default-src 'self' https: data: blob:; "
+        "script-src 'self' https: blob: 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' https: 'unsafe-inline'; "
+        "img-src 'self' data: https: blob:; "
+        "font-src 'self' data: https:; "
+        "connect-src 'self' https: ws: wss:; "
+        "worker-src 'self' https: blob:; "
+        "frame-src 'self' https: data: blob:;"
     )
     return resp
 
@@ -1167,6 +1182,8 @@ ALLOWED_BUDGET_REPORT_ROLES = {"Admin", "SuperAdmin", "SBO"}
 ALLOWED_BUDGET_SUBMIT_KEYWORDS = {"secretary", "representative", "purchasing"}
 BUDGET_RELEASE_ACTOR_KEYWORDS = {"representative", "purchasing"}
 COO_KEYWORDS = {"coo", "chief operating officer"}
+BUDGET_FEATURE_ENABLED = False
+BUDGET_FEATURE_DISABLED_MESSAGE = "Feature Not yet Available"
 ALLOWED_FORM_BLOCK_TYPES = {"heading", "text", "textarea", "number", "date", "shape", "table"}
 ALLOWED_FORM_SHAPES = {"line", "box"}
 ALLOWED_FORM_COLUMN_TYPES = {"text", "number"}
@@ -1565,6 +1582,8 @@ def can_view_reports(cursor, role=None, role_id=None):
 
 
 def can_manage_budget(cursor, role=None, role_id=None):
+    if not BUDGET_FEATURE_ENABLED:
+        return False
     return has_role_permission(cursor, "manage_budget", role_id=role_id)
 
 
@@ -1996,6 +2015,9 @@ def check_company_request_capacity(cursor, company_id):
 
 
 def can_use_budget_reports(role=None, position=None, dept=None):
+    if not BUDGET_FEATURE_ENABLED:
+        return False
+
     effective_role = (role or session.get("role") or "").strip()
     effective_position = (position or session.get("position") or "").strip()
     effective_dept = (dept or session.get("dept") or "").strip()
@@ -2022,6 +2044,9 @@ def get_budget_scope_department(role=None, position=None, dept=None):
 
 
 def can_submit_budget_request(role=None, position=None):
+    if not BUDGET_FEATURE_ENABLED:
+        return False
+
     role_text = (role or session.get("role") or "").strip().lower()
     position_text = (position or session.get("position") or "").strip().lower()
     return any(keyword in role_text for keyword in ALLOWED_BUDGET_SUBMIT_KEYWORDS) or any(
@@ -2030,12 +2055,18 @@ def can_submit_budget_request(role=None, position=None):
 
 
 def can_use_secretary_budget_fields(role=None, position=None):
+    if not BUDGET_FEATURE_ENABLED:
+        return False
+
     position_text = (position or session.get("position") or "").strip().lower()
     role_text = (role or session.get("role") or "").strip().lower()
     return ("secretary" in position_text) or ("secretary" in role_text)
 
 
 def can_release_budget_on_completion(role=None, position=None):
+    if not BUDGET_FEATURE_ENABLED:
+        return False
+
     role_text = (role or session.get("role") or "").strip().lower()
     position_text = (position or session.get("position") or "").strip().lower()
     return any(keyword in role_text for keyword in BUDGET_RELEASE_ACTOR_KEYWORDS) or any(
@@ -2049,6 +2080,10 @@ def is_coo_user(role=None, position=None):
     return any(keyword in role_text for keyword in COO_KEYWORDS) or any(
         keyword in position_text for keyword in COO_KEYWORDS
     )
+
+
+def budget_feature_disabled_response(status_code=503):
+    return jsonify({"success": False, "error": BUDGET_FEATURE_DISABLED_MESSAGE}), status_code
 
 
 def normalize_request_budget(value):
@@ -7249,6 +7284,7 @@ def admin_dashboard():
         can_manage_request_types_access = can_manage_request_types(cursor, role=role)
         can_view_reports_access = can_view_reports(cursor, role=role)
         can_manage_budget_access = can_manage_budget(cursor, role=role)
+        can_use_budget_reports_access = can_use_budget_reports(role, session.get("position"), session.get("dept"))
 
         cursor.execute(
             """
@@ -7465,6 +7501,7 @@ def admin_dashboard():
             can_manage_request_types=can_manage_request_types_access,
             can_view_reports=can_view_reports_access,
             can_manage_budget=can_manage_budget_access,
+            can_use_budget_reports=can_use_budget_reports_access,
         )
 
     except Exception as e:
@@ -8926,6 +8963,9 @@ def reports_api():
 
 @app.route("/api/budget/overview")
 def budget_overview_api():
+    if not BUDGET_FEATURE_ENABLED:
+        return budget_feature_disabled_response()
+
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9184,6 +9224,9 @@ def budget_overview_api():
 
 @app.route("/api/budget/total", methods=["POST"])
 def budget_total_update_api():
+    if not BUDGET_FEATURE_ENABLED:
+        return budget_feature_disabled_response()
+
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9235,6 +9278,9 @@ def budget_total_update_api():
 
 @app.route("/api/budget/departments", methods=["GET"])
 def budget_departments_api():
+    if not BUDGET_FEATURE_ENABLED:
+        return budget_feature_disabled_response()
+
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9312,6 +9358,9 @@ def budget_departments_api():
 
 @app.route("/api/budget/departments/allocate", methods=["POST"])
 def budget_department_allocate_api():
+    if not BUDGET_FEATURE_ENABLED:
+        return budget_feature_disabled_response()
+
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9418,6 +9467,9 @@ def budget_department_allocate_api():
 
 @app.route("/api/budget/types", methods=["GET", "POST"])
 def budget_types_api():
+    if not BUDGET_FEATURE_ENABLED:
+        return budget_feature_disabled_response()
+
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9472,6 +9524,9 @@ def budget_types_api():
 
 @app.route("/api/budget/types/<int:type_id>", methods=["PUT", "DELETE"])
 def budget_type_item_api(type_id):
+    if not BUDGET_FEATURE_ENABLED:
+        return budget_feature_disabled_response()
+
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9526,6 +9581,9 @@ def budget_type_item_api(type_id):
 
 @app.route("/api/budget/transfer", methods=["POST"])
 def budget_transfer_api():
+    if not BUDGET_FEATURE_ENABLED:
+        return budget_feature_disabled_response()
+
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 

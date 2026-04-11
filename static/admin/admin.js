@@ -149,6 +149,13 @@ function closeMobileMenu() {
 }
 
 function switchView(viewName, pushUrl = true) {
+  if (viewName === "budgetmanage" && !document.getElementById("nav-budgetmanage")) {
+    viewName = "dashboard";
+  }
+  if (viewName === "budgetreports" && !document.getElementById("nav-budgetreports")) {
+    viewName = "dashboard";
+  }
+
   document
     .querySelectorAll(".view-section")
     .forEach((el) => (el.style.display = "none"));

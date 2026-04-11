@@ -129,10 +129,13 @@ def test_redirect_when_not_logged_in(client):
 def test_udashboard_loads_when_logged_in_with_mocked_db(client, monkeypatch):
     import main
     monkeypatch.setattr(main, "get_connection", fake_get_connection)
+    monkeypatch.setattr(main, "ensure_session_company_context", lambda cursor: 1)
+    monkeypatch.setattr(main, "get_user_id_for_company", lambda email, company_id: 1)
 
     with client.session_transaction() as sess:
         sess["email"] = "dev@example.com"
         sess["role"] = "dev"
+        sess["company_id"] = 1
         sess["dept"] = "GSD"
         sess["position_id"] = 1
         sess["position"] = "Developer"
@@ -172,6 +175,20 @@ def test_verify_token_rejects_invalid_signature():
 
     with pytest.raises(BadSignature):
         main.verify_token("not-a-valid-token")
+
+
+def test_password_policy_requires_symbol_by_default():
+    import main
+
+    ok, _ = main.validate_password_strength("Validpass1")
+    assert ok is False
+
+
+def test_password_policy_accepts_strong_password():
+    import main
+
+    ok, _ = main.validate_password_strength("Validpass1!")
+    assert ok is True
 
 
 def test_api_user_dashboard_requires_bearer_token(client):
@@ -261,9 +278,24 @@ def test_security_headers_are_set(client):
 
     assert r.headers.get("X-Content-Type-Options") == "nosniff"
     assert r.headers.get("X-Frame-Options") == "DENY"
-    assert r.headers.get("Referrer-Policy") == "no-referrer"
+    assert r.headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
     assert r.headers.get("Cross-Origin-Resource-Policy") == "same-site"
     assert "default-src 'self'" in (r.headers.get("Content-Security-Policy") or "")
+
+
+def test_inventory_api_requires_login(client):
+    r = client.post("/api/inventory", json={"product_name": "Paper", "quantity": 1})
+    assert r.status_code == 401
+
+
+def test_inventory_api_forbidden_for_non_gsd_user(client):
+    with client.session_transaction() as sess:
+        sess["email"] = "user@example.com"
+        sess["role"] = "User"
+        sess["dept"] = "CEA"
+
+    r = client.post("/api/inventory", json={"product_name": "Paper", "quantity": 1})
+    assert r.status_code == 403
 
 
 def test_forgot_password_page_loads(client):

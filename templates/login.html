@@ -8,9 +8,24 @@
     <meta name="description" content="">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/static/login.css">
+    <script src="{{ url_for('static', filename='user/sweetalert.js') }}"></script>
+    <script src="{{ url_for('static', filename='alltoast/toast.js') }}"></script>
     <script src="/static/login.js"></script>
 </head>
 <body>
+    <div id="flash-messages" style="display: none">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, flash_message in messages %}
+                    <div data-category="{{ category }}" data-message="{{ flash_message }}"></div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        {% if message %}
+            <div data-category="error" data-message="{{ message }}"></div>
+        {% endif %}
+    </div>
+
     <div class="page-shell">
         <div class="container">
             <aside class="logo-side">
@@ -28,10 +43,6 @@
                 <h2 class="title">Welcome Back</h2>
                 <p class="subtitle">Sign in to access the Finance Portal</p>
                 <div class="heading-line"></div>
-
-                {% if message %}
-                    <p class="em">{{ message }}</p>
-                {% endif %}
 
                 <form action="/login" method="post">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

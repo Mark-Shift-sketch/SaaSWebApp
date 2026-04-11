@@ -4,10 +4,15 @@ import smtplib
 from email.message import EmailMessage
 import hmac
 import random
+import os
 
 
-ALLOWED_EMAIL_DOMAIN = "phinmaed.com"
-EMAIL_DOMAIN_HELPER_MESSAGE = "Please use youre phinmaed email"
+ALLOWED_EMAIL_DOMAIN = str(os.environ.get("ALLOWED_EMAIL_DOMAIN", "phinmaed.com")).strip().lower()
+EMAIL_DOMAIN_HELPER_MESSAGE = str(
+    os.environ.get("EMAIL_DOMAIN_HELPER_MESSAGE", "Please use youre phinmaed email")
+).strip()
+SMTP_HOST = str(os.environ.get("SMTP_HOST", "smtp.gmail.com")).strip()
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 
 
 def _is_allowed_system_email(email):
@@ -20,7 +25,7 @@ def _is_allowed_system_email(email):
 
 def sent_otp(receiver, otp):
     try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
         server.starttls()
         server.login(Email, password)
 
@@ -154,7 +159,7 @@ def verify():
 # send email for approval or rejected request
 def send_request_email(receiver, status):
     try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
         server.starttls()
         server.login(Email, password)
 
@@ -185,7 +190,7 @@ def send_request_email(receiver, status):
     
 def send_cc_email(receiver, subject, body):
     try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
         server.starttls()
         server.login(Email, password)
 
@@ -215,7 +220,7 @@ def send_cc_email_with_blob(receiver, subject, body, filename, file_blob):
                 filename=filename
             )
 
-        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
         server.starttls()
         server.login(Email, password)
         server.send_message(msg)

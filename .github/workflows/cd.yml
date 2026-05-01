@@ -52,7 +52,15 @@ jobs:
 
       - name: Create backend artifact
         run: |
-          tar -czf requesting-and-approval-${{ github.sha }}.tar.gz "${{ env.BACKEND_DIR }}"
+          set -e
+          # Use a stable git snapshot when the detected backend dir is the repository root
+          if [ -z "${BACKEND_DIR}" ] || [ "${BACKEND_DIR}" = "." ]; then
+            echo "BACKEND_DIR is repository root; creating artifact from commit snapshot using git archive"
+            git archive --format=tar --prefix=requesting-and-approval-${{ github.sha }}/ ${{ github.sha }} | gzip > requesting-and-approval-${{ github.sha }}.tar.gz
+          else
+            echo "Creating tar.gz of ${BACKEND_DIR}"
+            tar --warning=no-file-changed -czf requesting-and-approval-${{ github.sha }}.tar.gz "${BACKEND_DIR}"
+          fi
 
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4

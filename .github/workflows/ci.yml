@@ -91,7 +91,7 @@ try:
     print('has inv_add:', hasattr(m, 'inv_add'))
 except Exception as e:
     print('import main failed:', e)
-    PY
+PY
         working-directory: ${{ env.BACKEND_DIR }}
 
       - name: Run pytest

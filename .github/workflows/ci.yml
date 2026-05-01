@@ -24,6 +24,7 @@ jobs:
       - name: Detect backend directory
         id: detect-backend
         run: |
+          # Prefer explicit backend folder names
           if [ -d RequestingAndApproval ]; then
             echo "BACKEND_DIR=RequestingAndApproval" >> "$GITHUB_ENV"
           elif [ -d requestingandapproval ]; then
@@ -31,10 +32,27 @@ jobs:
           elif [ -d RequestingAndApproval/RequestingAndApproval ]; then
             echo "BACKEND_DIR=RequestingAndApproval/RequestingAndApproval" >> "$GITHUB_ENV"
           else
-            echo "Searching for backend markers (main.py, requirements.txt, Dockerfile)..." >&2
-            candidate=$(find . -maxdepth 4 -type f \( -name main.py -o -name requirements.txt -o -name Dockerfile \) -printf "%h\n" | sort -u | head -n1)
-            if [ -n "$candidate" ]; then
+            # Prefer directories that contain main.py specifically (avoid picking repo root with only requirements.txt)
+            main_candidate=$(find . -maxdepth 4 -type f -name main.py -printf "%h\n" | sort -u | head -n1)
+            if [ -n "$main_candidate" ]; then
+              candidate=${main_candidate#./}
+            else
+              # Fallback: look for requirements/Dockerfile but avoid '.' unless it actually contains main.py
+              candidate=$(find . -maxdepth 4 -type f \( -name requirements.txt -o -name Dockerfile \) -printf "%h\n" | sort -u | head -n1)
               candidate=${candidate#./}
+              if [ "$candidate" = "" ] || [ "$candidate" = "." ]; then
+                # Final fallback to the known folder name if present
+                if [ -d RequestingAndApproval ]; then
+                  candidate="RequestingAndApproval"
+                elif [ -d requestingandapproval ]; then
+                  candidate="requestingandapproval"
+                else
+                  candidate=""
+                fi
+              fi
+            fi
+
+            if [ -n "$candidate" ]; then
               echo "BACKEND_DIR=$candidate" >> "$GITHUB_ENV"
             else
               echo "No backend directory found" >&2
@@ -100,9 +118,24 @@ PY
           elif [ -d RequestingAndApproval/RequestingAndApproval ]; then
             echo "BACKEND_DIR=RequestingAndApproval/RequestingAndApproval" >> "$GITHUB_ENV"
           else
-            candidate=$(find . -maxdepth 4 -type f \( -name main.py -o -name requirements.txt -o -name Dockerfile \) -printf "%h\n" | sort -u | head -n1)
-            if [ -n "$candidate" ]; then
+            main_candidate=$(find . -maxdepth 4 -type f -name main.py -printf "%h\n" | sort -u | head -n1)
+            if [ -n "$main_candidate" ]; then
+              candidate=${main_candidate#./}
+            else
+              candidate=$(find . -maxdepth 4 -type f \( -name requirements.txt -o -name Dockerfile \) -printf "%h\n" | sort -u | head -n1)
               candidate=${candidate#./}
+              if [ "$candidate" = "" ] || [ "$candidate" = "." ]; then
+                if [ -d RequestingAndApproval ]; then
+                  candidate="RequestingAndApproval"
+                elif [ -d requestingandapproval ]; then
+                  candidate="requestingandapproval"
+                else
+                  candidate=""
+                fi
+              fi
+            fi
+
+            if [ -n "$candidate" ]; then
               echo "BACKEND_DIR=$candidate" >> "$GITHUB_ENV"
             else
               echo "No backend directory found" >&2

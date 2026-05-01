@@ -11,7 +11,10 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}/requesting-approval
+  # Ensure repository/name is lowercase for container tags
+  IMAGE_NAME: ${{ toLower(github.repository) }}/requesting-approval
+  # Opt into Node.js 24 for actions that require newer Node runtime
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   package-backend:
@@ -21,9 +24,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Detect backend directory
+        id: detect-backend
+        run: |
+          # Try common casings for the backend folder to be robust on case-sensitive runners
+          if [ -d RequestingAndApproval ]; then
+            echo "BACKEND_DIR=RequestingAndApproval" >> "$GITHUB_ENV"
+          elif [ -d requestingandapproval ]; then
+            echo "BACKEND_DIR=requestingandapproval" >> "$GITHUB_ENV"
+          elif [ -d RequestingandApproval/RequestingAndApproval ]; then
+            echo "BACKEND_DIR=RequestingandApproval/RequestingAndApproval" >> "$GITHUB_ENV"
+          else
+            echo "No backend directory found" >&2
+            exit 1
+          fi
+
       - name: Create backend artifact
         run: |
-          tar -czf requesting-and-approval-${{ github.sha }}.tar.gz RequestingAndApproval
+          tar -czf requesting-and-approval-${{ github.sha }}.tar.gz "${{ env.BACKEND_DIR }}"
 
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4
@@ -52,8 +70,8 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
-          context: ./RequestingAndApproval
-          file: ./RequestingAndApproval/Dockerfile
+          context: ./${{ env.BACKEND_DIR }}
+          file: ./${{ env.BACKEND_DIR }}/Dockerfile
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}

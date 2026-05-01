@@ -1,0 +1,107 @@
+name: CD
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/requesting-approval
+
+jobs:
+  package-backend:
+    name: Package Backend Artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create backend artifact
+        run: |
+          tar -czf requesting-and-approval-${{ github.sha }}.tar.gz RequestingAndApproval
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: requesting-and-approval-${{ github.sha }}
+          path: requesting-and-approval-${{ github.sha }}.tar.gz
+          if-no-files-found: error
+
+  build-and-push-backend-image:
+    name: Build and Push Backend Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./RequestingAndApproval
+          file: ./RequestingAndApproval/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  deploy-backend-via-ssh:
+    name: Deploy Backend To Server (Optional)
+    runs-on: ubuntu-latest
+    needs: build-and-push-backend-image
+    steps:
+      - name: Check deploy prerequisites
+        id: prereq
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          RATE_LIMIT_STORAGE_URI: ${{ secrets.RATE_LIMIT_STORAGE_URI }}
+          FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
+        run: |
+          if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_USER" ] && [ -n "$DEPLOY_SSH_KEY" ] && [ -n "$RATE_LIMIT_STORAGE_URI" ] && [ -n "$FRONTEND_ORIGINS" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping deploy: missing one or more required secrets."
+          fi
+
+      - name: Deploy latest image on server
+        if: steps.prereq.outputs.ready == 'true'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            docker login ghcr.io -u ${{ secrets.DEPLOY_GHCR_USER }} -p ${{ secrets.DEPLOY_GHCR_TOKEN }}
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            docker rm -f requesting-approval || true
+            docker run -d --name requesting-approval --restart unless-stopped -p 5000:5000 \
+              -e APP_ENV='production' \
+              -e FLASK_DEBUG='false' \
+              -e DEV_EMAIL='developer@devit.com' \
+              -e SECRET_KEY='${{ secrets.SECRET_KEY }}' \
+              -e JWT_SECRET_KEY='${{ secrets.JWT_SECRET_KEY }}' \
+              -e DB_HOST='${{ secrets.DB_HOST }}' \
+              -e DB_USER='${{ secrets.DB_USER }}' \
+              -e DB_PASS='${{ secrets.DB_PASS }}' \
+              -e DB_NAME='${{ secrets.DB_NAME }}' \
+              -e SESSION_COOKIE_SECURE='true' \
+              -e RATE_LIMIT_STORAGE_URI='${{ secrets.RATE_LIMIT_STORAGE_URI }}' \
+              -e FRONTEND_ORIGINS='${{ secrets.FRONTEND_ORIGINS }}' \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest

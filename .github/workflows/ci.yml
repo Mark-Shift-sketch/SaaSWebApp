@@ -71,7 +71,7 @@ jobs:
           pip install -r requirements.txt
         working-directory: ${{ env.BACKEND_DIR }}
 
-      - name: Debug: show backend dir and `main` module info
+      - name: "Debug: show backend dir and main module info"
         continue-on-error: true
         run: |
           echo "BACKEND_DIR=${BACKEND_DIR}"

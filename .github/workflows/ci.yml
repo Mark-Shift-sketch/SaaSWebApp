@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: webapp
+        working-directory: .
     env:
       SECRET_KEY: test-secret-key
       SESSION_COOKIE_SECURE: "false"
@@ -20,6 +20,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Detect backend directory
+        id: detect-backend
+        run: |
+          if [ -d RequestingAndApproval ]; then
+            echo "BACKEND_DIR=RequestingAndApproval" >> "$GITHUB_ENV"
+          elif [ -d requestingandapproval ]; then
+            echo "BACKEND_DIR=requestingandapproval" >> "$GITHUB_ENV"
+          elif [ -d RequestingAndApproval/RequestingAndApproval ]; then
+            echo "BACKEND_DIR=RequestingAndApproval/RequestingAndApproval" >> "$GITHUB_ENV"
+          else
+            echo "Searching for backend markers (main.py, requirements.txt, Dockerfile)..." >&2
+            candidate=$(find . -maxdepth 4 -type f \( -name main.py -o -name requirements.txt -o -name Dockerfile \) -printf "%h\n" | sort -u | head -n1)
+            if [ -n "$candidate" ]; then
+              candidate=${candidate#./}
+              echo "BACKEND_DIR=$candidate" >> "$GITHUB_ENV"
+            else
+              echo "No backend directory found" >&2
+              exit 1
+            fi
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,9 +51,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+        working-directory: ${{ env.BACKEND_DIR }}
 
       - name: Run pytest
         run: pytest -q
+        working-directory: ${{ env.BACKEND_DIR }}
 
   security-scan:
     name: Security Scan (Python)
@@ -44,6 +67,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Detect backend directory
+        id: detect-backend-scan
+        run: |
+          if [ -d RequestingAndApproval ]; then
+            echo "BACKEND_DIR=RequestingAndApproval" >> "$GITHUB_ENV"
+          elif [ -d requestingandapproval ]; then
+            echo "BACKEND_DIR=requestingandapproval" >> "$GITHUB_ENV"
+          elif [ -d RequestingAndApproval/RequestingAndApproval ]; then
+            echo "BACKEND_DIR=RequestingAndApproval/RequestingAndApproval" >> "$GITHUB_ENV"
+          else
+            candidate=$(find . -maxdepth 4 -type f \( -name main.py -o -name requirements.txt -o -name Dockerfile \) -printf "%h\n" | sort -u | head -n1)
+            if [ -n "$candidate" ]; then
+              candidate=${candidate#./}
+              echo "BACKEND_DIR=$candidate" >> "$GITHUB_ENV"
+            else
+              echo "No backend directory found" >&2
+              exit 1
+            fi
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -54,9 +97,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pip-audit bandit
+        working-directory: ${{ env.BACKEND_DIR }}
 
       - name: Run dependency vulnerability audit
         run: pip-audit
+        working-directory: ${{ env.BACKEND_DIR }}
 
       - name: Run Bandit static security checks
         run: bandit -r . -x tests,moble,build
+        working-directory: ${{ env.BACKEND_DIR }}

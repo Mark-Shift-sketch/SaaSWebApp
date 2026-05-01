@@ -12,7 +12,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   # Ensure repository/name is lowercase for container tags
-  IMAGE_NAME: ${{ toLower(github.repository) }}/requesting-approval
+  IMAGE_NAME: ${{ github.repository }}/requesting-approval
   # Opt into Node.js 24 for actions that require newer Node runtime
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -57,6 +57,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Detect backend directory
+        id: detect-backend-build
+        run: |
+          if [ -d RequestingAndApproval ]; then
+            echo "BACKEND_DIR=RequestingAndApproval" >> "$GITHUB_ENV"
+          elif [ -d requestingandapproval ]; then
+            echo "BACKEND_DIR=requestingandapproval" >> "$GITHUB_ENV"
+          elif [ -d RequestingAndApproval/RequestingAndApproval ]; then
+            echo "BACKEND_DIR=RequestingAndApproval/RequestingAndApproval" >> "$GITHUB_ENV"
+          else
+            echo "No backend directory found" >&2
+            exit 1
+          fi
+
+      - name: Lowercase image name
+        run: |
+          echo "IMAGE_NAME_LOWER=$(echo '${{ github.repository }}/requesting-approval' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -74,8 +92,8 @@ jobs:
           file: ./${{ env.BACKEND_DIR }}/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LOWER }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LOWER }}:latest
 
   deploy-backend-via-ssh:
     name: Deploy Backend To Server (Optional)
@@ -91,6 +109,8 @@ jobs:
           RATE_LIMIT_STORAGE_URI: ${{ secrets.RATE_LIMIT_STORAGE_URI }}
           FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
         run: |
+          # Compute lowercased image name for remote pulls
+          echo "IMAGE_NAME_LOWER=$(echo '${{ github.repository }}/requesting-approval' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
           if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_USER" ] && [ -n "$DEPLOY_SSH_KEY" ] && [ -n "$RATE_LIMIT_STORAGE_URI" ] && [ -n "$FRONTEND_ORIGINS" ]; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
@@ -107,7 +127,7 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             docker login ghcr.io -u ${{ secrets.DEPLOY_GHCR_USER }} -p ${{ secrets.DEPLOY_GHCR_TOKEN }}
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LOWER }}:latest
             docker rm -f requesting-approval || true
             docker run -d --name requesting-approval --restart unless-stopped -p 5000:5000 \
               -e APP_ENV='production' \
@@ -122,4 +142,4 @@ jobs:
               -e SESSION_COOKIE_SECURE='true' \
               -e RATE_LIMIT_STORAGE_URI='${{ secrets.RATE_LIMIT_STORAGE_URI }}' \
               -e FRONTEND_ORIGINS='${{ secrets.FRONTEND_ORIGINS }}' \
-              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LOWER }}:latest

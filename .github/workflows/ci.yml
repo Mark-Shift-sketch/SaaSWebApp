@@ -92,7 +92,7 @@ try:
 except Exception as e:
     print('import main failed:', e)
     PY
-  working-directory: ${{ env.BACKEND_DIR }}
+        working-directory: ${{ env.BACKEND_DIR }}
 
       - name: Run pytest
         run: pytest -q

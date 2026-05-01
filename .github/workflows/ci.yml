@@ -79,19 +79,19 @@ jobs:
           echo "Listing backend dir: ${BACKEND_DIR}"
           ls -la "${BACKEND_DIR}"
           echo "Python sys.path first entries:"
-          python - <<'PY'
-import sys, os, importlib
-print('\n'.join(sys.path[:5]))
-os.environ.pop('PYTHONPATH', None)
-try:
-    sys.path.insert(0, os.getcwd())
-    m = importlib.import_module('main')
-    print('main module file:', getattr(m, '__file__', 'N/A'))
-    print('has validate_password_strength:', hasattr(m, 'validate_password_strength'))
-    print('has inv_add:', hasattr(m, 'inv_add'))
-except Exception as e:
-    print('import main failed:', e)
-PY
+            python - <<'PY'
+            import sys, os, importlib
+            print('\n'.join(sys.path[:5]))
+            os.environ.pop('PYTHONPATH', None)
+            try:
+              sys.path.insert(0, os.getcwd())
+              m = importlib.import_module('main')
+              print('main module file:', getattr(m, '__file__', 'N/A'))
+              print('has validate_password_strength:', hasattr(m, 'validate_password_strength'))
+              print('has inv_add:', hasattr(m, 'inv_add'))
+            except Exception as e:
+              print('import main failed:', e)
+            PY
         working-directory: ${{ env.BACKEND_DIR }}
 
       - name: Run pytest

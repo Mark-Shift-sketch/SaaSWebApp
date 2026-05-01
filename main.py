@@ -8,7 +8,6 @@ from flask import (
     session,
     redirect,
     request,
-    g,
     render_template,
     url_for,
     flash,
@@ -34,7 +33,7 @@ except Exception:
 from dotenv import load_dotenv
 from sendotp import srotp, verify, request_signup_otp, verify_signup_otp
 from config import get_connection
-from sendotp import send_cc_email, send_request_email
+from sendotp import send_cc_email, send_request_email, send_pending_action_reminder_email
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from functools import wraps
 from sendotp import send_cc_email_with_blob
@@ -56,7 +55,7 @@ import textwrap
 import base64
 import time
 import random
-import secrets
+import hashlib
 from threading import Thread
 from io import BytesIO, StringIO
 from flask import send_file
@@ -65,9 +64,11 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_EMAIL_DOMAIN = "phinmaed.com"
+ALLOWED_EMAIL_DOMAIN = str(os.environ.get("ALLOWED_EMAIL_DOMAIN", "phinmaed.com")).strip().lower()
 ALLOWED_EMAIL_SUFFIX = f"@{ALLOWED_EMAIL_DOMAIN}"
-EMAIL_DOMAIN_HELPER_MESSAGE = "Please use youre phinmaed email"
+EMAIL_DOMAIN_HELPER_MESSAGE = str(
+    os.environ.get("EMAIL_DOMAIN_HELPER_MESSAGE", "Please use youre phinmaed email")
+).strip()
 DEV_EXCEPTION_EMAIL = str(os.environ.get("DEV_EMAIL") or os.environ.get("name") or "").strip().lower()
 
 
@@ -202,16 +203,72 @@ except Exception:
     csrf = None
     CSRFError = None
 
+
+def get_rate_limit_user_key():
+    """Resolve a stable key for per-user global limits."""
+    try:
+        session_user_id = int(session.get("user_id") or 0)
+    except Exception:
+        session_user_id = 0
+
+    if session_user_id > 0:
+        return f"user:{session_user_id}"
+
+    session_email = str(session.get("email") or "").strip().lower()
+    if session_email:
+        return f"email:{session_email}"
+
+    auth = (request.headers.get("Authorization") or "").strip()
+    if auth.startswith("Bearer "):
+        token = auth.replace("Bearer ", "", 1).strip()
+        if token:
+            try:
+                payload = verify_token_payload(token)
+                token_email = str(payload.get("email") or "").strip().lower()
+                if token_email:
+                    return f"token:{token_email}"
+            except Exception:
+                pass
+
+    remote_address = get_remote_address() or "unknown"
+    return f"guest:{remote_address}"
+
+
 # Rate limiting
+GLOBAL_USER_DAILY_LIMIT = os.environ.get("RATE_LIMIT_PER_USER_DAY", "1000 per day")
+GLOBAL_IP_HOURLY_LIMIT = os.environ.get("RATE_LIMIT_PER_IP_HOUR", "100 per hour")
+
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
-    default_limits=[
-        os.environ.get("RATE_LIMIT_DEFAULT_DAY", "1000 per day"),
-        os.environ.get("RATE_LIMIT_DEFAULT_HOUR", "200 per hour"),
-    ],
+    default_limits=[],
     storage_uri=os.environ.get("RATE_LIMIT_STORAGE_URI", "memory://"),
 )
+
+global_user_rate_limit = limiter.shared_limit(
+    GLOBAL_USER_DAILY_LIMIT,
+    scope="global-user-limit",
+    key_func=get_rate_limit_user_key,
+)
+global_ip_rate_limit = limiter.shared_limit(
+    GLOBAL_IP_HOURLY_LIMIT,
+    scope="global-ip-limit",
+    key_func=get_remote_address,
+)
+
+
+def apply_global_rate_limits():
+    """Apply global user/ip limits to all registered routes once."""
+    for endpoint, view_func in list(app.view_functions.items()):
+        if endpoint == "static":
+            continue
+        if getattr(view_func, "_global_rate_limited", False):
+            continue
+
+        wrapped = global_user_rate_limit(view_func)
+        wrapped = global_ip_rate_limit(wrapped)
+        wrapped._global_rate_limited = True
+        app.view_functions[endpoint] = wrapped
 
 
 FRONTEND_ORIGINS = [o.strip() for o in (os.environ.get("FRONTEND_ORIGINS", "")).split(",") if o.strip()]
@@ -233,12 +290,14 @@ CORS(
 )
 
 # Upload Size Limit
-app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024 # 20 MB file upload
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "20"))
+MAX_BUG_IMAGE_MB = int(os.environ.get("MAX_BUG_IMAGE_MB", "5"))
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 # Allowed Upload Types 
 ALLOWED_EXTENSIONS = {"pdf"}
 ALLOWED_BUG_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif"}
 ALLOWED_BUG_IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
-MAX_BUG_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_BUG_IMAGE_BYTES = MAX_BUG_IMAGE_MB * 1024 * 1024
 
 
 
@@ -504,33 +563,20 @@ def role_required(*roles):
 
 
 # Security headers
-@app.before_request
-def ensure_csp_nonce():
-    if not getattr(g, "csp_nonce", None):
-        g.csp_nonce = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
-
-
-@app.context_processor
-def inject_csp_nonce():
-    return {"csp_nonce": getattr(g, "csp_nonce", "")}
-
-
 @app.after_request
 def set_security_headers(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
-    allow_same_origin_frame = request.path.startswith("/download_template/") or request.path.endswith("/filled-preview")
+    allow_same_origin_frame = request.path.startswith("/download_template/")
     resp.headers["X-Frame-Options"] = "SAMEORIGIN" if allow_same_origin_frame else "DENY"
     resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     resp.headers["Cross-Origin-Resource-Policy"] = "same-site"
+    # Basic CSP 
     resp.headers["Content-Security-Policy"] = (
-        "default-src 'self' https: data: blob:; "
-        "script-src 'self' https: blob: 'unsafe-inline' 'unsafe-eval'; "
-        "style-src 'self' https: 'unsafe-inline'; "
-        "img-src 'self' data: https: blob:; "
-        "font-src 'self' data: https:; "
-        "connect-src 'self' https: ws: wss:; "
-        "worker-src 'self' https: blob:; "
-        "frame-src 'self' https: data: blob:;"
+        "default-src 'self'; "
+        "img-src 'self' data:; "
+        "frame-src 'self' blob:; "
+        "style-src 'self' 'unsafe-inline' https:; "
+        "script-src 'self' 'unsafe-inline' https:;"
     )
     return resp
 
@@ -935,7 +981,7 @@ def _get_request_approved_positions(cursor, request_id):
         SELECT DISTINCT actor_position_id
         FROM request_actions
         WHERE request_id = %s
-          AND action = 'APPROVED'
+          AND action IN ('APPROVED', 'COO_APPROVED')
           AND actor_position_id IS NOT NULL
     """,
         (request_id,),
@@ -1182,8 +1228,6 @@ ALLOWED_BUDGET_REPORT_ROLES = {"Admin", "SuperAdmin", "SBO"}
 ALLOWED_BUDGET_SUBMIT_KEYWORDS = {"secretary", "representative", "purchasing"}
 BUDGET_RELEASE_ACTOR_KEYWORDS = {"representative", "purchasing"}
 COO_KEYWORDS = {"coo", "chief operating officer"}
-BUDGET_FEATURE_ENABLED = False
-BUDGET_FEATURE_DISABLED_MESSAGE = "Feature Not yet Available"
 ALLOWED_FORM_BLOCK_TYPES = {"heading", "text", "textarea", "number", "date", "shape", "table"}
 ALLOWED_FORM_SHAPES = {"line", "box"}
 ALLOWED_FORM_COLUMN_TYPES = {"text", "number"}
@@ -1239,6 +1283,8 @@ _request_type_form_schema_checked = False
 _request_form_submission_schema_checked = False
 _tenant_schema_checked = False
 _system_maintenance_schema_checked = False
+_finance_amount_editor_schema_checked = False
+_stage_reminder_schema_checked = False
 _system_maintenance_cache = {
     "enabled": False,
     "reason": "",
@@ -1254,15 +1300,22 @@ def _slugify_company_name(value):
     return text or "org"
 
 
+def _escape_mysql_identifier(value):
+    return "`" + str(value or "").replace("`", "``") + "`"
+
+
 def _table_has_column(cursor, table_name, column_name):
-    cursor.execute(f"SHOW COLUMNS FROM {table_name} LIKE %s", (column_name,))
+    cursor.execute("SHOW COLUMNS FROM " + _escape_mysql_identifier(table_name) + " LIKE %s", (column_name,))
     return bool(cursor.fetchone())
 
 
 def _ensure_company_scoped_unique_name(cursor, table_name, name_column, company_column="company_id"):
-    cursor.execute(f"SHOW INDEX FROM {table_name}")
-    index_rows = cursor.fetchall() or []
+    table_identifier = _escape_mysql_identifier(table_name)
+    company_identifier = _escape_mysql_identifier(company_column)
+    name_identifier = _escape_mysql_identifier(name_column)
     target_index_name = f"uq_{table_name}_{company_column}_{name_column}".lower()
+    cursor.execute("SHOW INDEX FROM " + table_identifier)
+    index_rows = cursor.fetchall() or []
     has_target = False
 
     grouped = {}
@@ -1292,13 +1345,13 @@ def _ensure_company_scoped_unique_name(cursor, table_name, name_column, company_
 
         # Drop legacy global unique index on name only.
         if is_unique and cols == [name_column] and normalized_key != "primary":
-            cursor.execute(f"ALTER TABLE {table_name} DROP INDEX `{key_name}`")
+            cursor.execute("ALTER TABLE " + table_identifier + " DROP INDEX `" + str(key_name or "").replace("`", "``") + "`")
             continue
 
         # Extra guard for schemas where the legacy index key name equals the column name.
         if is_unique and normalized_key == legacy_index_name and normalized_key != "primary":
             try:
-                cursor.execute(f"ALTER TABLE {table_name} DROP INDEX `{key_name}`")
+                cursor.execute("ALTER TABLE " + table_identifier + " DROP INDEX `" + str(key_name or "").replace("`", "``") + "`")
             except mysql.connector.Error as exc:
                 if getattr(exc, "errno", None) != 1091:
                     raise
@@ -1306,7 +1359,19 @@ def _ensure_company_scoped_unique_name(cursor, table_name, name_column, company_
     if not has_target:
         try:
             cursor.execute(
-                f"ALTER TABLE {table_name} ADD UNIQUE KEY uq_{table_name}_{company_column}_{name_column} ({company_column}, {name_column})"
+                "ALTER TABLE "
+                + table_identifier
+                + " ADD UNIQUE KEY uq_"
+                + str(table_name)
+                + "_"
+                + str(company_column)
+                + "_"
+                + str(name_column)
+                + " ("
+                + company_identifier
+                + ", "
+                + name_identifier
+                + ")"
             )
         except mysql.connector.Error as exc:
             # Ignore duplicate index name so startup migration remains idempotent.
@@ -1582,8 +1647,6 @@ def can_view_reports(cursor, role=None, role_id=None):
 
 
 def can_manage_budget(cursor, role=None, role_id=None):
-    if not BUDGET_FEATURE_ENABLED:
-        return False
     return has_role_permission(cursor, "manage_budget", role_id=role_id)
 
 
@@ -2015,9 +2078,6 @@ def check_company_request_capacity(cursor, company_id):
 
 
 def can_use_budget_reports(role=None, position=None, dept=None):
-    if not BUDGET_FEATURE_ENABLED:
-        return False
-
     effective_role = (role or session.get("role") or "").strip()
     effective_position = (position or session.get("position") or "").strip()
     effective_dept = (dept or session.get("dept") or "").strip()
@@ -2044,9 +2104,6 @@ def get_budget_scope_department(role=None, position=None, dept=None):
 
 
 def can_submit_budget_request(role=None, position=None):
-    if not BUDGET_FEATURE_ENABLED:
-        return False
-
     role_text = (role or session.get("role") or "").strip().lower()
     position_text = (position or session.get("position") or "").strip().lower()
     return any(keyword in role_text for keyword in ALLOWED_BUDGET_SUBMIT_KEYWORDS) or any(
@@ -2055,18 +2112,12 @@ def can_submit_budget_request(role=None, position=None):
 
 
 def can_use_secretary_budget_fields(role=None, position=None):
-    if not BUDGET_FEATURE_ENABLED:
-        return False
-
     position_text = (position or session.get("position") or "").strip().lower()
     role_text = (role or session.get("role") or "").strip().lower()
     return ("secretary" in position_text) or ("secretary" in role_text)
 
 
 def can_release_budget_on_completion(role=None, position=None):
-    if not BUDGET_FEATURE_ENABLED:
-        return False
-
     role_text = (role or session.get("role") or "").strip().lower()
     position_text = (position or session.get("position") or "").strip().lower()
     return any(keyword in role_text for keyword in BUDGET_RELEASE_ACTOR_KEYWORDS) or any(
@@ -2082,8 +2133,42 @@ def is_coo_user(role=None, position=None):
     )
 
 
-def budget_feature_disabled_response(status_code=503):
-    return jsonify({"success": False, "error": BUDGET_FEATURE_DISABLED_MESSAGE}), status_code
+def is_coo_position_id(cursor, position_id):
+    try:
+        normalized_position_id = int(position_id or 0)
+    except (TypeError, ValueError):
+        return False
+
+    if normalized_position_id <= 0:
+        return False
+
+    try:
+        cursor.execute(
+            "SELECT COALESCE(position_name, '') AS position_name FROM positions WHERE position_id = %s LIMIT 1",
+            (normalized_position_id,),
+        )
+        row = cursor.fetchone() or {}
+        position_name = str(row.get("position_name") or "").strip().lower()
+        return any(keyword in position_name for keyword in COO_KEYWORDS)
+    except Exception:
+        return False
+
+
+def queue_coo_if_stage_is_coo(cursor, conn, request_id, stage_position_id, requested_by_email=""):
+    """Queue/send COO special approval when a request is currently at a COO stage."""
+    if not is_coo_position_id(cursor, stage_position_id):
+        return {"queued": False, "notified": 0, "reason": "stage_not_coo"}
+
+    try:
+        return queue_coo_special_approval(
+            cursor,
+            conn,
+            request_id,
+            requested_by_email=requested_by_email,
+        )
+    except Exception:
+        logger.exception("queue_coo_if_stage_is_coo failed")
+        return {"queued": False, "notified": 0, "reason": "queue_error"}
 
 
 def normalize_request_budget(value):
@@ -2159,6 +2244,58 @@ def ensure_user_saved_signature_schema(cursor, conn):
 
     conn.commit()
     _user_saved_signature_schema_checked = True
+
+
+def ensure_finance_amount_editor_schema(cursor, conn):
+    global _finance_amount_editor_schema_checked
+
+    if _finance_amount_editor_schema_checked:
+        return
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS finance_amount_editors (
+            member_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            company_id INT NOT NULL,
+            user_id INT NOT NULL,
+            added_by_email VARCHAR(255) NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_finance_amount_editors_company_user (company_id, user_id),
+            INDEX idx_finance_amount_editors_company (company_id),
+            INDEX idx_finance_amount_editors_user (user_id)
+        )
+        """
+    )
+
+    conn.commit()
+    _finance_amount_editor_schema_checked = True
+
+
+def ensure_stage_reminder_schema(cursor, conn):
+    global _stage_reminder_schema_checked
+
+    if _stage_reminder_schema_checked:
+        return
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS request_stage_reminders (
+            reminder_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            request_id INT NOT NULL,
+            company_id INT NOT NULL,
+            position_id INT NOT NULL,
+            reminder_date DATE NOT NULL,
+            recipients_json LONGTEXT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_request_stage_daily (request_id, position_id, reminder_date),
+            INDEX idx_request_stage_reminders_company (company_id),
+            INDEX idx_request_stage_reminders_position (position_id)
+        )
+        """
+    )
+
+    conn.commit()
+    _stage_reminder_schema_checked = True
 
 
 def ensure_budget_schema(cursor, conn):
@@ -2639,9 +2776,167 @@ def queue_coo_special_approval(cursor, conn, request_id, requested_by_email=""):
     }
 
 
-@app.route("/api/specialaccess/request/<int:request_id>/resend-email", methods=["POST"])
+def advance_request_after_coo_approval(cursor, conn, request_id, requested_by_email=""):
+    """Move request forward (or finalize) after COO approval so request dashboards stay in sync."""
+    cursor.execute(
+        """
+        SELECT request_id, request_type_id, stage_position_id
+        FROM requests
+        WHERE request_id = %s
+        LIMIT 1
+        """,
+        (request_id,),
+    )
+    req_row = cursor.fetchone() or {}
+    if not req_row:
+        return {"advanced": False, "reason": "request_not_found"}
+
+    request_type_id = int(req_row.get("request_type_id") or 0)
+    current_stage = req_row.get("stage_position_id")
+
+    cursor.execute("SELECT status_id FROM request_status WHERE status_name='PENDING' LIMIT 1")
+    pending_row = cursor.fetchone() or {}
+    pending_status_id = pending_row.get("status_id")
+
+    cursor.execute("SELECT status_id FROM request_status WHERE status_name='APPROVED' LIMIT 1")
+    approved_row = cursor.fetchone() or {}
+    approved_status_id = approved_row.get("status_id")
+
+    if pending_status_id is None or approved_status_id is None:
+        return {"advanced": False, "reason": "missing_status_ids"}
+
+    workflow_steps = get_effective_workflow_steps(
+        cursor,
+        request_id=request_id,
+        request_type_id=request_type_id,
+    )
+    workflow_steps = _apply_conditional_high_value_workflow_steps(
+        cursor,
+        request_id,
+        workflow_steps,
+    )
+
+    if workflow_steps:
+        approved_positions = _get_request_approved_positions(cursor, request_id)
+        if is_coo_position_id(cursor, current_stage):
+            try:
+                approved_positions.add(int(current_stage))
+            except (TypeError, ValueError):
+                pass
+        step_idx, pending_positions = _get_active_workflow_step_state(
+            workflow_steps,
+            current_stage,
+            approved_positions,
+        )
+
+        if step_idx is None or not pending_positions:
+            cursor.execute(
+                """
+                UPDATE requests
+                SET status_id = %s,
+                    rejection_message = NULL,
+                    stage_position_id = NULL
+                WHERE request_id = %s
+                """,
+                (approved_status_id, request_id),
+            )
+            return {"advanced": True, "state": "approved"}
+
+        next_stage = int(pending_positions[0])
+        cursor.execute(
+            """
+            UPDATE requests
+            SET status_id = %s,
+                rejection_message = NULL,
+                stage_position_id = %s
+            WHERE request_id = %s
+            """,
+            (pending_status_id, next_stage, request_id),
+        )
+        coo_result = queue_coo_if_stage_is_coo(
+            cursor,
+            conn,
+            request_id,
+            next_stage,
+            requested_by_email=requested_by_email,
+        )
+        return {
+            "advanced": True,
+            "state": "pending_next_stage",
+            "next_stage_position_id": next_stage,
+            "coo": coo_result,
+        }
+
+    _reviewers, _approvers, workflow = get_effective_workflow_positions(
+        cursor,
+        request_id=request_id,
+        request_type_id=request_type_id,
+    )
+    workflow = _apply_conditional_high_value_workflow(cursor, request_id, workflow)
+
+    if not workflow:
+        cursor.execute(
+            """
+            UPDATE requests
+            SET status_id = %s,
+                rejection_message = NULL,
+                stage_position_id = NULL
+            WHERE request_id = %s
+            """,
+            (approved_status_id, request_id),
+        )
+        return {"advanced": True, "state": "approved"}
+
+    try:
+        idx = workflow.index(int(current_stage)) if current_stage is not None else -1
+    except Exception:
+        idx = -1
+
+    if idx < len(workflow) - 1:
+        next_stage = int(workflow[idx + 1] if idx >= 0 else workflow[0])
+        cursor.execute(
+            """
+            UPDATE requests
+            SET status_id = %s,
+                rejection_message = NULL,
+                stage_position_id = %s
+            WHERE request_id = %s
+            """,
+            (pending_status_id, next_stage, request_id),
+        )
+        coo_result = queue_coo_if_stage_is_coo(
+            cursor,
+            conn,
+            request_id,
+            next_stage,
+            requested_by_email=requested_by_email,
+        )
+        return {
+            "advanced": True,
+            "state": "pending_next_stage",
+            "next_stage_position_id": next_stage,
+            "coo": coo_result,
+        }
+
+    cursor.execute(
+        """
+        UPDATE requests
+        SET status_id = %s,
+            rejection_message = NULL,
+            stage_position_id = NULL
+        WHERE request_id = %s
+        """,
+        (approved_status_id, request_id),
+    )
+    return {"advanced": True, "state": "approved"}
+
+
+@app.route("/api/specialaccess/request/<int:request_id>/resend-email", methods=["GET", "POST"])
 @login_required
 def special_access_resend_email(request_id):
+    if request.method == "GET":
+        return redirect(url_for("special_access_dashboard", request_id=request_id))
+
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -2669,7 +2964,62 @@ def special_access_resend_email(request_id):
         )
         row = cursor.fetchone() or {}
         if not row:
-            return jsonify({"success": False, "error": "Request is not queued for COO approval."}), 404
+            cursor.execute(
+                """
+                SELECT
+                    request_id,
+                    stage_position_id,
+                    COALESCE(rs.status_name, '') AS status_name
+                FROM requests r
+                LEFT JOIN request_status rs ON rs.status_id = r.status_id
+                WHERE r.request_id = %s
+                LIMIT 1
+                """,
+                (request_id,),
+            )
+            request_row = cursor.fetchone() or {}
+            if not request_row:
+                return jsonify({"success": False, "error": "Request not found."}), 404
+
+            stage_position_id = request_row.get("stage_position_id")
+            if not is_coo_position_id(cursor, stage_position_id):
+                status_name = str(request_row.get("status_name") or "").strip()
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": "Request is not queued for COO approval.",
+                        "current_status": status_name,
+                        "stage_position_id": stage_position_id,
+                        "hint": "COO email links are queued automatically only when the request enters a COO stage.",
+                    }
+                ), 409
+
+            queue_result = queue_coo_special_approval(
+                cursor,
+                conn,
+                request_id,
+                requested_by_email=(session.get("email") or ""),
+            )
+            if not queue_result.get("queued"):
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": "Failed to queue COO approval email link.",
+                        "coo": queue_result,
+                    }
+                ), 502
+
+            return jsonify(
+                {
+                    "success": True,
+                    "message": "COO queue was missing and has been created. Email link has been (re)sent.",
+                    "coo": queue_result,
+                    "notified": int(queue_result.get("notified") or 0),
+                    "recipient_count": int(queue_result.get("recipient_count") or 0),
+                    "review_link": queue_result.get("review_link") or "",
+                    "auto_queued": True,
+                }
+            )
 
         coo_status = str(row.get("status") or "").strip().upper()
         if coo_status != "PENDING":
@@ -2897,7 +3247,17 @@ def process_coo_special_decision_by_email(cursor, conn, request_id, actor_email,
 
     current_coo_status = str(approval_row.get("status") or "").strip().upper()
     if decision == "APPROVED" and current_coo_status == "APPROVED":
-        return {"success": True, "message": "Request already approved by COO."}, 200
+        advance_result = advance_request_after_coo_approval(
+            cursor,
+            conn,
+            request_id,
+            requested_by_email=actor_email,
+        )
+        return {
+            "success": True,
+            "message": "Request already approved by COO.",
+            "workflow": advance_result,
+        }, 200
     if decision == "REJECTED" and current_coo_status == "REJECTED":
         return {"success": True, "message": "Request already rejected by COO."}, 200
     if decision == "REJECTED" and current_coo_status == "APPROVED":
@@ -2971,6 +3331,7 @@ def process_coo_special_decision_by_email(cursor, conn, request_id, actor_email,
     actor_position_id = actor_row.get("position_id")
     actor_email_norm = str(actor_row.get("email") or "").strip().lower()
     method_value = "PIN"
+    advance_result = {"advanced": False, "reason": "not_applicable"}
 
     if decision == "APPROVED":
         cursor.execute(
@@ -3015,6 +3376,13 @@ def process_coo_special_decision_by_email(cursor, conn, request_id, actor_email,
             )
         except Exception:
             pass
+
+        advance_result = advance_request_after_coo_approval(
+            cursor,
+            conn,
+            request_id,
+            requested_by_email=actor_email_norm,
+        )
     elif decision == "REJECTED":
         reject_reason = str(reason or "").strip() or "Rejected by COO special access."
 
@@ -3096,6 +3464,7 @@ def process_coo_special_decision_by_email(cursor, conn, request_id, actor_email,
         "success": True,
         "message": base,
         "email": {"sent": 0, "recipients": 0},
+        "workflow": advance_result,
     }, 200
 
 
@@ -3203,6 +3572,73 @@ def coo_action_page(token):
         selected_request_id=selected_request_id,
         summary=summary,
     )
+
+
+@app.route("/coo-action/<token>/attachment", methods=["GET"])
+def coo_action_attachment_by_token(token):
+    try:
+        token_data = verify_coo_special_action_token(token, max_age=COO_ACTION_TOKEN_MAX_AGE_SECONDS)
+    except SignatureExpired:
+        return Response("This COO action link has expired.", status=401, mimetype="text/plain")
+    except BadSignature:
+        return Response("Invalid COO action link.", status=401, mimetype="text/plain")
+
+    request_id_raw = request.args.get("request_id", "").strip()
+    request_id = int(token_data.get("request_id") or 0)
+    if request_id_raw:
+        try:
+            request_id = int(request_id_raw)
+        except (TypeError, ValueError):
+            request_id = 0
+
+    if request_id <= 0:
+        return Response("Invalid request id.", status=400, mimetype="text/plain")
+
+    actor_email = str(token_data.get("email") or "").strip().lower()
+    if not actor_email:
+        return Response("Invalid COO token email.", status=400, mimetype="text/plain")
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_coo_special_approval_schema(cursor, conn)
+
+        cursor.execute(
+            """
+            SELECT request_id, COALESCE(requested_to_email, '') AS requested_to_email
+            FROM request_coo_approvals
+            WHERE request_id = %s
+            LIMIT 1
+            """,
+            (request_id,),
+        )
+        approval_row = cursor.fetchone() or {}
+        if not approval_row:
+            return Response("Request is not queued for COO approval.", status=404, mimetype="text/plain")
+
+        requested_to_email = str(approval_row.get("requested_to_email") or "").strip().lower()
+        if requested_to_email and requested_to_email != actor_email:
+            return Response("Access denied for this COO token.", status=403, mimetype="text/plain")
+
+        file_bytes, filename = _load_template_pdf_bytes_for_request(cursor, request_id)
+        if not file_bytes:
+            return Response("No attachment found", status=404, mimetype="text/plain")
+
+        force_download = request.args.get("download") == "1"
+
+        response = send_file(
+            BytesIO(file_bytes),
+            download_name=filename or f"request_{request_id}_attachment.pdf",
+            mimetype="application/pdf",
+            as_attachment=force_download,
+        )
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @app.route("/api/coo-action/<token>/approve", methods=["POST"])
@@ -3457,9 +3893,12 @@ def special_access_dashboard():
         conn.close()
 
 
-@app.route("/api/specialaccess/request/<int:request_id>/approve", methods=["POST"])
+@app.route("/api/specialaccess/request/<int:request_id>/approve", methods=["GET", "POST"])
 @login_required
 def special_access_approve_request(request_id):
+    if request.method == "GET":
+        return redirect(url_for("special_access_dashboard", request_id=request_id))
+
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -3515,7 +3954,20 @@ def special_access_approve_request(request_id):
             return jsonify({"success": False, "error": "Request is not queued for COO approval."}), 404
 
         if str(approval_row.get("status") or "").strip().upper() == "APPROVED":
-            return jsonify({"success": True, "message": "Request already approved by COO."})
+            advance_result = advance_request_after_coo_approval(
+                cursor,
+                conn,
+                request_id,
+                requested_by_email=(session.get("email") or ""),
+            )
+            conn.commit()
+            return jsonify(
+                {
+                    "success": True,
+                    "message": "Request already approved by COO.",
+                    "workflow": advance_result,
+                }
+            )
 
         pin_row = get_admin_pin_state(cursor, session["email"])
         if not pin_row:
@@ -3624,6 +4076,13 @@ def special_access_approve_request(request_id):
         except Exception:
             pass
 
+        advance_result = advance_request_after_coo_approval(
+            cursor,
+            conn,
+            request_id,
+            requested_by_email=(session.get("email") or ""),
+        )
+
         conn.commit()
 
         response_message = "COO special approval completed. No post-decision COO email is sent by design."
@@ -3633,6 +4092,7 @@ def special_access_approve_request(request_id):
                 "success": True,
                 "message": response_message,
                 "email": {"sent": 0, "recipients": 0},
+                "workflow": advance_result,
             }
         )
     except Exception:
@@ -5243,6 +5703,31 @@ def parse_amount_decimal(value):
         return Decimal("0")
 
 
+def parse_amount_input_decimal(value):
+    """Parse amount input that may be a single number or a comma-separated list.
+
+    Examples:
+    - "8000" -> 8000
+    - "8,000" -> 8000
+    - "2000,1000,4000" -> 7000
+    """
+    text = str(value or "").strip()
+    if not text:
+        return Decimal("0")
+
+    compact = re.sub(r"\s+", "", text)
+    if re.fullmatch(r"-?\d{1,3}(,\d{3})+(\.\d+)?", compact):
+        return parse_amount_decimal(compact)
+
+    if "," not in text:
+        return parse_amount_decimal(text)
+
+    total = Decimal("0")
+    for token in [t.strip() for t in text.split(",") if str(t).strip()]:
+        total += parse_amount_decimal(token)
+    return total
+
+
 def _normalize_pdf_field_lookup_key(value):
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
@@ -5842,6 +6327,151 @@ def get_admin_pin_state(cursor, email):
     return cursor.fetchone()
 
 
+def is_finance_amount_editor(cursor, company_id, user_id):
+    try:
+        normalized_company_id = int(company_id or 0)
+        normalized_user_id = int(user_id or 0)
+    except (TypeError, ValueError):
+        return False
+
+    if normalized_company_id <= 0 or normalized_user_id <= 0:
+        return False
+
+    cursor.execute(
+        """
+        SELECT 1
+        FROM finance_amount_editors
+        WHERE company_id = %s AND user_id = %s
+        LIMIT 1
+        """,
+        (normalized_company_id, normalized_user_id),
+    )
+    return bool(cursor.fetchone())
+
+
+def _run_pending_stage_reminder_email_batch(email_jobs):
+    for job in email_jobs or []:
+        try:
+            send_pending_action_reminder_email(
+                receiver=(job or {}).get("receiver"),
+                request_id=(job or {}).get("request_id"),
+                request_type=(job or {}).get("request_type"),
+                stage_name=(job or {}).get("stage_name"),
+                age_hours=(job or {}).get("age_hours", 24),
+            )
+        except Exception:
+            logger.exception("Pending stage reminder email failed")
+
+
+def process_position_pending_reminders(cursor, conn, company_id, position_id):
+    """Return overdue requests for the current stage and queue one reminder email per request per day."""
+    try:
+        normalized_company_id = int(company_id or 0)
+        normalized_position_id = int(position_id or 0)
+    except (TypeError, ValueError):
+        return []
+
+    if normalized_company_id <= 0 or normalized_position_id <= 0:
+        return []
+
+    ensure_stage_reminder_schema(cursor, conn)
+
+    cursor.execute(
+        """
+        SELECT
+            r.request_id,
+            COALESCE(rt.type_name, 'Request') AS request_type_name,
+            COALESCE(p.position_name, 'Assigned Stage') AS stage_name,
+            TIMESTAMPDIFF(HOUR, r.created_at, NOW()) AS age_hours
+        FROM requests r
+        JOIN request_status s ON s.status_id = r.status_id
+        LEFT JOIN request_types rt ON rt.request_type_id = r.request_type_id
+        LEFT JOIN positions p ON p.position_id = r.stage_position_id
+        WHERE r.company_id = %s
+          AND r.stage_position_id = %s
+          AND UPPER(COALESCE(s.status_name, '')) = 'PENDING'
+          AND TIMESTAMPDIFF(HOUR, r.created_at, NOW()) >= 24
+        ORDER BY r.created_at ASC
+        LIMIT 100
+        """,
+        (normalized_company_id, normalized_position_id),
+    )
+    overdue_rows = cursor.fetchall() or []
+
+    if not overdue_rows:
+        return []
+
+    cursor.execute(
+        """
+        SELECT DISTINCT LOWER(TRIM(email)) AS email
+        FROM users
+        WHERE company_id = %s
+          AND position_id = %s
+          AND COALESCE(is_deleted, 0) = 0
+          AND COALESCE(is_banned, 0) = 0
+          AND email IS NOT NULL
+          AND TRIM(email) <> ''
+        """,
+        (normalized_company_id, normalized_position_id),
+    )
+    recipient_rows = cursor.fetchall() or []
+    recipients = sorted(
+        {
+            str((row or {}).get("email") or "").strip().lower()
+            for row in recipient_rows
+            if str((row or {}).get("email") or "").strip()
+        }
+    )
+
+    email_jobs = []
+    for row in overdue_rows:
+        request_id = int(row.get("request_id") or 0)
+        if request_id <= 0:
+            continue
+
+        cursor.execute(
+            """
+            INSERT IGNORE INTO request_stage_reminders
+                (request_id, company_id, position_id, reminder_date, recipients_json)
+            VALUES (%s, %s, %s, CURDATE(), %s)
+            """,
+            (
+                request_id,
+                normalized_company_id,
+                normalized_position_id,
+                json.dumps(recipients, ensure_ascii=True),
+            ),
+        )
+
+        if cursor.rowcount > 0 and recipients:
+            age_hours = int(row.get("age_hours") or 24)
+            for receiver in recipients:
+                email_jobs.append(
+                    {
+                        "receiver": receiver,
+                        "request_id": request_id,
+                        "request_type": row.get("request_type_name") or "Request",
+                        "stage_name": row.get("stage_name") or "Assigned Stage",
+                        "age_hours": age_hours,
+                    }
+                )
+
+    if email_jobs:
+        conn.commit()
+        run_background_task(_run_pending_stage_reminder_email_batch, email_jobs)
+
+    return [
+        {
+            "request_id": int(row.get("request_id") or 0),
+            "request_type_name": row.get("request_type_name") or "Request",
+            "stage_name": row.get("stage_name") or "Assigned Stage",
+            "age_hours": int(row.get("age_hours") or 24),
+        }
+        for row in overdue_rows
+        if int(row.get("request_id") or 0) > 0
+    ]
+
+
 def _build_admin_pin_state_payload(row):
     failed_attempts = int(_coerce_first_value(row, "admin_pin_failed_attempts", 0) or 0)
     pin_disabled = bool(int(_coerce_first_value(row, "admin_pin_disabled", 0) or 0))
@@ -6353,6 +6983,11 @@ def dean_dashboard():
     cursor = conn.cursor(dictionary=True)
 
     try:
+        ensure_tenant_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return "Forbidden", 403
+
         cursor.execute("""
             SELECT
             r.request_id,
@@ -6452,6 +7087,13 @@ def dean_dashboard():
             """, (position_id,))
         approvals_today = cursor.fetchone()["count"]
 
+        reminder_overdue_requests = process_position_pending_reminders(
+            cursor,
+            conn,
+            company_id,
+            position_id,
+        )
+
         return render_template(
             "dean.html",
             approvals_today=approvals_today,
@@ -6459,6 +7101,7 @@ def dean_dashboard():
             approved_count=approved_count,
             rejected_count=rejected_count,
             r_requests=r_requests,
+            reminder_overdue_requests=reminder_overdue_requests,
         )
     finally:
         cursor.close()
@@ -7094,6 +7737,11 @@ def gsdh_dashboard():
     cursor = conn.cursor(dictionary=True)
 
     try:
+        ensure_tenant_schema(cursor, conn)
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            return "Forbidden", 403
+
         # Inventory
         cursor.execute("""
             SELECT product_id, product_name, quantity
@@ -7173,6 +7821,13 @@ def gsdh_dashboard():
         """, (position_id,))
         completed_count = cursor.fetchone()["count"]
 
+        reminder_overdue_requests = process_position_pending_reminders(
+            cursor,
+            conn,
+            company_id,
+            position_id,
+        )
+
         return render_template(
             "gsddashboard.html",
             inventory_items=inventory_items,
@@ -7182,12 +7837,14 @@ def gsdh_dashboard():
             rejected_count=rejected_count,
             approvals_today=approvals_today,
             completed_count=completed_count,
+            reminder_overdue_requests=reminder_overdue_requests,
         )
     finally:
         cursor.close()
         conn.close()
 
 @app.post("/api/inventory")
+@login_required
 def inv_add():
     data = request.get_json() or {}
     name = " ".join((data.get("product_name") or "").split()).strip()
@@ -7228,6 +7885,7 @@ def inv_add():
 
 
 @app.put("/api/inventory/<int:pid>")
+@login_required
 def inv_edit(pid):
     data = request.get_json() or {}
     name = (data.get("product_name") or "").strip()
@@ -7253,6 +7911,7 @@ def inv_edit(pid):
 
 
 @app.delete("/api/inventory/<int:pid>")
+@login_required
 def inv_delete(pid):
     conn = get_connection()
     cur = conn.cursor()
@@ -7281,10 +7940,16 @@ def admin_dashboard():
         if company_id <= 0:
             return "No company context found", 403
 
+        ensure_finance_amount_editor_schema(cursor, conn)
+        can_edit_amount_team = is_finance_amount_editor(
+            cursor,
+            company_id,
+            int(session.get("user_id") or 0),
+        )
+
         can_manage_request_types_access = can_manage_request_types(cursor, role=role)
         can_view_reports_access = can_view_reports(cursor, role=role)
         can_manage_budget_access = can_manage_budget(cursor, role=role)
-        can_use_budget_reports_access = can_use_budget_reports(role, session.get("position"), session.get("dept"))
 
         cursor.execute(
             """
@@ -7446,6 +8111,12 @@ def admin_dashboard():
         )
         recent_requests = cursor.fetchall()
         apply_send_back_visibility(cursor, recent_requests)
+        reminder_overdue_requests = process_position_pending_reminders(
+            cursor,
+            conn,
+            company_id,
+            position_id,
+        )
 
 
         # Positions dropdown
@@ -7501,7 +8172,8 @@ def admin_dashboard():
             can_manage_request_types=can_manage_request_types_access,
             can_view_reports=can_view_reports_access,
             can_manage_budget=can_manage_budget_access,
-            can_use_budget_reports=can_use_budget_reports_access,
+            reminder_overdue_requests=reminder_overdue_requests,
+            can_edit_amount_team=can_edit_amount_team,
         )
 
     except Exception as e:
@@ -7947,6 +8619,22 @@ def admin_update_request_amount(request_id):
     cursor = conn.cursor(dictionary=True)
     try:
         ensure_admin_pin_schema(cursor, conn)
+        ensure_tenant_schema(cursor, conn)
+        ensure_finance_amount_editor_schema(cursor, conn)
+
+        company_id = ensure_session_company_context(cursor)
+        actor_user_id = int(session.get("user_id") or 0)
+        if company_id <= 0 or actor_user_id <= 0:
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+        if not is_finance_amount_editor(cursor, company_id, actor_user_id):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "Only Finance Amount Editor team can edit amount.",
+                }
+            ), 403
+
         pin_row = get_admin_pin_state(cursor, session["email"])
         if not pin_row:
             return jsonify({"success": False, "error": "User not found"}), 404
@@ -8178,10 +8866,9 @@ def update_request_workflow(request_id):
             all_position_ids.append(stage_position_id)
 
         if all_position_ids:
-            placeholders = ",".join(["%s"] * len(all_position_ids))
             cursor.execute(
-                f"SELECT position_id FROM positions WHERE company_id=%s AND position_id IN ({placeholders})",
-                tuple([company_id] + all_position_ids),
+                "SELECT position_id FROM positions WHERE company_id=%s",
+                (company_id,),
             )
             valid_position_ids = {int(row["position_id"]) for row in (cursor.fetchall() or [])}
             for pid in all_position_ids:
@@ -8225,7 +8912,20 @@ def update_request_workflow(request_id):
         )
 
         conn.commit()
-        return jsonify({"success": True, "message": "Workflow updated successfully."})
+        coo_result = queue_coo_if_stage_is_coo(
+            cursor,
+            conn,
+            request_id,
+            stage_position_id,
+            requested_by_email=(session.get("email") or ""),
+        )
+        return jsonify(
+            {
+                "success": True,
+                "message": "Workflow updated successfully.",
+                "coo": coo_result,
+            }
+        )
 
     except Exception as e:
         conn.rollback()
@@ -8350,10 +9050,9 @@ def add_request_type():
 
         selected_position_ids = normalized_reviewer_ids + normalized_approver_ids
         if selected_position_ids:
-            placeholders = ",".join(["%s"] * len(selected_position_ids))
             cursor.execute(
-                f"SELECT position_id FROM positions WHERE company_id=%s AND position_id IN ({placeholders})",
-                tuple([company_id] + selected_position_ids),
+                "SELECT position_id FROM positions WHERE company_id=%s",
+                (company_id,),
             )
             valid_ids = {int(row["position_id"]) for row in (cursor.fetchall() or [])}
             for pos_id in selected_position_ids:
@@ -8693,14 +9392,7 @@ def create_request():
 
         if amount is None:
             if not amount_raw:
-                if is_draft:
-                    amount = 0.0
-                else:
-                    msg = "Amount is required."
-                    if request.headers.get("X-Requested-With") == "fetch":
-                        return jsonify({"success": False, "message": msg}), 400
-                    flash(msg, "danger")
-                    return redirect(request.referrer or "/udashboard")
+                amount = 0.0
             else:
                 try:
                     amount = float(amount_raw)
@@ -8872,9 +9564,26 @@ def create_request():
 
         conn.commit()
 
+        coo_result = {"queued": False, "notified": 0, "reason": "not_submitted"}
+        if not is_draft:
+            coo_result = queue_coo_if_stage_is_coo(
+                cursor,
+                conn,
+                request_id,
+                stage_position_id,
+                requested_by_email=(session.get("email") or ""),
+            )
+
         # return JSON for fetch
         if request.headers.get("X-Requested-With") == "fetch":
-            return jsonify({"success": True, "request_id": request_id, "saved_as": "draft" if is_draft else "submitted"}), 200
+            return jsonify(
+                {
+                    "success": True,
+                    "request_id": request_id,
+                    "saved_as": "draft" if is_draft else "submitted",
+                    "coo": coo_result,
+                }
+            ), 200
 
         flash("Request submitted successfully!", "success")
         return redirect("/udashboard")
@@ -8963,9 +9672,6 @@ def reports_api():
 
 @app.route("/api/budget/overview")
 def budget_overview_api():
-    if not BUDGET_FEATURE_ENABLED:
-        return budget_feature_disabled_response()
-
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9224,9 +9930,6 @@ def budget_overview_api():
 
 @app.route("/api/budget/total", methods=["POST"])
 def budget_total_update_api():
-    if not BUDGET_FEATURE_ENABLED:
-        return budget_feature_disabled_response()
-
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9278,9 +9981,6 @@ def budget_total_update_api():
 
 @app.route("/api/budget/departments", methods=["GET"])
 def budget_departments_api():
-    if not BUDGET_FEATURE_ENABLED:
-        return budget_feature_disabled_response()
-
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9358,9 +10058,6 @@ def budget_departments_api():
 
 @app.route("/api/budget/departments/allocate", methods=["POST"])
 def budget_department_allocate_api():
-    if not BUDGET_FEATURE_ENABLED:
-        return budget_feature_disabled_response()
-
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9467,9 +10164,6 @@ def budget_department_allocate_api():
 
 @app.route("/api/budget/types", methods=["GET", "POST"])
 def budget_types_api():
-    if not BUDGET_FEATURE_ENABLED:
-        return budget_feature_disabled_response()
-
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9524,9 +10218,6 @@ def budget_types_api():
 
 @app.route("/api/budget/types/<int:type_id>", methods=["PUT", "DELETE"])
 def budget_type_item_api(type_id):
-    if not BUDGET_FEATURE_ENABLED:
-        return budget_feature_disabled_response()
-
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9581,9 +10272,6 @@ def budget_type_item_api(type_id):
 
 @app.route("/api/budget/transfer", methods=["POST"])
 def budget_transfer_api():
-    if not BUDGET_FEATURE_ENABLED:
-        return budget_feature_disabled_response()
-
     if "email" not in session:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -9763,23 +10451,11 @@ def export_reports_csv():
         "this_year": "YEAR(r.created_at)=YEAR(CURDATE())",
     }
 
-    where_clause = where_map[selected_range]
     status_values = allowed_statuses[selected_status]
-    status_placeholders = ", ".join(["%s"] * len(status_values))
-    status_clause = f"AND s.status_name IN ({status_placeholders})"
+    status_param = ",".join(status_values)
 
-    conn = get_connection()
-    cur = conn.cursor(dictionary=True)
-    try:
-        if not can_view_reports(cur):
-            return Response("Forbidden: missing report access permission", status=403, mimetype="text/plain")
-
-        company_id = ensure_session_company_context(cur)
-        if company_id <= 0:
-            return jsonify({"success": False, "message": "No company context found"}), 403
-
-        cur.execute(
-            f"""
+    export_query_map = {
+        "this_week": """
             SELECT
                 r.request_id,
                 r.created_at,
@@ -9796,13 +10472,108 @@ def export_reports_csv():
             LEFT JOIN request_status s ON r.status_id = s.status_id
             LEFT JOIN positions p ON r.stage_position_id = p.position_id
             WHERE r.company_id = %s
-            AND {where_clause}
-            {status_clause}
+            AND r.created_at >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY)
+            AND r.created_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 7 DAY)
+            AND FIND_IN_SET(s.status_name, %s)
             ORDER BY r.created_at DESC
-        """
-            ,
-            tuple([company_id] + list(status_values)),
-        )
+        """,
+        "this_month": """
+            SELECT
+                r.request_id,
+                r.created_at,
+                u.email,
+                COALESCE(d.dept_name, '-') AS department,
+                COALESCE(rt.type_name, '-') AS request_type,
+                COALESCE(s.status_name, '-') AS status,
+                COALESCE(p.position_name, '-') AS current_stage,
+                COALESCE(r.filename, '-') AS filename
+            FROM requests r
+            JOIN users u ON r.user_id = u.user_id
+            LEFT JOIN departments d ON u.dept_id = d.dept_id
+            LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
+            LEFT JOIN request_status s ON r.status_id = s.status_id
+            LEFT JOIN positions p ON r.stage_position_id = p.position_id
+            WHERE r.company_id = %s
+            AND YEAR(r.created_at)=YEAR(CURDATE()) AND MONTH(r.created_at)=MONTH(CURDATE())
+            AND FIND_IN_SET(s.status_name, %s)
+            ORDER BY r.created_at DESC
+        """,
+        "three_months": """
+            SELECT
+                r.request_id,
+                r.created_at,
+                u.email,
+                COALESCE(d.dept_name, '-') AS department,
+                COALESCE(rt.type_name, '-') AS request_type,
+                COALESCE(s.status_name, '-') AS status,
+                COALESCE(p.position_name, '-') AS current_stage,
+                COALESCE(r.filename, '-') AS filename
+            FROM requests r
+            JOIN users u ON r.user_id = u.user_id
+            LEFT JOIN departments d ON u.dept_id = d.dept_id
+            LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
+            LEFT JOIN request_status s ON r.status_id = s.status_id
+            LEFT JOIN positions p ON r.stage_position_id = p.position_id
+            WHERE r.company_id = %s
+            AND r.created_at >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)
+            AND FIND_IN_SET(s.status_name, %s)
+            ORDER BY r.created_at DESC
+        """,
+        "six_months": """
+            SELECT
+                r.request_id,
+                r.created_at,
+                u.email,
+                COALESCE(d.dept_name, '-') AS department,
+                COALESCE(rt.type_name, '-') AS request_type,
+                COALESCE(s.status_name, '-') AS status,
+                COALESCE(p.position_name, '-') AS current_stage,
+                COALESCE(r.filename, '-') AS filename
+            FROM requests r
+            JOIN users u ON r.user_id = u.user_id
+            LEFT JOIN departments d ON u.dept_id = d.dept_id
+            LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
+            LEFT JOIN request_status s ON r.status_id = s.status_id
+            LEFT JOIN positions p ON r.stage_position_id = p.position_id
+            WHERE r.company_id = %s
+            AND r.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+            AND FIND_IN_SET(s.status_name, %s)
+            ORDER BY r.created_at DESC
+        """,
+        "this_year": """
+            SELECT
+                r.request_id,
+                r.created_at,
+                u.email,
+                COALESCE(d.dept_name, '-') AS department,
+                COALESCE(rt.type_name, '-') AS request_type,
+                COALESCE(s.status_name, '-') AS status,
+                COALESCE(p.position_name, '-') AS current_stage,
+                COALESCE(r.filename, '-') AS filename
+            FROM requests r
+            JOIN users u ON r.user_id = u.user_id
+            LEFT JOIN departments d ON u.dept_id = d.dept_id
+            LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
+            LEFT JOIN request_status s ON r.status_id = s.status_id
+            LEFT JOIN positions p ON r.stage_position_id = p.position_id
+            WHERE r.company_id = %s
+            AND YEAR(r.created_at)=YEAR(CURDATE())
+            AND FIND_IN_SET(s.status_name, %s)
+            ORDER BY r.created_at DESC
+        """,
+    }
+
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    try:
+        if not can_view_reports(cur):
+            return Response("Forbidden: missing report access permission", status=403, mimetype="text/plain")
+
+        company_id = ensure_session_company_context(cur)
+        if company_id <= 0:
+            return jsonify({"success": False, "message": "No company context found"}), 403
+
+        cur.execute(export_query_map[selected_range], (company_id, status_param))
         rows = cur.fetchall() or []
 
         output = StringIO()
@@ -9881,6 +10652,10 @@ def _can_access_request_record(row, role, user_id, position_id):
     }
 
     if role in allowed_roles:
+        return True
+
+    # COO can review request attachments/submissions from special access pages.
+    if is_coo_user(role, session.get("position")):
         return True
 
     request_owner_id = _safe_int(row.get("user_id"))
@@ -10087,6 +10862,8 @@ def download_attachment(request_id):
     user_id = session.get("user_id")
     position_id = session.get("position_id")
 
+    prefer_original = request.args.get("original") == "1"
+
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -10143,7 +10920,7 @@ def download_attachment(request_id):
             raw_form_json = str(row.get("form_data_json") or "").strip()
             request_type_id = _safe_int(row.get("request_type_id"))
 
-            if template_mode == "FILLABLE" and template_blob and raw_form_json and request_type_id and not row.get("signed_pdf"):
+            if template_mode == "FILLABLE" and template_blob and raw_form_json and request_type_id and (prefer_original or not row.get("signed_pdf")):
                 parsed_payload = json.loads(raw_form_json)
                 if isinstance(parsed_payload, dict):
                     ensure_request_type_form_schema_table(cursor, conn)
@@ -10157,7 +10934,7 @@ def download_attachment(request_id):
         except Exception:
             logger.exception("download_attachment regeneration failed")
 
-        pdf_bytes = row.get("signed_pdf")
+        pdf_bytes = None if prefer_original else row.get("signed_pdf")
         if not pdf_bytes and regenerated_fillable_pdf:
             pdf_bytes = regenerated_fillable_pdf
             try:
@@ -10379,6 +11156,7 @@ def request_submission(request_id):
 
 
 @app.get("/api/request/<int:request_id>/annotations")
+@login_required
 def get_annotations(request_id):
     if "email" not in session:
         return jsonify({"error": "Unauthorized"}), 401
@@ -10453,6 +11231,7 @@ def get_annotations(request_id):
 
 
 @app.post("/api/request/<int:request_id>/annotations")
+@csrf.exempt
 def save_annotations(request_id):
     if "email" not in session:
         return jsonify({"error": "Unauthorized"}), 401
@@ -10491,17 +11270,25 @@ def save_annotations(request_id):
         if not isinstance(ann, dict):
             return False
 
-        ann_user_id = _normalize_optional_int(ann.get("actor_user_id"))
-        if actor_user_id is not None and ann_user_id is not None:
-            return ann_user_id == actor_user_id
-
-        ann_position_id = _normalize_optional_int(ann.get("actor_position_id"))
-        if actor_position_id is not None and ann_position_id is not None:
-            return ann_position_id == actor_position_id
-
         ann_email = (ann.get("actor_email") or "").strip().lower()
         if actor_email and ann_email:
             return ann_email == actor_email
+
+        ann_user_id = _normalize_optional_int(ann.get("actor_user_id"))
+        if actor_user_id is not None and ann_user_id is not None:
+            return ann_user_id == actor_user_id
+        if (actor_user_id is not None) != (ann_user_id is not None):
+            return False
+
+        ann_position_id = _normalize_optional_int(ann.get("actor_position_id"))
+        # Legacy fallback only when annotation has no actor email/user metadata.
+        if (
+            not ann_email
+            and ann_user_id is None
+            and actor_position_id is not None
+            and ann_position_id is not None
+        ):
+            return ann_position_id == actor_position_id
 
         return False
 
@@ -10593,6 +11380,46 @@ def save_annotations(request_id):
             ann_to_add["actor_position_id"] = actor_position_id
             ann_to_add["actor_email"] = actor_email
             annotations_to_save.append(ann_to_add)
+
+        deduped_annotations = []
+        seen_signatures = set()
+        for ann in annotations_to_save:
+            if not isinstance(ann, dict):
+                continue
+
+            ann_id = str(ann.get("id") or "").strip()
+            ann_type = str(ann.get("type") or "").strip().lower()
+            ann_page = int(_normalize_optional_int(ann.get("page")) or 0)
+            ann_x = round(float(ann.get("x") or 0), 3)
+            ann_y = round(float(ann.get("y") or 0), 3)
+            ann_w = round(float(ann.get("w") or 0), 3)
+            ann_h = round(float(ann.get("h") or 0), 3)
+            ann_text = str(ann.get("text") or "").strip()
+            ann_image = str(ann.get("imageDataUrl") or "")
+            ann_actor_email = str(ann.get("actor_email") or "").strip().lower()
+            ann_actor_user_id = _normalize_optional_int(ann.get("actor_user_id"))
+            ann_actor_position_id = _normalize_optional_int(ann.get("actor_position_id"))
+
+            signature = (
+                ann_id,
+                ann_type,
+                ann_page,
+                ann_x,
+                ann_y,
+                ann_w,
+                ann_h,
+                ann_text,
+                ann_image,
+                ann_actor_email,
+                ann_actor_user_id,
+                ann_actor_position_id,
+            )
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            deduped_annotations.append(ann)
+
+        annotations_to_save = deduped_annotations
 
         if len(annotations_to_save) > 200:
             return jsonify({"error": "Too many items"}), 400
@@ -10702,7 +11529,9 @@ def annotate_page(request_id):
             SELECT 
                 r.request_id,
                 r.user_id,
+                r.company_id,
                 r.stage_position_id,
+                COALESCE(r.amount, 0) AS amount,
                 r.filename,
                 a.signed_pdf,
                 s.status_name
@@ -10756,6 +11585,10 @@ def annotate_page(request_id):
         if not allowed:
             return "Access Denied", 403
 
+        ensure_finance_amount_editor_schema(cur, conn)
+        request_company_id = int(row.get("company_id") or 0)
+        can_edit_amount = is_finance_amount_editor(cur, request_company_id, user_id)
+
         status_name = str(row.get("status_name") or "").strip().upper()
         locked_final_statuses = {"REJECTED", "COMPLETED", "PENDING_USER"}
         is_current_stage_actor = (
@@ -10780,10 +11613,105 @@ def annotate_page(request_id):
             "annotate.html",
             request_id=request_id,
             filename=row.get("filename"),
-            is_signed=is_signed
+            is_signed=is_signed,
+            can_edit_amount=can_edit_amount,
+            request_amount=float(parse_amount_decimal(row.get("amount"))),
         )
     finally:
         cur.close()
+        conn.close()
+
+
+@app.route("/api/annotate/<int:request_id>/amount", methods=["POST"])
+@login_required
+def annotate_update_request_amount(request_id):
+    data = request.get_json(silent=True) or {}
+    amount_raw = str(data.get("amount") or "").strip()
+    if not amount_raw:
+        return jsonify({"success": False, "error": "Amount is required."}), 400
+
+    try:
+        amount_value = parse_amount_input_decimal(amount_raw)
+    except Exception:
+        return jsonify({"success": False, "error": "Invalid amount value."}), 400
+
+    if amount_value < 0:
+        return jsonify({"success": False, "error": "Amount cannot be negative."}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_finance_amount_editor_schema(cursor, conn)
+        ensure_tenant_schema(cursor, conn)
+
+        actor_user_id = int(session.get("user_id") or 0)
+        if actor_user_id <= 0:
+            return jsonify({"success": False, "error": "Unauthorized."}), 401
+
+        cursor.execute(
+            """
+            SELECT
+                r.request_id,
+                r.company_id,
+                COALESCE(s.status_name, '') AS status_name
+            FROM requests r
+            LEFT JOIN request_status s ON s.status_id = r.status_id
+            WHERE r.request_id = %s
+            LIMIT 1
+            """,
+            (request_id,),
+        )
+        request_row = cursor.fetchone() or {}
+        if not request_row:
+            return jsonify({"success": False, "error": "Request not found."}), 404
+
+        company_id = int(request_row.get("company_id") or 0)
+        if company_id <= 0:
+            return jsonify({"success": False, "error": "Invalid company context."}), 400
+
+        if not is_finance_amount_editor(cursor, company_id, actor_user_id):
+            return jsonify({"success": False, "error": "Only Finance Amount Editor team can edit amount."}), 403
+
+        status_name = str(request_row.get("status_name") or "").strip().upper()
+        if status_name not in {"PENDING", "IN PROGRESS", "DRAFT"}:
+            return jsonify({"success": False, "error": "Amount can only be edited while request is pending/in progress."}), 400
+
+        cursor.execute(
+            """
+            UPDATE requests
+            SET amount = %s
+            WHERE request_id = %s
+            """,
+            (str(amount_value.quantize(Decimal("0.01"))), request_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO activity_logs (title, description, company_id, actor_email)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                "Request Amount Updated",
+                f"{session.get('email')} updated amount for REQ#{request_id} to {float(amount_value):,.2f} via annotate page.",
+                company_id,
+                (session.get("email") or "").strip().lower() or None,
+            ),
+        )
+        conn.commit()
+
+        return jsonify(
+            {
+                "success": True,
+                "message": "Amount updated successfully.",
+                "request_id": request_id,
+                "amount": float(amount_value.quantize(Decimal("0.01"))),
+            }
+        )
+    except Exception:
+        conn.rollback()
+        logger.exception("annotate_update_request_amount failed")
+        return jsonify({"success": False, "error": "Failed to update amount."}), 500
+    finally:
+        cursor.close()
         conn.close()
 
 
@@ -10986,6 +11914,7 @@ def annotate_request(request_id):
 
 
 @app.get("/api/annotations/my-signature")
+@login_required
 def get_my_saved_signature():
     if "email" not in session:
         return jsonify({"error": "Unauthorized"}), 401
@@ -11162,10 +12091,9 @@ def edit_request_type():
 
         selected_position_ids = normalized_reviewer_ids + normalized_approver_ids
         if selected_position_ids:
-            placeholders = ",".join(["%s"] * len(selected_position_ids))
             cursor.execute(
-                f"SELECT position_id FROM positions WHERE company_id=%s AND position_id IN ({placeholders})",
-                tuple([company_id] + selected_position_ids),
+                "SELECT position_id FROM positions WHERE company_id=%s",
+                (company_id,),
             )
             valid_ids = {int(row["position_id"]) for row in (cursor.fetchall() or [])}
             for pos_id in selected_position_ids:
@@ -11250,6 +12178,7 @@ def it_dashboard():
         ensure_user_account_control_schema(cursor, conn)
         ensure_department_management_schema(cursor, conn)
         ensure_activity_log_schema(cursor, conn)
+        ensure_finance_amount_editor_schema(cursor, conn)
         company_id = ensure_session_company_context(cursor)
         if company_id <= 0:
             return "Forbidden", 403
@@ -11487,6 +12416,47 @@ def it_dashboard():
                         (company_id,)
         )
         active_user_rows = cursor.fetchall() or []
+        cursor.execute(
+                        """
+                        SELECT
+                                u.user_id,
+                                COALESCE(u.email, '') AS email,
+                                COALESCE(r.role_name, '-') AS role_name,
+                                COALESCE(p.position_name, '-') AS position_name
+                        FROM finance_amount_editors fe
+                        JOIN users u ON u.user_id = fe.user_id
+                        LEFT JOIN roles r ON r.role_id = u.role_id
+                        LEFT JOIN positions p ON p.position_id = u.position_id
+                        WHERE fe.company_id = %s
+                            AND COALESCE(u.is_deleted, 0) = 0
+                            AND LOWER(COALESCE(u.email, '')) NOT LIKE '%%@deleted.local'
+                        ORDER BY u.email ASC
+                        """,
+                        (company_id,),
+                )
+        finance_amount_editor_members = cursor.fetchall() or []
+        cursor.execute(
+                        """
+                        SELECT
+                                u.user_id,
+                                COALESCE(u.email, '') AS email,
+                                COALESCE(r.role_name, '-') AS role_name,
+                                COALESCE(p.position_name, '-') AS position_name
+                        FROM users u
+                        LEFT JOIN roles r ON r.role_id = u.role_id
+                        LEFT JOIN positions p ON p.position_id = u.position_id
+                        LEFT JOIN finance_amount_editors fe ON fe.company_id = u.company_id AND fe.user_id = u.user_id
+                        WHERE u.company_id = %s
+                            AND COALESCE(u.is_deleted, 0) = 0
+                            AND COALESCE(u.is_banned, 0) = 0
+                            AND LOWER(COALESCE(u.email, '')) NOT LIKE '%%@deleted.local'
+                            AND fe.member_id IS NULL
+                        ORDER BY u.email ASC
+                        """,
+                        (company_id,),
+                )
+        finance_amount_editor_candidates = cursor.fetchall() or []
+
         default_dev_email = (DEFAULT_DEV_EMAIL or "").strip().lower()
         company_user_emails = {
             str((row.get("email") or "")).strip().lower()
@@ -11790,6 +12760,8 @@ def it_dashboard():
             company_name=company_name,
             tenant_permission_catalog=TENANT_PERMISSION_CATALOG,
             role_permission_map=role_permission_map,
+            finance_amount_editor_members=finance_amount_editor_members,
+            finance_amount_editor_candidates=finance_amount_editor_candidates,
         )
     finally:
         cursor.close()
@@ -12353,6 +13325,83 @@ def update_request_status(request_id):
             pending_row = cursor.fetchone()
             pending_status_id = pending_row["status_id"] if pending_row else 1
 
+            def _build_full_approval_response(base_message="Request fully approved."):
+                coo_queue_result = {"queued": False, "notified": 0, "reason": "not_queued"}
+                try:
+                    coo_queue_result = queue_coo_special_approval(
+                        cursor,
+                        conn,
+                        request_id,
+                        requested_by_email=(actor_email or ""),
+                    )
+                except Exception as _coo_queue_err:
+                    print("coo queue error (workflow_steps):", _coo_queue_err)
+
+                budget_result = {"processed": False, "reason": "not_budget_request", "alerts": []}
+                try:
+                    budget_result = apply_department_budget_deduction(
+                        cursor,
+                        conn,
+                        request_id,
+                        actor_email=actor_email,
+                    )
+                except Exception as _budget_err:
+                    print("budget deduction error (workflow_steps):", _budget_err)
+
+                if requestor_email:
+                    try:
+                        send_request_email_async(requestor_email, "APPROVED")
+                    except Exception as _owner_mail_err:
+                        print("requestor approved email error:", _owner_mail_err)
+
+                if coo_queue_result.get("queued"):
+                    base_message += " COO special approval was queued."
+                elif coo_queue_result.get("reason") == "already_approved":
+                    base_message += " COO special approval was already completed."
+                elif coo_queue_result.get("reason") == "no_coo_recipient":
+                    base_message += " No COO recipient was found for special approval notification."
+                elif coo_queue_result.get("reason") == "email_delivery_failed":
+                    base_message += " COO queue was created but email delivery failed. Use Special Access resend email."
+
+                if budget_result.get("processed"):
+                    if budget_result.get("already_processed"):
+                        base_message += " Budget deduction was already recorded."
+                    else:
+                        base_message += (
+                            f" Department budget deducted by {budget_result.get('amount', 0):,.2f}. "
+                            f"Remaining balance: {budget_result.get('balance_after', 0):,.2f}."
+                        )
+                elif budget_result.get("reason") == "not_budget_request":
+                    base_message += " No department budget deduction was required."
+
+                budget_alerts = budget_result.get("alerts") or []
+                if budget_alerts:
+                    base_message += " Budget alert(s): " + " | ".join(str(a.get("message") or "").strip() for a in budget_alerts)
+
+                base_message += " Budget disbursement processing still runs on completion by Purchasing or Representative."
+                return jsonify(
+                    {
+                        "message": base_message,
+                        "coo": coo_queue_result,
+                        "budget": budget_result,
+                        "xendit": {"processed": False, "reason": "release_actor_required"},
+                    }
+                )
+
+            def _queue_coo_for_stage(stage_position_id):
+                if not is_coo_position_id(cursor, stage_position_id):
+                    return None
+                try:
+                    return queue_coo_special_approval(
+                        cursor,
+                        conn,
+                        request_id,
+                        requested_by_email=(actor_email or ""),
+                    )
+                except Exception as _coo_stage_queue_err:
+                    print("coo queue error (stage transition):", _coo_stage_queue_err)
+                    return {"queued": False, "notified": 0, "reason": "queue_error"}
+
             _reviewers, _approvers, workflow = get_effective_workflow_positions(
                 cursor,
                 request_id=request_id,
@@ -12465,7 +13514,7 @@ def update_request_status(request_id):
                         (status_id, request_id),
                     )
                     conn.commit()
-                    return jsonify({"message": "Request fully approved."})
+                    return _build_full_approval_response("Request fully approved.")
 
                 # Recompute after APPROVED action log above.
                 approved_positions = _get_request_approved_positions(cursor, request_id)
@@ -12485,12 +13534,7 @@ def update_request_status(request_id):
                         (status_id, request_id),
                     )
                     conn.commit()
-                    if requestor_email:
-                        try:
-                            send_request_email_async(requestor_email, "APPROVED")
-                        except Exception as _owner_mail_err:
-                            print("requestor approved email error:", _owner_mail_err)
-                    return jsonify({"message": "Request fully approved."})
+                    return _build_full_approval_response("Request fully approved.")
 
                 next_stage_position = int(post_pending_positions[0]) if post_pending_positions else None
                 if next_stage_position is None:
@@ -12503,7 +13547,7 @@ def update_request_status(request_id):
                         (status_id, request_id),
                     )
                     conn.commit()
-                    return jsonify({"message": "Request fully approved."})
+                    return _build_full_approval_response("Request fully approved.")
 
                 cursor.execute(
                     """
@@ -12515,9 +13559,18 @@ def update_request_status(request_id):
                 )
                 conn.commit()
 
+                coo_stage_result = _queue_coo_for_stage(next_stage_position)
+
                 if post_idx == pre_idx:
-                    return jsonify({"message": "Approved. Waiting for other parallel approvers."})
-                return jsonify({"message": "Approved. Moved to next stage."})
+                    message = "Approved. Waiting for other parallel approvers."
+                    if coo_stage_result and coo_stage_result.get("queued"):
+                        message += " COO special approval email link was queued."
+                    return jsonify({"message": message, "coo": coo_stage_result})
+
+                message = "Approved. Moved to next stage."
+                if coo_stage_result and coo_stage_result.get("queued"):
+                    message += " COO special approval email link was queued."
+                return jsonify({"message": message, "coo": coo_stage_result})
 
             if not current_stage:
                 cursor.execute(
@@ -12529,7 +13582,11 @@ def update_request_status(request_id):
                     (pending_status_id, workflow[0], request_id),
                 )
                 conn.commit()
-                return jsonify({"message": "Request routed to first stage."})
+                coo_stage_result = _queue_coo_for_stage(workflow[0])
+                message = "Request routed to first stage."
+                if coo_stage_result and coo_stage_result.get("queued"):
+                    message += " COO special approval email link was queued."
+                return jsonify({"message": message, "coo": coo_stage_result})
 
             try:
                 idx = workflow.index(current_stage)
@@ -12543,7 +13600,11 @@ def update_request_status(request_id):
                     (pending_status_id, workflow[0], request_id),
                 )
                 conn.commit()
-                return jsonify({"message": "Request stage reset to first stage."})
+                coo_stage_result = _queue_coo_for_stage(workflow[0])
+                message = "Request stage reset to first stage."
+                if coo_stage_result and coo_stage_result.get("queued"):
+                    message += " COO special approval email link was queued."
+                return jsonify({"message": message, "coo": coo_stage_result})
 
             if idx < len(workflow) - 1:
                 next_stage = workflow[idx + 1]
@@ -12556,7 +13617,11 @@ def update_request_status(request_id):
                     (pending_status_id, next_stage, request_id),
                 )
                 conn.commit()
-                return jsonify({"message": "Approved. Moved to next stage."})
+                coo_stage_result = _queue_coo_for_stage(next_stage)
+                message = "Approved. Moved to next stage."
+                if coo_stage_result and coo_stage_result.get("queued"):
+                    message += " COO special approval email link was queued."
+                return jsonify({"message": message, "coo": coo_stage_result})
             else:
                 cursor.execute(
                     """
@@ -13344,6 +14409,134 @@ def it_remove_department_member(dept_id):
         conn.rollback()
         logger.exception("it_remove_department_member failed")
         flash("Failed to remove user from department. If dept_id is required in your database, reassign user to another department instead.", "danger")
+    finally:
+        cursor.close()
+        conn.close()
+
+    return redirect(url_for("it_dashboard"))
+
+
+@app.route("/it/finance-amount-team/member/add", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
+def it_add_finance_amount_editor_member():
+    user_id_raw = str(request.form.get("user_id") or "").strip()
+    try:
+        user_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        flash("Invalid user selection.", "danger")
+        return redirect(url_for("it_dashboard"))
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_user_account_control_schema(cursor, conn)
+        ensure_finance_amount_editor_schema(cursor, conn)
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            """
+            SELECT user_id, email, COALESCE(is_deleted, 0) AS is_deleted
+            FROM users
+            WHERE user_id = %s AND company_id = %s
+            LIMIT 1
+            """,
+            (user_id, company_id),
+        )
+        user_row = cursor.fetchone() or {}
+        if not user_row:
+            flash("User not found.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        if int(user_row.get("is_deleted") or 0) == 1:
+            flash("Cannot add deleted user.", "warning")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            """
+            INSERT INTO finance_amount_editors (company_id, user_id, added_by_email)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE added_by_email = VALUES(added_by_email)
+            """,
+            (company_id, user_id, (session.get("email") or "").strip().lower() or None),
+        )
+        cursor.execute(
+            "INSERT INTO activity_logs (title, description, company_id, actor_email) VALUES (%s, %s, %s, %s)",
+            (
+                "Finance Amount Team Member Added",
+                f"{session.get('email')} added {user_row.get('email')} to Finance Amount Editor team.",
+                company_id,
+                (session.get("email") or "").strip().lower() or None,
+            ),
+        )
+        conn.commit()
+        flash("Member added to Finance Amount Editor team.", "success")
+    except Exception:
+        conn.rollback()
+        logger.exception("it_add_finance_amount_editor_member failed")
+        flash("Failed to add team member.", "danger")
+    finally:
+        cursor.close()
+        conn.close()
+
+    return redirect(url_for("it_dashboard"))
+
+
+@app.route("/it/finance-amount-team/member/remove", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
+def it_remove_finance_amount_editor_member():
+    user_id_raw = str(request.form.get("user_id") or "").strip()
+    try:
+        user_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        flash("Invalid user selection.", "danger")
+        return redirect(url_for("it_dashboard"))
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_finance_amount_editor_schema(cursor, conn)
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "SELECT COALESCE(email, '') AS email FROM users WHERE user_id = %s AND company_id = %s LIMIT 1",
+            (user_id, company_id),
+        )
+        user_row = cursor.fetchone() or {}
+        if not user_row:
+            flash("User not found.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "DELETE FROM finance_amount_editors WHERE company_id = %s AND user_id = %s",
+            (company_id, user_id),
+        )
+        cursor.execute(
+            "INSERT INTO activity_logs (title, description, company_id, actor_email) VALUES (%s, %s, %s, %s)",
+            (
+                "Finance Amount Team Member Removed",
+                f"{session.get('email')} removed {user_row.get('email')} from Finance Amount Editor team.",
+                company_id,
+                (session.get("email") or "").strip().lower() or None,
+            ),
+        )
+        conn.commit()
+        flash("Member removed from Finance Amount Editor team.", "success")
+    except Exception:
+        conn.rollback()
+        logger.exception("it_remove_finance_amount_editor_member failed")
+        flash("Failed to remove team member.", "danger")
     finally:
         cursor.close()
         conn.close()
@@ -14727,7 +15920,21 @@ def submit_draft_request(request_id):
             )
 
         conn.commit()
-        return jsonify({"success": True, "message": "Draft submitted successfully."}), 200
+
+        coo_result = queue_coo_if_stage_is_coo(
+            cur,
+            conn,
+            request_id,
+            stage_position_id,
+            requested_by_email=(session.get("email") or ""),
+        )
+        return jsonify(
+            {
+                "success": True,
+                "message": "Draft submitted successfully.",
+                "coo": coo_result,
+            }
+        ), 200
 
     except Exception as exc:
         conn.rollback()
@@ -16669,11 +17876,13 @@ def make_grid_overlay_for_pdf(pdf_path: str, out_path: str, step: int = 40) -> N
 
 
     
+apply_global_rate_limits()
+
 
 if __name__ == "__main__":
     debug_mode = (os.environ.get("FLASK_DEBUG", "false").strip().lower() == "false")
     app.run(
-        host="0.0.0.0",
+        host=os.environ.get("HOST", "127.0.0.1").strip() or "127.0.0.1",
         port=int(os.environ.get("PORT", "5000")),
         debug=debug_mode,
         use_reloader=debug_mode,

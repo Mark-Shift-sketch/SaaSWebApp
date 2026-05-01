@@ -115,6 +115,17 @@
         border-color: #2563eb;
       }
 
+      .text-item.managed-amount {
+        background: #fff;
+        border-color: transparent;
+        border-radius: 2px;
+        padding: 0 2px;
+      }
+
+      .text-item.managed-amount .text-editor {
+        font-weight: 700;
+      }
+
       .text-editor {
         width: 100%;
         height: 100%;
@@ -201,6 +212,12 @@
           Add Text
         </button>
 
+        {% if can_edit_amount %}
+        <button class="btn btn-gray" id="addAmountBtn" type="button">
+          Add Amount
+        </button>
+        {% endif %}
+
         <button class="btn btn-gray" id="drawModeBtn" type="button">
           Draw
         </button>
@@ -244,6 +261,23 @@
         <input id="sigUpload" type="file" accept="image/*" />
 
         <button class="btn btn-primary" id="saveBtn" type="button">Save</button>
+
+        {% if can_edit_amount %}
+        <span class="pill" style="background:#1f2937;">
+          <label for="annotateAmountInput">Amount</label>
+          <input
+            id="annotateAmountInput"
+            type="text"
+            value="{{ '%.2f'|format(request_amount or 0) }}"
+            placeholder="e.g. 2000,1000,4000"
+            style="width:180px;border-radius:8px;border:1px solid #4b5563;background:#111827;color:#fff;padding:6px 8px;"
+          />
+          <span id="annotateAmountComputed" style="font-size:12px;color:#cbd5e1;min-width:120px;">Total: {{ '{:,.2f}'.format((request_amount or 0)|float) }}</span>
+          <button class="btn btn-primary" id="annotateAmountSaveBtn" type="button" style="padding:6px 10px;border-radius:8px;">
+            Save Amount
+          </button>
+        </span>
+        {% endif %}
 
         <button
           class="btn btn-primary"
@@ -492,7 +526,8 @@
       }
 
       const REQUEST_ID = Number(document.body.dataset.requestId || 0);
-      const PDF_URL = `/download_attachment/${REQUEST_ID}`;
+      const PDF_URL = `/download_attachment/${REQUEST_ID}?original=1`;
+      const CAN_EDIT_AMOUNT = {{ 'true' if can_edit_amount else 'false' }};
 
       function toIntOrNull(v) {
         const n = Number(v);
@@ -529,19 +564,23 @@
       function actorOwnsObject(obj) {
         if (!obj || typeof obj !== "object") return false;
 
+        const annEmail = normalizeEmail(obj.actor_email);
+        if (CURRENT_ACTOR.email && annEmail) {
+          return CURRENT_ACTOR.email === annEmail;
+        }
+
         const annUserId = toIntOrNull(obj.actor_user_id);
         if (CURRENT_ACTOR.userId !== null && annUserId !== null) {
           return CURRENT_ACTOR.userId === annUserId;
         }
-
-        const annPositionId = toIntOrNull(obj.actor_position_id);
-        if (CURRENT_ACTOR.positionId !== null && annPositionId !== null) {
-          return CURRENT_ACTOR.positionId === annPositionId;
+        if ((CURRENT_ACTOR.userId !== null) !== (annUserId !== null)) {
+          return false;
         }
 
-        const annEmail = normalizeEmail(obj.actor_email);
-        if (CURRENT_ACTOR.email && annEmail) {
-          return CURRENT_ACTOR.email === annEmail;
+        const annPositionId = toIntOrNull(obj.actor_position_id);
+        // Legacy fallback only when object has no actor email/user identity.
+        if (!annEmail && annUserId === null && CURRENT_ACTOR.positionId !== null && annPositionId !== null) {
+          return CURRENT_ACTOR.positionId === annPositionId;
         }
 
         return false;
@@ -775,6 +814,69 @@
       // =========================
       // Render Objects
       // =========================
+      function numericSignatureValue(value, digits = 2) {
+        const n = Number(value || 0);
+        if (!Number.isFinite(n)) return 0;
+        return Number(n.toFixed(digits));
+      }
+
+      function annotationRenderSignature(obj) {
+        if (!obj || typeof obj !== "object") return "";
+
+        const type = String(obj.type || "").trim().toLowerCase();
+        const page = Number(obj.page || 0);
+        const x = numericSignatureValue(obj.x, 2);
+        const y = numericSignatureValue(obj.y, 2);
+        const w = numericSignatureValue(obj.w, 2);
+        const h = numericSignatureValue(obj.h, 2);
+        const text = String(obj.text || "").trim();
+        const imageSig = String(obj.imageDataUrl || "").slice(0, 120);
+        const actorEmail = String(obj.actor_email || "").trim().toLowerCase();
+        const actorUserId = String(obj.actor_user_id ?? "");
+
+        return [
+          type,
+          page,
+          x,
+          y,
+          w,
+          h,
+          text,
+          imageSig,
+          actorEmail,
+          actorUserId,
+        ].join("|");
+      }
+
+      function dedupeAnnotationsForRender(list) {
+        const source = Array.isArray(list) ? list : [];
+        const byId = new Map();
+        const idless = [];
+
+        for (const item of source) {
+          if (!item || typeof item !== "object") continue;
+          const o = { ...item };
+          const annId = String(o.id || "").trim();
+          if (annId) {
+            // Keep latest object for the same id.
+            byId.set(annId, o);
+          } else {
+            idless.push(o);
+          }
+        }
+
+        const merged = [...byId.values(), ...idless];
+        const bySignature = new Map();
+        for (const o of merged) {
+          const sig = annotationRenderSignature(o);
+          if (!sig) continue;
+          // Keep latest object for the same visual signature.
+          bySignature.set(sig, o);
+        }
+
+        return [...bySignature.values()];
+      }
+
       function renderObject(obj) {
         const pageWrap = document.querySelector(`#page-${obj.page}`);
         if (!pageWrap) return;
@@ -801,6 +903,9 @@
 
         if (obj.type === "text") {
           el.classList.add("text-item");
+          if (String(obj.id || "").startsWith("auto-amount-total-page-")) {
+            el.classList.add("managed-amount");
+          }
           el.style.width = Math.max(60, cssW) + "px";
           el.style.height = Math.max(18, cssH) + "px";
 
@@ -861,7 +966,8 @@
           CURRENT_ACTOR.positionId = toIntOrNull(data.actor_position_id);
           CURRENT_ACTOR.email = normalizeEmail(data.actor_email) || CURRENT_ACTOR.email;
 
-          objects = (data.annotations || []).map((o) => ({ ...o }));
+          const rawAnnotations = Array.isArray(data.annotations) ? data.annotations : [];
+          objects = dedupeAnnotationsForRender(rawAnnotations);
           objects.forEach(renderObject);
           refreshMySignatureButtonState();
         } catch (err) {
@@ -896,6 +1002,7 @@
           }
           return { ...o, x, y, w, h, text: textVal };
         });
+        objects = dedupeAnnotationsForRender(objects);
 
         try {
           const csrf = getCsrfToken();
@@ -1204,6 +1311,132 @@
         renderObject(obj);
       });
 
+      function removeRenderedItemsById(id) {
+        document
+          .querySelectorAll(`.item[data-id="${id}"]`)
+          .forEach((el) => el.remove());
+      }
+
+      function upsertManagedAmountAnnotation(totalValue) {
+        const pageIndex = 0;
+        const actorKey =
+          CURRENT_ACTOR.userId ?? CURRENT_ACTOR.positionId ?? "self";
+        const managedAmountId = `auto-amount-total-page-${pageIndex}-actor-${actorKey}`;
+        const legacyManagedAmountId = `auto-amount-total-page-${pageIndex}`;
+        const totalText = formatAmountWithCommas(totalValue);
+
+        const meta = pageMeta[pageIndex] || {};
+        const viewportWidth = Math.max(1, Number(meta.viewportWidth) || 595);
+        const viewportHeight = Math.max(1, Number(meta.viewportHeight) || 842);
+        const pdfWidth = Number(meta.pdfWidth) || viewportWidth / Math.max(0.0001, scale);
+        const pdfHeight = Number(meta.pdfHeight) || viewportHeight / Math.max(0.0001, scale);
+
+        const defaultPlacement = {
+          page: pageIndex,
+          x: pdfWidth * 0.49,
+          y: pdfHeight * 0.49,
+          w: pdfWidth * 0.13,
+          h: Math.max(20, pdfHeight * 0.028),
+        };
+
+        let target = objects.find(
+          (o) =>
+            (String(o.id || "") === managedAmountId ||
+              String(o.id || "") === legacyManagedAmountId) &&
+            actorOwnsObject(o),
+        );
+
+        if (target) {
+          target.id = managedAmountId;
+          target.type = "text";
+          target.text = totalText;
+          if (!Number.isFinite(Number(target.w)) || Number(target.w) <= 0) target.w = defaultPlacement.w;
+          if (!Number.isFinite(Number(target.h)) || Number(target.h) <= 0) target.h = defaultPlacement.h;
+          if (!Number.isFinite(Number(target.x))) target.x = defaultPlacement.x;
+          if (!Number.isFinite(Number(target.y))) target.y = defaultPlacement.y;
+        } else {
+          target = {
+            id: managedAmountId,
+            type: "text",
+            page: defaultPlacement.page,
+            x: defaultPlacement.x,
+            y: defaultPlacement.y,
+            w: defaultPlacement.w,
+            h: defaultPlacement.h,
+            text: totalText,
+            actor_user_id: CURRENT_ACTOR.userId,
+            actor_position_id: CURRENT_ACTOR.positionId,
+            actor_email: CURRENT_ACTOR.email,
+          };
+          objects.push(target);
+        }
+
+        objects = objects.filter((o) => {
+          const oid = String(o.id || "");
+          if (oid === managedAmountId) return true;
+          if (!actorOwnsObject(o)) return true;
+          if (String(o.type || "").toLowerCase() !== "text") return true;
+          if (Number(o.page || 0) !== pageIndex) return true;
+
+          const txt = String(o.text || "").trim();
+          const isNumericLike = txt.length > 0 && /^[0-9,\.\s]+$/.test(txt);
+          if (!isNumericLike) return true;
+
+          const ox = Number(o.x || 0);
+          const oy = Number(o.y || 0);
+          const ow = Math.max(0, Number(o.w || 0));
+          const oh = Math.max(0, Number(o.h || 0));
+          const tx = Number(target.x || 0);
+          const ty = Number(target.y || 0);
+          const tw = Math.max(0, Number(target.w || 0));
+          const th = Math.max(0, Number(target.h || 0));
+
+          const intersects =
+            ox < tx + tw &&
+            ox + ow > tx &&
+            oy < ty + th &&
+            oy + oh > ty;
+          if (!intersects) return true;
+
+          removeRenderedItemsById(oid);
+          return false;
+        });
+        objects = dedupeAnnotationsForRender(objects);
+
+        removeRenderedItemsById(legacyManagedAmountId);
+        removeRenderedItemsById(managedAmountId);
+        renderObject(target);
+      }
+
+      function addAmountTextAnnotation() {
+        if (!CAN_EDIT_AMOUNT) return;
+        if (window.IS_SIGNED) return;
+        if (DRAW_MODE) return;
+
+        const amountInput = document.getElementById("annotateAmountInput");
+        if (!amountInput) return;
+
+        const parsed = parseAmountExpression(amountInput.value || "");
+        if (!parsed.valid || parsed.total < 0) {
+          showAnnotateStatus("Enter a valid amount list first (e.g. 300,4000,500).", "error");
+          return;
+        }
+
+        amountInput.value = formatAmountWithCommas(parsed.total);
+        updateAmountComputedLabel();
+
+        upsertManagedAmountAnnotation(parsed.total);
+
+        // Keep request amount in sync with computed total.
+        saveAnnotatedAmount();
+        showAnnotateStatus("Amount added to TOTAL area.", "success");
+      }
+
+      const addAmountBtn = document.getElementById("addAmountBtn");
+      if (addAmountBtn) {
+        addAmountBtn.addEventListener("click", addAmountTextAnnotation);
+      }
+
       document.getElementById("sigUpload").addEventListener("change", (e) => {
         if (window.IS_SIGNED) return;
         if (DRAW_MODE) return;
@@ -1455,6 +1688,8 @@
         drawModeBtn.classList.add("btn-danger");
 
         document.getElementById("addTextBtn").disabled = true;
+        const addAmountBtn = document.getElementById("addAmountBtn");
+        if (addAmountBtn) addAmountBtn.disabled = true;
         document.getElementById("drawSigBtn").disabled = true;
         document.getElementById("saveBtn").disabled = true;
         document.getElementById("sigUpload").disabled = true;
@@ -1481,6 +1716,8 @@
         drawModeBtn.classList.add("btn-gray");
 
         document.getElementById("addTextBtn").disabled = false;
+        const addAmountBtn = document.getElementById("addAmountBtn");
+        if (addAmountBtn) addAmountBtn.disabled = false;
         document.getElementById("drawSigBtn").disabled = false;
         document.getElementById("saveBtn").disabled = false;
         document.getElementById("sigUpload").disabled = false;
@@ -1640,6 +1877,8 @@
           "This document is already saved/final. Use View PDF.";
 
         document.getElementById("addTextBtn").disabled = true;
+        const addAmountBtn = document.getElementById("addAmountBtn");
+        if (addAmountBtn) addAmountBtn.disabled = true;
         document.getElementById("drawModeBtn").disabled = true;
         document.getElementById("drawSigBtn").disabled = true;
         document.getElementById("saveBtn").disabled = true;
@@ -1650,10 +1889,151 @@
         document.getElementById("uploadSigLabel").style.cursor = "not-allowed";
       }
 
+      async function saveAnnotatedAmount() {
+        if (!CAN_EDIT_AMOUNT) return;
+
+        const amountInput = document.getElementById("annotateAmountInput");
+        const amountBtn = document.getElementById("annotateAmountSaveBtn");
+        if (!amountInput || !amountBtn) return;
+
+        const amountRaw = String(amountInput.value || "").trim();
+        if (!amountRaw) {
+          showAnnotateStatus("Amount is required.", "error");
+          return;
+        }
+
+        const parsed = parseAmountExpression(amountRaw);
+        if (!parsed.valid || parsed.total < 0) {
+          showAnnotateStatus("Amount must be a valid non-negative number.", "error");
+          return;
+        }
+
+        amountBtn.disabled = true;
+        try {
+          const csrf = getCsrfToken();
+          const res = await fetch(`/api/annotate/${REQUEST_ID}/amount`, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRFToken": csrf,
+              "X-CSRF-Token": csrf,
+              "X-Requested-With": "XMLHttpRequest",
+            },
+            body: JSON.stringify({ amount: amountRaw }),
+          });
+
+          const payload = await res.json().catch(() => ({}));
+          if (!res.ok || !payload.success) {
+            throw new Error(payload.error || "Failed to update amount.");
+          }
+
+          const normalized = Number(payload.amount || parsed.total);
+          amountInput.value = Number.isFinite(normalized) ? formatAmountWithCommas(normalized) : formatAmountWithCommas(parsed.total);
+          updateAmountComputedLabel();
+          upsertManagedAmountAnnotation(Number.isFinite(normalized) ? normalized : parsed.total);
+          showAnnotateStatus(payload.message || "Amount updated.", "success");
+        } catch (err) {
+          showAnnotateStatus(err.message || "Failed to update amount.", "error");
+        } finally {
+          amountBtn.disabled = false;
+        }
+      }
+
+      function parseAmountExpression(raw) {
+        const text = String(raw || "").trim();
+        if (!text) return { valid: false, total: 0 };
+
+        const compact = text.replace(/\s+/g, "");
+        if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(compact)) {
+          const single = Number(compact.replace(/,/g, ""));
+          return { valid: Number.isFinite(single), total: Number.isFinite(single) ? single : 0 };
+        }
+
+        if (!text.includes(",")) {
+          const single = Number(text.replace(/,/g, ""));
+          return { valid: Number.isFinite(single), total: Number.isFinite(single) ? single : 0 };
+        }
+
+        const tokens = text
+          .split(",")
+          .map((token) => String(token || "").trim())
+          .filter((token) => token.length > 0);
+
+        if (!tokens.length) return { valid: false, total: 0 };
+
+        let total = 0;
+        for (const token of tokens) {
+          const n = Number(token.replace(/,/g, ""));
+          if (!Number.isFinite(n)) return { valid: false, total: 0 };
+          total += n;
+        }
+
+        return { valid: true, total };
+      }
+
+      function formatAmountWithCommas(value) {
+        const numeric = Number(value || 0);
+        if (!Number.isFinite(numeric)) return "0.00";
+        return numeric.toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
+      }
+
+      function updateAmountComputedLabel() {
+        const amountInput = document.getElementById("annotateAmountInput");
+        const computedEl = document.getElementById("annotateAmountComputed");
+        if (!amountInput || !computedEl) return;
+
+        const parsed = parseAmountExpression(amountInput.value || "");
+        if (!parsed.valid) {
+          computedEl.textContent = "Total: Invalid input";
+          computedEl.style.color = "#fecaca";
+          return;
+        }
+
+        computedEl.textContent = `Total: ${formatAmountWithCommas(parsed.total)}`;
+        computedEl.style.color = "#cbd5e1";
+      }
+
+      function normalizeAmountInputToTotal() {
+        const amountInput = document.getElementById("annotateAmountInput");
+        if (!amountInput) return false;
+
+        const parsed = parseAmountExpression(amountInput.value || "");
+        if (!parsed.valid || parsed.total < 0) return false;
+
+        amountInput.value = formatAmountWithCommas(parsed.total);
+        updateAmountComputedLabel();
+        return true;
+      }
+
       // init
       clearSigCanvas();
       lockUiIfSigned();
       setupMySignatureAction();
+      if (CAN_EDIT_AMOUNT) {
+        const amountBtn = document.getElementById("annotateAmountSaveBtn");
+        const amountInput = document.getElementById("annotateAmountInput");
+        if (amountBtn) {
+          amountBtn.addEventListener("click", saveAnnotatedAmount);
+        }
+        if (amountInput) {
+          amountInput.addEventListener("input", updateAmountComputedLabel);
+          amountInput.addEventListener("blur", normalizeAmountInputToTotal);
+          amountInput.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            if (!normalizeAmountInputToTotal()) {
+              showAnnotateStatus("Amount must be a valid non-negative number.", "error");
+              return;
+            }
+            saveAnnotatedAmount();
+          });
+          updateAmountComputedLabel();
+        }
+      }
 
       (async () => {
         await renderPDF();

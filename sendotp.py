@@ -229,4 +229,27 @@ def send_cc_email_with_blob(receiver, subject, body, filename, file_blob):
     except Exception as e:
         print("CC email error:", e)
         return False
+
+
+def send_pending_action_reminder_email(receiver, request_id, request_type, stage_name, age_hours=24):
+    receiver = (receiver or "").strip()
+    if not receiver:
+        return False
+
+    req_type_text = (request_type or "Request").strip() or "Request"
+    stage_text = (stage_name or "Assigned Stage").strip() or "Assigned Stage"
+    try:
+        age_hours_int = max(1, int(age_hours or 24))
+    except (TypeError, ValueError):
+        age_hours_int = 24
+
+    subject = f"Reminder: Request #{request_id} is pending your action"
+    body = (
+        "Good day,\n\n"
+        f"Request #{request_id} ({req_type_text}) has been pending in your stage ({stage_text}) for at least {age_hours_int} hour(s).\n"
+        "Please review and take action (approve/reject) in the system dashboard.\n\n"
+        "This is an automated reminder."
+    )
+
+    return send_cc_email(receiver, subject, body)
     

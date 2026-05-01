@@ -299,6 +299,11 @@
 					</div>
 					</div>
 
+					<div class="actions" style="margin: 12px 0 8px;">
+						<a href="{{ url_for('coo_action_attachment_by_token', token=token, request_id=summary.request_id) }}" target="_blank">View Uploaded/Filled File</a>
+						<a href="{{ url_for('coo_action_attachment_by_token', token=token, request_id=summary.request_id) }}?download=1" target="_blank">Download File</a>
+					</div>
+
 					<div class="approve-panel">
 					<div class="approve-row">
 						<label for="authMethod">Authentication</label>

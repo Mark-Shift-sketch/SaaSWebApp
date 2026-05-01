@@ -483,6 +483,51 @@
   </div>
 </div>
     </main>
+    <div id="pendingReminderModal" class="modal-overlay" style="display:none;">
+      <div class="modal-content" style="max-width: 560px;">
+        <h3 class="modal-title">Pending Action Reminder</h3>
+        <p class="modal-text" style="margin-bottom: 10px; color:#475569;">
+          The following requests in your stage are pending for more than 1 day.
+        </p>
+        <div id="pendingReminderList" style="max-height: 280px; overflow:auto; border:1px solid #e2e8f0; border-radius:8px; padding:10px;"></div>
+        <div class="modal-actions" style="margin-top: 12px;">
+          <button type="button" class="btn-primary" onclick="closePendingReminderModal()">OK</button>
+        </div>
+      </div>
+    </div>
+    <script>
+      window.PENDING_STAGE_REMINDERS = {{ (reminder_overdue_requests or [])|tojson }};
+
+      function closePendingReminderModal() {
+        const modal = document.getElementById("pendingReminderModal");
+        if (modal) modal.style.display = "none";
+      }
+
+      function showPendingReminderModal() {
+        const reminders = Array.isArray(window.PENDING_STAGE_REMINDERS)
+          ? window.PENDING_STAGE_REMINDERS
+          : [];
+        if (!reminders.length) return;
+
+        const modal = document.getElementById("pendingReminderModal");
+        const list = document.getElementById("pendingReminderList");
+        if (!modal || !list) return;
+
+        list.innerHTML = reminders
+          .map((item) => {
+            const reqId = Number(item.request_id || 0);
+            const reqType = String(item.request_type_name || "Request");
+            const stage = String(item.stage_name || "Assigned Stage");
+            const age = Number(item.age_hours || 24);
+            return `<div style="padding:8px 0;border-bottom:1px solid #e2e8f0;"><strong>REQ#${reqId}</strong> - ${reqType}<br><span style="color:#64748b;font-size:13px;">Stage: ${stage} | Pending: ${age} hour(s)</span></div>`;
+          })
+          .join("");
+
+        modal.style.display = "flex";
+      }
+
+      document.addEventListener("DOMContentLoaded", showPendingReminderModal);
+    </script>
     <script>
       window.CURRENT_USER_EMAIL = {{ (session.get('email') or '')|tojson }};
     </script>

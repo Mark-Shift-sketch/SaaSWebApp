@@ -32,11 +32,22 @@ jobs:
             echo "BACKEND_DIR=RequestingAndApproval" >> "$GITHUB_ENV"
           elif [ -d requestingandapproval ]; then
             echo "BACKEND_DIR=requestingandapproval" >> "$GITHUB_ENV"
-          elif [ -d RequestingandApproval/RequestingAndApproval ]; then
-            echo "BACKEND_DIR=RequestingandApproval/RequestingAndApproval" >> "$GITHUB_ENV"
+          elif [ -d RequestingAndApproval/RequestingAndApproval ]; then
+            echo "BACKEND_DIR=RequestingAndApproval/RequestingAndApproval" >> "$GITHUB_ENV"
           else
-            echo "No backend directory found" >&2
-            exit 1
+            echo "No backend directory found at expected paths — listing repository root for debugging:" >&2
+            pwd
+            ls -la
+            echo "Searching for common backend markers (main.py, requirements.txt, Dockerfile) up to 4 levels deep..." >&2
+            candidate=$(find . -maxdepth 4 -type f \( -name main.py -o -name requirements.txt -o -name Dockerfile \) -printf "%h\n" | sort -u | head -n1)
+            if [ -n "$candidate" ]; then
+              candidate=${candidate#./}
+              echo "Detected backend directory: $candidate" >&2
+              echo "BACKEND_DIR=$candidate" >> "$GITHUB_ENV"
+            else
+              echo "No backend directory found" >&2
+              exit 1
+            fi
           fi
 
       - name: Create backend artifact
@@ -67,8 +78,19 @@ jobs:
           elif [ -d RequestingAndApproval/RequestingAndApproval ]; then
             echo "BACKEND_DIR=RequestingAndApproval/RequestingAndApproval" >> "$GITHUB_ENV"
           else
-            echo "No backend directory found" >&2
-            exit 1
+            echo "No backend directory found at expected paths — listing repository root for debugging:" >&2
+            pwd
+            ls -la
+            echo "Searching for common backend markers (main.py, requirements.txt, Dockerfile) up to 4 levels deep..." >&2
+            candidate=$(find . -maxdepth 4 -type f \( -name main.py -o -name requirements.txt -o -name Dockerfile \) -printf "%h\n" | sort -u | head -n1)
+            if [ -n "$candidate" ]; then
+              candidate=${candidate#./}
+              echo "Detected backend directory: $candidate" >&2
+              echo "BACKEND_DIR=$candidate" >> "$GITHUB_ENV"
+            else
+              echo "No backend directory found" >&2
+              exit 1
+            fi
           fi
 
       - name: Lowercase image name

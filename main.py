@@ -765,6 +765,30 @@ def get_user_id_for_company(email, company_id):
         conn.close()
 
 
+def validate_password_strength(password, require_symbol=True):
+    """Return (ok: bool, message: str) for password strength checks.
+
+    Requirements:
+    - Minimum 8 characters
+    - At least one uppercase letter
+    - At least one lowercase letter
+    - At least one digit
+    - Optionally require a symbol (non-alphanumeric)
+    """
+    pw = str(password or "")
+    if len(pw) < 8:
+        return False, "Password must be at least 8 characters"
+    if not re.search(r"[A-Z]", pw):
+        return False, "Password must contain an uppercase letter"
+    if not re.search(r"[a-z]", pw):
+        return False, "Password must contain a lowercase letter"
+    if not re.search(r"[0-9]", pw):
+        return False, "Password must contain a digit"
+    if require_symbol and not re.search(r"[^A-Za-z0-9]", pw):
+        return False, "Password must contain a symbol"
+    return True, "OK"
+
+
 _ORG_DOMAIN_COLUMN_CACHE = {"checked": False, "column": None}
 
 
@@ -7846,6 +7870,10 @@ def gsdh_dashboard():
 @app.post("/api/inventory")
 @login_required
 def inv_add():
+    dept = (session.get("dept") or "").strip()
+    role = (session.get("role") or "").strip()
+    if not (dept == "GSD" and role in ["Admin", "AssistantAdmin"]):
+        return "Forbidden", 403
     data = request.get_json() or {}
     name = " ".join((data.get("product_name") or "").split()).strip()
     qty = data.get("quantity")
@@ -7887,6 +7915,10 @@ def inv_add():
 @app.put("/api/inventory/<int:pid>")
 @login_required
 def inv_edit(pid):
+    dept = (session.get("dept") or "").strip()
+    role = (session.get("role") or "").strip()
+    if not (dept == "GSD" and role in ["Admin", "AssistantAdmin"]):
+        return "Forbidden", 403
     data = request.get_json() or {}
     name = (data.get("product_name") or "").strip()
     qty = data.get("quantity")
@@ -7913,6 +7945,10 @@ def inv_edit(pid):
 @app.delete("/api/inventory/<int:pid>")
 @login_required
 def inv_delete(pid):
+    dept = (session.get("dept") or "").strip()
+    role = (session.get("role") or "").strip()
+    if not (dept == "GSD" and role in ["Admin", "AssistantAdmin"]):
+        return "Forbidden", 403
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM inventory WHERE product_id=%s", (pid,))

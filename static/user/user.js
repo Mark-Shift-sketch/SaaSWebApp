@@ -243,6 +243,8 @@ function renderRequests(filter) {
                 <button onclick="continueDraftRequest('${req.request_id}')" class="btn-link">Continue Draft</button>
                 <button onclick="submitDraftRequest('${req.request_id}')" class="btn-link">Submit Draft</button>
             `;
+        } else if (statusLower === 'rejected') {
+            actionHtml = `<button onclick="showRejectedDetails(${req.request_id})" class="btn-link">Details</button>`;
         }
 
         tr.innerHTML = `
@@ -398,6 +400,62 @@ async function continueDraftRequest(requestId) {
 
     requestModal.classList.add('show');
     showSystemStatus(`Draft #${requestId} loaded. Continue editing then submit when ready.`);
+}
+
+// Show rejected request details and allow converting to draft for editing
+async function showRejectedDetails(requestId) {
+    try {
+        const res = await fetch(`/api/request/${requestId}/rejected-details`, { method: 'GET', credentials: 'same-origin' });
+        const data = await res.json();
+        if (!res.ok) {
+            showSystemStatus(data.error || 'Failed to load rejection details.');
+            return;
+        }
+
+        const el = document.getElementById('rejection-message');
+        const btn = document.getElementById('rejection-edit-resubmit');
+        const lines = [];
+        lines.push(`<strong>Request ID:</strong> ${data.request_id}`);
+        lines.push(`<strong>Submitted On:</strong> ${new Date(data.created_at).toLocaleString()}`);
+        if (data.rejected_at) lines.push(`<strong>Rejected On:</strong> ${new Date(data.rejected_at).toLocaleString()}`);
+        if (data.rejected_by) lines.push(`<strong>Rejected By:</strong> ${data.rejected_by}`);
+        lines.push(`<strong>Reason:</strong> ${data.rejection_message || '-'}`);
+        if (data.type_name) lines.push(`<strong>Type:</strong> ${data.type_name}`);
+
+        el.innerHTML = lines.join('<br/>');
+        if (btn) btn.style.display = 'inline-block';
+        window._lastRejectedRequestId = requestId;
+        document.getElementById('rejection-modal').classList.add('show');
+    } catch (e) {
+        console.error(e);
+        showSystemStatus('Failed to load rejection details.');
+    }
+}
+
+async function resubmitRejectedRequest() {
+    const requestId = window._lastRejectedRequestId;
+    if (!requestId) return;
+    const confirmed = await showSystemConfirm('Convert this rejected request into a draft so you can edit and resubmit?', 'Convert to Draft');
+    if (!confirmed) return;
+
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+    const res = await fetch(`/api/request/${requestId}/resubmit`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+            'Content-Type': 'application/json',
+            ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+        }
+    });
+    const data = await res.json();
+    if (!res.ok) {
+        showSystemStatus(data.error || 'Failed to convert to draft.');
+        return;
+    }
+
+    closeRejectionModal();
+    showSystemStatus('Request converted to draft. Loading editor...');
+    await continueDraftRequest(requestId);
 }
 
 

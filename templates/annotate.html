@@ -101,6 +101,26 @@
         z-index: 10;
       }
 
+      /* Move handle: visible icon/text so users can easily grab and move an annotation */
+      .item .move-handle {
+        position: absolute;
+        left: -10px;
+        top: -10px;
+        min-width: 22px;
+        height: 22px;
+        padding: 0 4px;
+        border-radius: 6px;
+        background: #2563eb;
+        color: #fff;
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: move;
+        z-index: 11;
+        user-select: none;
+      }
+
       .text-item {
         min-width: 40px;
         min-height: 18px;
@@ -811,6 +831,54 @@
         handle.addEventListener("pointercancel", stop);
       }
 
+      // Create a visible move handle (icon/text) and wire dragging from it
+      function makeMoveHandle(el) {
+        const move = document.createElement("div");
+        move.className = "move-handle";
+        move.title = "Move";
+        move.innerText = "≡"; // hamburger-like icon for move
+        el.appendChild(move);
+
+        let startX = 0,
+          startY = 0,
+          origX = 0,
+          origY = 0,
+          dragging = false;
+
+        move.addEventListener("pointerdown", (e) => {
+          if (!canEditElement(el)) return;
+          if (DRAW_MODE) return;
+          e.stopPropagation();
+          select(el);
+          move.setPointerCapture(e.pointerId);
+          dragging = true;
+          startX = e.clientX;
+          startY = e.clientY;
+          origX = parseFloat(el.style.left || "0");
+          origY = parseFloat(el.style.top || "0");
+          e.preventDefault();
+        });
+
+        move.addEventListener("pointermove", (e) => {
+          if (!dragging) return;
+          if (!move.hasPointerCapture(e.pointerId)) return;
+          const dx = e.clientX - startX;
+          const dy = e.clientY - startY;
+          el.style.left = origX + dx + "px";
+          el.style.top = origY + dy + "px";
+        });
+
+        function stop(e) {
+          dragging = false;
+          try {
+            move.releasePointerCapture(e.pointerId);
+          } catch (_) {}
+        }
+
+        move.addEventListener("pointerup", stop);
+        move.addEventListener("pointercancel", stop);
+      }
+
       // =========================
       // Render Objects
       // =========================
@@ -923,7 +991,10 @@
             if (found) found.text = editor.innerText;
           });
 
-          if (isEditable) makeResizable(el);
+          if (isEditable) {
+            makeResizable(el);
+            makeMoveHandle(el);
+          }
         } else {
           const img = document.createElement("img");
           img.src = obj.imageDataUrl;
@@ -934,7 +1005,10 @@
 
           el.style.width = cssW + "px";
           el.style.height = cssH + "px";
-          if (isEditable) makeResizable(el);
+          if (isEditable) {
+            makeResizable(el);
+            makeMoveHandle(el);
+          }
         }
 
         el.addEventListener("click", (e) => {

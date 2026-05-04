@@ -407,6 +407,58 @@
               </table>
             </div>
           </div>
+
+            <div class="form-card" style="grid-column: 1 / -1; margin-top:12px;">
+              <h3>Approval Notification Team (IT)</h3>
+              <p class="subtitle" style="margin-top:4px;">Select which positions should receive approval links/notifications from IT routing.</p>
+
+              <form action="{{ url_for('it_add_approval_team_position') }}" method="POST" style="margin: 12px 0 18px 0;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                  <label>Add Position</label>
+                  <div class="department-inline-actions">
+                    <select name="position_id" required>
+                      <option value="" selected disabled>Select position to add</option>
+                      {% for pos in approval_team_candidates %}
+                      <option value="{{ pos.position_id }}">{{ pos.position_name }}</option>
+                      {% endfor %}
+                    </select>
+                    <button type="submit" class="btn-primary">Add Position</button>
+                  </div>
+                </div>
+              </form>
+
+              <div class="table-container" style="margin-top:0; padding:0; box-shadow:none;">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Position</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for pos in approval_team_positions %}
+                    <tr>
+                      <td>{{ pos.position_name }}</td>
+                      <td>
+                        <form action="{{ url_for('it_remove_approval_team_position') }}" method="POST" class="inline-action-form" onsubmit="return confirm('Remove position from approval recipient list?')">
+                          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                          <input type="hidden" name="position_id" value="{{ pos.position_id }}">
+                          <button type="submit" class="icon-action-btn btn-delete" title="Remove">
+                            Remove
+                          </button>
+                        </form>
+                      </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                      <td colspan="2" style="text-align:center;">No positions assigned yet.</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
         </div>
       </div>
 
@@ -799,7 +851,33 @@
         });
         document.getElementById(tabId).classList.add("active-content");
         document.getElementById("link-" + tabId).classList.add("active");
+        try {
+          // Persist the active tab in the URL hash so page reloads keep the same tab
+          if (window.history && window.history.replaceState) {
+            window.history.replaceState(null, '', '#' + tabId);
+          } else {
+            window.location.hash = tabId;
+          }
+        } catch (e) {
+          // ignore
+        }
       }
+
+      // On initial load, read hash to restore selected tab (helps after form POST redirects)
+      (function restoreTabFromHash() {
+        try {
+          const h = (window.location.hash || '').replace('#', '').trim();
+          if (h) {
+            const el = document.getElementById(h);
+            if (el && el.classList.contains('tab-content')) {
+              showTab(h);
+              return;
+            }
+          }
+        } catch (e) {}
+        // default: ensure dashboard tab is active
+        try { showTab('dashboard'); } catch (e) {}
+      })();
 
       function confirmBanAction(email, action) {
         const verb = action === "unban" ? "unban" : "ban";

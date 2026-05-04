@@ -148,7 +148,9 @@
                 <p class="subtitle">Signed in as {{ email or "N/A" }}. Review all submitted bug reports.</p>
             </div>
             <div class="toolbar">
-                <a class="btn btn-soft" href="{{ url_for('dev_dashboard') }}">Developer Home</a>
+                {% if (role or '').strip().lower() == 'dev' %}
+                    <a class="btn btn-soft" href="{{ url_for('dev_dashboard') }}">Developer Home</a>
+                {% endif %}
                 <a class="btn btn-soft" href="{{ url_for('saas_admin_dashboard') }}">SaaS Admin</a>
                 <a class="btn btn-primary" href="{{ url_for('logout') }}">Logout</a>
             </div>

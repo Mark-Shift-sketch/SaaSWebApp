@@ -128,6 +128,18 @@ function createCustomBlock(type) {
     };
   }
 
+  if (normalizedType === 'signature') {
+    return {
+      id: createUniqueBlockId('custom_signature'),
+      type: 'signature',
+      label: 'Signature',
+      required: false,
+      signature_source: 'approver', // approver | reviewer | position
+      signature_position_id: null,
+      pdf_field_name: '',
+    };
+  }
+
   return {
     id: createUniqueBlockId('custom_text'),
     type: 'text',
@@ -189,6 +201,11 @@ function bindMapperControls() {
   if (addDateBtn && addDateBtn.dataset.bound !== '1') {
     addDateBtn.dataset.bound = '1';
     addDateBtn.addEventListener('click', () => addCustomField('date'));
+  }
+  const addSignatureBtn = document.getElementById('addSignatureFieldBtn');
+  if (addSignatureBtn && addSignatureBtn.dataset.bound !== '1') {
+    addSignatureBtn.dataset.bound = '1';
+    addSignatureBtn.addEventListener('click', () => addCustomField('signature'));
   }
 }
 
@@ -296,6 +313,61 @@ function renderFieldList() {
       labelField.appendChild(labelText);
       labelField.appendChild(labelInput);
       item.appendChild(labelField);
+    }
+
+    if (String(block.type || '').toLowerCase() === 'signature') {
+      const f = document.createElement('div');
+      f.className = 'field';
+      const l = document.createElement('label');
+      l.textContent = 'Signature Source';
+      const sel = document.createElement('select');
+      const opts = [
+        { v: 'approver', t: 'Approver (use approver saved signature)' },
+        { v: 'reviewer', t: 'Reviewer (use reviewer saved signature)' },
+        { v: 'position', t: 'Position (from IT approval team)' },
+      ];
+      opts.forEach((o) => {
+        const op = document.createElement('option');
+        op.value = o.v;
+        op.textContent = o.t;
+        sel.appendChild(op);
+      });
+      sel.value = String(block.signature_source || 'approver');
+      sel.addEventListener('change', () => {
+        block.signature_source = sel.value;
+        renderFieldList();
+        renderPdfBoxes();
+      });
+      f.appendChild(l);
+      f.appendChild(sel);
+      item.appendChild(f);
+
+      // position selector if chosen
+      if (String(block.signature_source || '').toLowerCase() === 'position') {
+        const posField = document.createElement('div');
+        posField.className = 'field';
+        const posLabel = document.createElement('label');
+        posLabel.textContent = 'Position';
+        const posSel = document.createElement('select');
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = '-- Select Position --';
+        posSel.appendChild(placeholder);
+        const positions = Array.isArray(state.positions) ? state.positions : [];
+        positions.forEach((p) => {
+          const o = document.createElement('option');
+          o.value = String(p.position_id || p.positionId || p.id || '');
+          o.textContent = String(p.position_name || p.position_name || p.name || '');
+          posSel.appendChild(o);
+        });
+        posSel.value = block.signature_position_id ? String(block.signature_position_id) : '';
+        posSel.addEventListener('change', () => {
+          block.signature_position_id = posSel.value ? Number(posSel.value) : null;
+        });
+        posField.appendChild(posLabel);
+        posField.appendChild(posSel);
+        item.appendChild(posField);
+      }
     }
 
     if (['text', 'textarea', 'number', 'date'].includes(String(block.type || '').toLowerCase())) {
@@ -603,6 +675,7 @@ async function fetchSchema() {
 
   state.schema = data.schema || { version: 1, total_formula: '', blocks: [] };
   state.templateFields = Array.isArray(data.template_fields) ? data.template_fields : [];
+  state.positions = Array.isArray(data.positions) ? data.positions : [];
 
   const blocks = getBlocks();
   state.activeBlockId = blocks.length ? String(blocks[0].id || '') : '';

@@ -1340,6 +1340,32 @@
 
             <div class="card">
               <h2 class="card-title">
+                <i class="fa-solid fa-pen"></i> Signature Settings
+              </h2>
+
+              <div class="form-group-wrapper">
+                <div class="form-group">
+                  <label>Saved Signature</label>
+                  <div style="display:flex; gap:12px; align-items:center;">
+                    <img id="my-signature-preview" src="" alt="No signature" style="max-width:280px; border:1px solid #e6e9ef; padding:8px; display:none;" />
+                    <div id="no-signature-msg" class="text-muted">No signature uploaded.</div>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label for="signature-file">Upload Signature (PNG)</label>
+                  <input id="signature-file" name="signature" type="file" accept="image/png" />
+                  <div style="margin-top:8px; display:flex; gap:8px;">
+                    <button class="btn-primary" id="save-signature-btn" type="button">Save Signature</button>
+                    <button class="btn-secondary" id="remove-signature-btn" type="button">Remove</button>
+                  </div>
+                  <p class="text-muted text-sm mt-2">Upload a PNG image of your signature. This will be used when approving requests.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <h2 class="card-title">
                 <i class="fa-regular fa-bell"></i> Notification Preferences
               </h2>
               <p class="text-muted" style="margin-top: 8px">
@@ -1849,5 +1875,71 @@
     })();
   </script>
     <script src="/static/admin/admin.js"></script>
+    <script>
+      async function loadMySignature() {
+        try {
+          const res = await fetch('/api/annotations/my-signature', { credentials: 'same-origin' });
+          const j = await res.json();
+          const img = document.getElementById('my-signature-preview');
+          const noMsg = document.getElementById('no-signature-msg');
+          if (j && j.has_signature) {
+            img.src = j.signature_png_base64;
+            img.style.display = '';
+            noMsg.style.display = 'none';
+          } else {
+            img.src = '';
+            img.style.display = 'none';
+            noMsg.style.display = '';
+          }
+        } catch (e) {
+          console.error('Load signature failed', e);
+        }
+      }
+
+      document.getElementById('save-signature-btn').addEventListener('click', async function () {
+        const f = document.getElementById('signature-file');
+        if (!f || !f.files || !f.files[0]) {
+          alert('Please choose a PNG signature file to upload.');
+          return;
+        }
+        const file = f.files[0];
+        const fd = new FormData();
+        fd.append('signature', file);
+        try {
+          const res = await fetch('/api/annotations/my-signature', { method: 'POST', body: fd, credentials: 'same-origin' });
+          const j = await res.json();
+          if (res.ok && j && j.success) {
+            alert('Signature saved');
+            loadMySignature();
+          } else {
+            alert('Save failed: ' + (j && j.error ? j.error : res.statusText));
+          }
+        } catch (e) {
+          console.error(e);
+          alert('Save failed');
+        }
+      });
+
+      document.getElementById('remove-signature-btn').addEventListener('click', async function () {
+        if (!confirm('Remove saved signature?')) return;
+        try {
+          const res = await fetch('/api/annotations/my-signature/delete', { method: 'POST', credentials: 'same-origin' });
+          const j = await res.json();
+          if (res.ok && j && j.success) {
+            alert('Signature removed');
+            loadMySignature();
+          } else {
+            alert('Remove failed: ' + (j && j.error ? j.error : res.statusText));
+          }
+        } catch (e) {
+          console.error(e);
+          alert('Remove failed');
+        }
+      });
+
+      document.addEventListener('DOMContentLoaded', function () {
+        loadMySignature();
+      });
+    </script>
   </body>
 </html>

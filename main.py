@@ -76,6 +76,8 @@ def is_allowed_system_email(email):
     normalized_email = str(email or "").strip().lower()
     if DEV_EXCEPTION_EMAIL and normalized_email == DEV_EXCEPTION_EMAIL:
         return True
+    if DEFAULT_SAAS_EMAIL and normalized_email == DEFAULT_SAAS_EMAIL:
+        return True
     if "@" not in normalized_email:
         return False
     local_part, domain = normalized_email.rsplit("@", 1)
@@ -108,7 +110,7 @@ except Exception:
 def hash_user_password(raw_password):
     if argon2_hasher is None:
         raise RuntimeError(
-            "argon2-cffi is required for password hashing. Install it with: python -m pip install argon2-cffi"
+            "argon2-cffi is required for password hashing."
         )
     return argon2_hasher.hash(raw_password)
 
@@ -173,7 +175,7 @@ def send_request_email_async(receiver, status):
 
 # Security / environment
 
-SECRET_KEY = os.environ.get("SECRET_KEY") or os.environ.get("secret_key")
+SECRET_KEY = os.environ.get("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY environment variable is required")
 app.secret_key = SECRET_KEY
@@ -235,8 +237,8 @@ def get_rate_limit_user_key():
 
 
 # Rate limiting
-GLOBAL_USER_DAILY_LIMIT = os.environ.get("RATE_LIMIT_PER_USER_DAY", "1000 per day")
-GLOBAL_IP_HOURLY_LIMIT = os.environ.get("RATE_LIMIT_PER_IP_HOUR", "100 per hour")
+GLOBAL_USER_DAILY_LIMIT = os.environ.get("RATE_LIMIT_PER_USER_DAY")
+GLOBAL_IP_HOURLY_LIMIT = os.environ.get("RATE_LIMIT_PER_IP_HOUR")
 
 limiter = Limiter(
     key_func=get_remote_address,
@@ -290,8 +292,8 @@ CORS(
 )
 
 # Upload Size Limit
-MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "20"))
-MAX_BUG_IMAGE_MB = int(os.environ.get("MAX_BUG_IMAGE_MB", "5"))
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB"))
+MAX_BUG_IMAGE_MB = int(os.environ.get("MAX_BUG_IMAGE_MB"))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 # Allowed Upload Types 
 ALLOWED_EXTENSIONS = {"pdf"}
@@ -592,6 +594,16 @@ def enforce_system_maintenance_mode():
     if path.startswith("/static/") or path.startswith("/favicon"):
         return None
 
+    # When running locally over plain HTTP (localhost / 127.0.0.1), allow session cookies
+    # to be set even if SESSION_COOKIE_SECURE env is true. This makes local development
+    # easier — production environments should serve HTTPS and keep SECURE cookies enabled.
+    try:
+        host = (request.host or "").split(":", 1)[0].lower()
+        if host in {"127.0.0.1", "localhost"} or app.debug:
+            app.config["SESSION_COOKIE_SECURE"] = False
+    except Exception:
+        pass
+
     maintenance_state = get_system_maintenance_state(use_cache=True)
     if not maintenance_state.get("enabled"):
         return None
@@ -746,6 +758,42 @@ def get_user_id(email):
         conn.close()
 
 
+@app.post("/api/annotations/my-signature/delete")
+@login_required
+def delete_my_saved_signature():
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    # Allow admins, approvers, and reviewers to delete their saved signature
+    role = (session.get("role") or "").strip()
+    allowed_roles = {"admin", "assistantadmin", "superadmin", "dean", "head", "approver", "reviewer", "coo", "sbo"}
+    if role.lower() not in allowed_roles:
+        return jsonify({"success": False, "error": "Forbidden - signature feature not available for your role"}), 403
+    
+    actor_user_id = session.get("user_id")
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    if actor_user_id is None:
+        return jsonify({"success": False, "error": "Invalid user."}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        ensure_user_saved_signature_schema(cursor, conn)
+        cursor.execute("DELETE FROM user_saved_signatures WHERE user_id = %s", (int(actor_user_id),))
+        conn.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def get_user_id_for_company(email, company_id):
     normalized_company_id = int(company_id or 0)
     if normalized_company_id <= 0:
@@ -805,13 +853,13 @@ def _get_org_domain_column(cursor):
             SELECT column_name
             FROM information_schema.columns
             WHERE table_schema = DATABASE()
-              AND table_name = 'organizations'
-              AND column_name IN ('allowed_email_domain', 'allowed_email_domains')
+            AND table_name = 'organizations'
+            AND column_name IN ('allowed_email_domain', 'allowed_email_domains')
             ORDER BY CASE column_name
-                        WHEN 'allowed_email_domains' THEN 1
-                        WHEN 'allowed_email_domain' THEN 2
-                        ELSE 3
-                     END
+            WHEN 'allowed_email_domains' THEN 1
+            WHEN 'allowed_email_domain' THEN 2
+            ELSE 3
+            END
             LIMIT 1
         """
         )
@@ -1005,8 +1053,8 @@ def _get_request_approved_positions(cursor, request_id):
         SELECT DISTINCT actor_position_id
         FROM request_actions
         WHERE request_id = %s
-          AND action IN ('APPROVED', 'COO_APPROVED')
-          AND actor_position_id IS NOT NULL
+        AND action IN ('APPROVED', 'COO_APPROVED')
+        AND actor_position_id IS NOT NULL
     """,
         (request_id,),
     )
@@ -1252,7 +1300,7 @@ ALLOWED_BUDGET_REPORT_ROLES = {"Admin", "SuperAdmin", "SBO"}
 ALLOWED_BUDGET_SUBMIT_KEYWORDS = {"secretary", "representative", "purchasing"}
 BUDGET_RELEASE_ACTOR_KEYWORDS = {"representative", "purchasing"}
 COO_KEYWORDS = {"coo", "chief operating officer"}
-ALLOWED_FORM_BLOCK_TYPES = {"heading", "text", "textarea", "number", "date", "shape", "table"}
+ALLOWED_FORM_BLOCK_TYPES = {"heading", "text", "textarea", "number", "date", "shape", "table", "signature"}
 ALLOWED_FORM_SHAPES = {"line", "box"}
 ALLOWED_FORM_COLUMN_TYPES = {"text", "number"}
 ADMIN_PIN_MAX_FAILED_ATTEMPTS = 5
@@ -1264,11 +1312,13 @@ BUDGET_DEFAULT_TOTAL = Decimal("100000.00")
 DEFAULT_COMPANY_NAME = str(os.environ.get("DEFAULT_COMPANY_NAME") or "Default Organization").strip() or "Default Organization"
 DEFAULT_DEV_EMAIL = str(os.environ.get("DEV_EMAIL") or os.environ.get("name") or "").strip().lower()
 DEFAULT_DEV_PASSWORD = str(os.environ.get("DEV_PASSWORD") or os.environ.get("password") or "").strip()
+DEFAULT_SAAS_EMAIL = str(os.environ.get("SAAS_EMAIL") or "").strip().lower()
+DEFAULT_SAAS_PASSWORD = str(os.environ.get("SAAS_PASSWORD") or "").strip()
 
 SAAS_PLAN_DEFINITIONS = {
     "FREE": {"monthly_price": Decimal("0.00"), "seats_limit": 10, "requests_limit": 200},
-    "PRO": {"monthly_price": Decimal("49.00"), "seats_limit": 100, "requests_limit": 5000},
-    "ENTERPRISE": {"monthly_price": Decimal("199.00"), "seats_limit": 1000, "requests_limit": 100000},
+    "PRO": {"monthly_price": Decimal("299.00"), "seats_limit": 100, "requests_limit": 5000},
+    "ENTERPRISE": {"monthly_price": Decimal("499.00"), "seats_limit": 1000, "requests_limit": 100000},
 }
 
 TENANT_PERMISSION_CATALOG = [
@@ -1633,6 +1683,29 @@ def ensure_tenant_schema(cursor, conn):
     _tenant_schema_checked = True
 
 
+def ensure_contact_messages_schema(cursor, conn):
+    """Ensure contact_messages table exists for landing page inquiries"""
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS contact_messages (
+            contact_id INT AUTO_INCREMENT PRIMARY KEY,
+            organization_name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) NOT NULL,
+            phone VARCHAR(20) NULL,
+            inquiry_type VARCHAR(50) NOT NULL,
+            message LONGTEXT NOT NULL,
+            status ENUM('new', 'read', 'replied') DEFAULT 'new',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_status (status),
+            INDEX idx_created_at (created_at),
+            INDEX idx_email (email)
+        )
+        """
+    )
+    conn.commit()
+
+
 def has_role_permission(cursor, permission_key, role_id=None):
     permission_key = str(permission_key or "").strip().lower()
     if not permission_key:
@@ -1686,6 +1759,8 @@ def is_saas_owner_user():
     if role in {"dev", "saasowner", "saas_owner", "platformowner"}:
         return True
     if DEFAULT_DEV_EMAIL and email == DEFAULT_DEV_EMAIL:
+        return True
+    if DEFAULT_SAAS_EMAIL and email == DEFAULT_SAAS_EMAIL:
         return True
     return False
 
@@ -1910,6 +1985,8 @@ def is_system_maintenance_bypass_user():
     if role in {"dev", "saasowner", "saas_owner", "platformowner"}:
         return True
     if DEFAULT_DEV_EMAIL and email == DEFAULT_DEV_EMAIL:
+        return True
+    if DEFAULT_SAAS_EMAIL and email == DEFAULT_SAAS_EMAIL:
         return True
     return False
 
@@ -2293,6 +2370,36 @@ def ensure_finance_amount_editor_schema(cursor, conn):
 
     conn.commit()
     _finance_amount_editor_schema_checked = True
+
+
+def ensure_it_approval_team_schema(cursor, conn):
+    global _it_approval_team_schema_checked
+
+    try:
+        _it_approval_team_schema_checked
+    except NameError:
+        _it_approval_team_schema_checked = False
+
+    if _it_approval_team_schema_checked:
+        return
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS it_approval_positions (
+            member_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            company_id INT NOT NULL,
+            position_id INT NOT NULL,
+            added_by_email VARCHAR(255) NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_it_approval_positions_company_position (company_id, position_id),
+            INDEX idx_it_approval_positions_company (company_id),
+            INDEX idx_it_approval_positions_position (position_id)
+        )
+        """
+    )
+
+    conn.commit()
+    _it_approval_team_schema_checked = True
 
 
 def ensure_stage_reminder_schema(cursor, conn):
@@ -3478,6 +3585,11 @@ def process_coo_special_decision_by_email(cursor, conn, request_id, actor_email,
             pass
     else:
         return {"success": False, "error": "Invalid decision."}, 400
+
+    try:
+        render_mapped_signature_blocks_for_request(cursor, conn, request_id)
+    except Exception:
+        logger.exception("Failed to render mapped signatures for COO special action")
 
     conn.commit()
 
@@ -5040,6 +5152,32 @@ def normalize_request_type_form_schema(raw_schema):
             normalized_blocks.append(normalized)
             continue
 
+        if block_type == "signature":
+            # signature block: where an approver/reviewer/position signature image should be placed
+            sig_source = str(block.get("signature_source") or "approver").strip().lower()
+            sig_position_id = None
+            try:
+                if block.get("signature_position_id") not in (None, ""):
+                    sig_position_id = int(block.get("signature_position_id"))
+            except (TypeError, ValueError):
+                sig_position_id = None
+
+            overlay_cfg = _normalize_pdf_overlay_config(block.get("pdf_overlay"))
+            sig_norm = {
+                "id": block_id,
+                "type": "signature",
+                "label": label,
+                "required": required,
+                "signature_source": sig_source,
+            }
+            if sig_position_id:
+                sig_norm["signature_position_id"] = sig_position_id
+            if overlay_cfg:
+                sig_norm["pdf_overlay"] = overlay_cfg
+
+            normalized_blocks.append(sig_norm)
+            continue
+
         if block_type == "table":
             columns = _normalize_table_columns(block.get("columns"))
             numeric_keys = [col["key"] for col in columns if col["type"] == "number"]
@@ -6301,6 +6439,295 @@ def build_filled_pdf_from_submission(
         return template_pdf_bytes
 
 
+def _resolve_saved_signature_png(cursor, actor_user_id=None, actor_email=None, company_id=None):
+    ensure_user_saved_signature_schema(cursor, None)
+
+    normalized_company_id = None
+    try:
+        if company_id not in (None, ""):
+            normalized_company_id = int(company_id)
+    except (TypeError, ValueError):
+        normalized_company_id = None
+
+    normalized_user_id = None
+    try:
+        if actor_user_id not in (None, ""):
+            normalized_user_id = int(actor_user_id)
+    except (TypeError, ValueError):
+        normalized_user_id = None
+
+    if normalized_user_id is None and str(actor_email or "").strip():
+        cursor.execute(
+            """
+            SELECT user_id
+            FROM users
+            WHERE LOWER(TRIM(email)) = %s
+              AND (%s IS NULL OR company_id = %s)
+            ORDER BY user_id DESC
+            LIMIT 1
+            """,
+            (
+                str(actor_email or "").strip().lower(),
+                normalized_company_id,
+                normalized_company_id,
+            ),
+        )
+        user_row = cursor.fetchone() or {}
+        try:
+            if user_row.get("user_id") not in (None, ""):
+                normalized_user_id = int(user_row.get("user_id"))
+        except (TypeError, ValueError):
+            normalized_user_id = None
+
+    if normalized_user_id is None:
+        return None
+
+    cursor.execute(
+        """
+        SELECT signature_png
+        FROM user_saved_signatures
+        WHERE user_id = %s
+          AND (%s IS NULL OR company_id = %s OR company_id IS NULL)
+        LIMIT 1
+        """,
+        (normalized_user_id, normalized_company_id, normalized_company_id),
+    )
+    row = cursor.fetchone() or {}
+    return row.get("signature_png")
+
+
+def render_mapped_signature_blocks_for_request(cursor, conn, request_id):
+    ensure_tenant_schema(cursor, conn)
+    ensure_request_type_form_schema_table(cursor, conn)
+    ensure_request_form_submission_table(cursor, conn)
+    ensure_user_saved_signature_schema(cursor, conn)
+    ensure_it_approval_team_schema(cursor, conn)
+
+    cursor.execute(
+        """
+        SELECT
+            r.request_id,
+            r.company_id,
+            r.request_type_id,
+            r.amount,
+            r.attachment,
+            COALESCE(rs.status_name, '') AS status_name,
+            rt.template_mode,
+            rt.template_file,
+            rfs.form_data_json,
+            a.signed_pdf
+        FROM requests r
+        LEFT JOIN request_status rs ON rs.status_id = r.status_id
+        LEFT JOIN request_types rt ON rt.request_type_id = r.request_type_id
+        LEFT JOIN request_form_submissions rfs ON rfs.request_id = r.request_id
+        LEFT JOIN request_annotations a ON a.request_id = r.request_id
+        WHERE r.request_id = %s
+        LIMIT 1
+        """,
+        (request_id,),
+    )
+    req = cursor.fetchone() or {}
+    if not req:
+        return {"applied": False, "reason": "request_not_found"}
+
+    template_mode = str(req.get("template_mode") or "").strip().upper()
+    template_blob = req.get("template_file")
+    raw_form_json = str(req.get("form_data_json") or "").strip()
+    request_type_id = req.get("request_type_id")
+
+    if template_mode != "FILLABLE":
+        return {"applied": False, "reason": "not_fillable"}
+    if not request_type_id:
+        return {"applied": False, "reason": "missing_request_type"}
+
+    schema = get_request_type_fillable_schema(cursor, int(request_type_id))
+
+    # Preserve existing data first: use current signed PDF or request attachment as base.
+    base_pdf = req.get("signed_pdf") or req.get("attachment")
+
+    # Fallback to regenerated fillable PDF only when no existing rendered PDF is available.
+    if not base_pdf and template_blob and raw_form_json:
+        try:
+            payload = json.loads(raw_form_json)
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            base_pdf = build_filled_pdf_from_submission(
+                template_blob,
+                schema,
+                payload,
+                total_amount=req.get("amount"),
+            )
+
+    if not base_pdf and template_blob:
+        base_pdf = template_blob
+
+    if not base_pdf:
+        return {"applied": False, "reason": "base_pdf_not_generated"}
+
+    signature_blocks = [
+        b
+        for b in (schema.get("blocks") or [])
+        if isinstance(b, dict) and str(b.get("type") or "").strip().lower() == "signature"
+    ]
+    if not signature_blocks:
+        return {"applied": False, "reason": "no_signature_blocks"}
+
+    cursor.execute(
+        """
+        SELECT actor_user_id, actor_position_id, actor_email, action, created_at
+        FROM request_actions
+        WHERE request_id = %s
+          AND action IN ('APPROVED', 'COO_APPROVED')
+        ORDER BY created_at ASC
+        """,
+        (request_id,),
+    )
+    action_rows = cursor.fetchall() or []
+
+    if not action_rows and str(req.get("status_name") or "").strip().upper() != "REJECTED":
+        return {"applied": False, "reason": "no_approval_actions"}
+
+    latest_by_position = {}
+    for row in action_rows:
+        try:
+            pos_id = int(row.get("actor_position_id")) if row.get("actor_position_id") not in (None, "") else None
+        except (TypeError, ValueError):
+            pos_id = None
+        if pos_id is not None:
+            latest_by_position[pos_id] = row
+
+    cursor.execute(
+        "SELECT position_id FROM it_approval_positions WHERE company_id = %s",
+        (int(req.get("company_id") or 0),),
+    )
+    allowed_it_positions = {
+        int(r.get("position_id"))
+        for r in (cursor.fetchall() or [])
+        if r.get("position_id") is not None
+    }
+
+    status_upper = str(req.get("status_name") or "").strip().upper()
+
+    try:
+        page_sizes = [
+            (float(p.mediabox.width), float(p.mediabox.height))
+            for p in _PdfReader(BytesIO(base_pdf)).pages
+        ]
+    except Exception:
+        page_sizes = []
+
+    text_items = []
+    image_items = []
+
+    def _append_rejected_text(overlay_cfg):
+        if not overlay_cfg or not page_sizes:
+            return
+        page = int(overlay_cfg.get("page", 0) or 0)
+        if page < 0 or page >= len(page_sizes):
+            return
+        page_w, page_h = page_sizes[page]
+        box_w = max(10.0, float(overlay_cfg.get("w_rel", 0.25)) * page_w)
+        box_h = max(10.0, float(overlay_cfg.get("h_rel", 0.05)) * page_h)
+        x = float(overlay_cfg.get("x_rel", 0.05)) * page_w
+        y_top = float(overlay_cfg.get("y_rel", 0.05)) * page_h
+        y = max(0.0, page_h - y_top - box_h)
+        text_items.append(
+            {
+                "page": page,
+                "x": x,
+                "y": y,
+                "w": box_w,
+                "h": box_h,
+                "text": "REJECTED",
+                "font": max(10, int(overlay_cfg.get("font", 12) or 12)),
+            }
+        )
+
+    for block in signature_blocks:
+        overlay_cfg = _normalize_pdf_overlay_config(block.get("pdf_overlay"))
+        if not overlay_cfg:
+            continue
+
+        if status_upper == "REJECTED":
+            _append_rejected_text(overlay_cfg)
+            continue
+
+        sig_source = str(block.get("signature_source") or "approver").strip().lower()
+        target_action = None
+
+        if sig_source == "reviewer":
+            target_action = action_rows[0] if action_rows else None
+        elif sig_source == "position":
+            mapped_pos = None
+            try:
+                if block.get("signature_position_id") not in (None, ""):
+                    mapped_pos = int(block.get("signature_position_id"))
+            except (TypeError, ValueError):
+                mapped_pos = None
+
+            if mapped_pos is not None and mapped_pos in allowed_it_positions:
+                target_action = latest_by_position.get(mapped_pos)
+        else:
+            target_action = action_rows[-1] if action_rows else None
+
+        if not target_action and action_rows:
+            target_action = action_rows[-1]
+        if not target_action:
+            continue
+
+        sig_png = _resolve_saved_signature_png(
+            cursor,
+            actor_user_id=target_action.get("actor_user_id"),
+            actor_email=target_action.get("actor_email"),
+            company_id=req.get("company_id"),
+        )
+        if not sig_png:
+            continue
+
+        page = int(overlay_cfg.get("page", 0) or 0)
+        if page < 0 or page >= len(page_sizes):
+            continue
+
+        page_w, page_h = page_sizes[page]
+        box_w = max(10.0, float(overlay_cfg.get("w_rel", 0.25)) * page_w)
+        box_h = max(10.0, float(overlay_cfg.get("h_rel", 0.05)) * page_h)
+        x = float(overlay_cfg.get("x_rel", 0.05)) * page_w
+        y_top = float(overlay_cfg.get("y_rel", 0.05)) * page_h
+        y = max(0.0, page_h - y_top - box_h)
+        image_items.append(
+            {
+                "page": page,
+                "x": x,
+                "y": y,
+                "w": box_w,
+                "h": box_h,
+                "image_bytes": sig_png,
+            }
+        )
+
+    final_pdf = base_pdf
+    if text_items or image_items:
+        overlay_pdf = make_overlay_pdf(base_pdf, text_items, image_items)
+        final_pdf = merge_overlay(base_pdf, overlay_pdf)
+
+    cursor.execute(
+        """
+        INSERT INTO request_annotations (request_id, signed_pdf)
+        VALUES (%s, %s)
+        ON DUPLICATE KEY UPDATE signed_pdf = VALUES(signed_pdf)
+        """,
+        (request_id, final_pdf),
+    )
+
+    return {
+        "applied": True,
+        "signature_blocks": len(signature_blocks),
+        "image_overlays": len(image_items),
+        "text_overlays": len(text_items),
+    }
+
+
 def parse_budget_record_date(value):
     text = str(value or "").strip()
     if not text:
@@ -6593,12 +7020,26 @@ app.add_url_rule("/verify", "verify_otp", verify_view, methods=["POST"])
 @app.route("/")
 def home():
     if "email" not in session:
+        return render_template("landing.html")
+    
+    return redirect("/dashboard")
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    if "email" not in session:
         return redirect("/login")
 
     role = (session.get("role") or "").strip()
+    email = (session.get("email") or "").strip().lower()
     dept = (session.get("dept") or "").strip()
     position = (session.get("position") or "").strip()
     is_it_context = role == "IT" or (role == "SuperAdmin" and position.lower() == "it")
+
+    if DEFAULT_SAAS_EMAIL and email == DEFAULT_SAAS_EMAIL:
+        flash("Login Successful", "success")
+        return redirect("/saas-admin")
     
     if dept == "GSD" and role in ["AssistantAdmin", "Admin"]:
         flash("Login Successful", "success")
@@ -6727,6 +7168,71 @@ def dev_send_system_broadcast_api():
     )
 
 
+@csrf.exempt
+@app.post("/api/contact-message")
+def submit_contact_message():
+    """Handle contact form submissions from landing page"""
+    try:
+        data = request.get_json(silent=True) or {}
+        if not data:
+            data = request.form.to_dict(flat=True) if request.form else {}
+
+        def _field(*keys):
+            for key in keys:
+                value = data.get(key)
+                if value is None:
+                    continue
+                value = str(value).strip()
+                if value:
+                    return value
+            return ""
+        
+        organization_name = _field("organization_name", "organizationName", "contactName", "name", "company_name")
+        email = _field("email", "contactEmail")
+        phone = _field("phone", "contactPhone")
+        inquiry_type = _field("inquiry_type", "inquiryType", "contactType", "type")
+        message = _field("message", "contactMessage", "contact_message")
+        
+        if not organization_name:
+            return jsonify({"success": False, "error": "Organization name is required"}), 400
+        if not email:
+            return jsonify({"success": False, "error": "Email is required"}), 400
+        if not inquiry_type:
+            return jsonify({"success": False, "error": "Inquiry type is required"}), 400
+        if not message:
+            return jsonify({"success": False, "error": "Message is required"}), 400
+        
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        ensure_contact_messages_schema(cursor, conn)
+        
+        cursor.execute(
+            """
+            INSERT INTO contact_messages 
+            (organization_name, email, phone, inquiry_type, message, status)
+            VALUES (%s, %s, %s, %s, %s, 'new')
+            """,
+            (organization_name, email, phone, inquiry_type, message)
+        )
+        conn.commit()
+        
+        contact_id = cursor.lastrowid
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "contact_id": contact_id,
+            "message": "Thank you for your inquiry. We will contact you soon."
+        }), 201
+        
+    except Exception as e:
+        logger.exception("submit_contact_message failed")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/saas-admin")
 @login_required
 def saas_admin_dashboard():
@@ -6736,7 +7242,148 @@ def saas_admin_dashboard():
     return render_template(
         "saas_admin.html",
         email=(session.get("email") or "").strip(),
+        role=(session.get("role") or "").strip(),
     )
+
+
+@app.route("/api/saas/contact-messages", methods=["GET"])
+@login_required
+def saas_get_contact_messages():
+    """Get all contact messages from landing page"""
+    if not is_saas_owner_user():
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    try:
+        status = request.args.get("status", "").strip().lower()
+        
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        ensure_contact_messages_schema(cursor, conn)
+        
+        if status and status in ["new", "read", "replied"]:
+            cursor.execute(
+                """
+                SELECT contact_id, organization_name, email, phone, inquiry_type, status, created_at
+                FROM contact_messages
+                WHERE status = %s
+                ORDER BY created_at DESC
+                """,
+                (status,)
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT contact_id, organization_name, email, phone, inquiry_type, status, created_at
+                FROM contact_messages
+                ORDER BY created_at DESC
+                """
+            )
+        
+        messages = cursor.fetchall() or []
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "messages": messages
+        }), 200
+        
+    except Exception as e:
+        logger.exception("saas_get_contact_messages failed")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/saas/contact-messages/<int:contact_id>", methods=["GET"])
+@login_required
+def saas_get_contact_message(contact_id):
+    """Get a specific contact message"""
+    if not is_saas_owner_user():
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        ensure_contact_messages_schema(cursor, conn)
+        
+        cursor.execute(
+            """
+            SELECT *
+            FROM contact_messages
+            WHERE contact_id = %s
+            """,
+            (contact_id,)
+        )
+        
+        message = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if not message:
+            return jsonify({"success": False, "error": "Message not found"}), 404
+        
+        return jsonify({
+            "success": True,
+            "message": message
+        }), 200
+        
+    except Exception as e:
+        logger.exception("saas_get_contact_message failed")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/saas/contact-messages/<int:contact_id>/status", methods=["POST"])
+@login_required
+def saas_update_contact_message_status(contact_id):
+    """Update contact message status (new, read, replied)"""
+    if not is_saas_owner_user():
+        return jsonify({"success": False, "error": "Forbidden"}), 403
+
+    try:
+        data = request.get_json(silent=True) or {}
+        new_status = (data.get("status") or "").strip().lower()
+        
+        if new_status not in ["new", "read", "replied"]:
+            return jsonify({"success": False, "error": "Invalid status"}), 400
+        
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        ensure_contact_messages_schema(cursor, conn)
+        
+        cursor.execute(
+            """
+            UPDATE contact_messages
+            SET status = %s, updated_at = NOW()
+            WHERE contact_id = %s
+            """,
+            (new_status, contact_id)
+        )
+        
+        conn.commit()
+        
+        cursor.execute(
+            """
+            SELECT *
+            FROM contact_messages
+            WHERE contact_id = %s
+            """,
+            (contact_id,)
+        )
+        
+        message = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "message": message
+        }), 200
+        
+    except Exception as e:
+        logger.exception("saas_update_contact_message_status failed")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/api/saas/companies", methods=["GET"])
@@ -7204,6 +7851,7 @@ def udashboard():
         """, (user_id, company_id))
         counts = cursor.fetchone() or {}
 
+        user_role = (session.get("role") or "").strip()
         return render_template(
             "user.html", message="Log in Successful",
             request_types=request_types,
@@ -7214,6 +7862,7 @@ def udashboard():
             approved_count=counts.get("approved_count", 0) or 0,
             rejected_count=counts.get("rejected_count", 0) or 0,
             completed_count=counts.get("completed_count", 0) or 0,
+            user_role=user_role,
         )
 
     finally:
@@ -7421,6 +8070,7 @@ def bug_reports_dashboard():
             "bug_reports.html",
             email=(session.get("email") or "").strip(),
             bug_reports=rows,
+            role=(session.get("role") or "").strip(),
         )
     finally:
         cursor.close()
@@ -7618,6 +8268,151 @@ def api_activity_logs():
             "data": rows
         })
 
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.route("/api/request/<int:request_id>/rejected-details", methods=["GET"])
+@login_required
+def get_rejected_request_details(request_id):
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cur, conn)
+        ensure_request_form_submission_table(cur, conn)
+
+        company_id = ensure_session_company_context(cur)
+        if company_id <= 0:
+            return jsonify({"error": "No company context found"}), 403
+
+        # fetch basic request data
+        cur.execute(
+            """
+            SELECT r.request_id, r.user_id, r.created_at, r.rejection_message, r.request_type_id, rt.type_name, r.filename, rs.status_name
+            FROM requests r
+            JOIN request_status rs ON r.status_id = rs.status_id
+            LEFT JOIN request_types rt ON r.request_type_id = rt.request_type_id
+            WHERE r.request_id = %s AND r.company_id = %s
+            LIMIT 1
+            """,
+            (request_id, company_id),
+        )
+        row = cur.fetchone() or {}
+        if not row:
+            return jsonify({"error": "Request not found"}), 404
+
+        # only requester can view rejection details here
+        user_id = get_user_id_for_company(session.get("email"), company_id)
+        if not user_id or int(row.get("user_id") or 0) != int(user_id):
+            return jsonify({"error": "Forbidden"}), 403
+
+        if str(row.get("status_name") or "").strip().upper() != "REJECTED":
+            return jsonify({"error": "Request is not rejected"}), 400
+
+        # find latest rejection action
+        cur.execute(
+            """
+            SELECT created_at, actor_email
+            FROM request_actions
+            WHERE request_id = %s AND action = 'REJECTED'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (request_id,)
+        )
+        act = cur.fetchone() or {}
+
+        return jsonify(
+            {
+                "request_id": int(row.get("request_id") or 0),
+                "created_at": str(row.get("created_at") or ""),
+                "rejection_message": str(row.get("rejection_message") or "").strip(),
+                "rejected_at": str(act.get("created_at") or ""),
+                "rejected_by": str(act.get("actor_email") or "").strip(),
+                "type_name": str(row.get("type_name") or "").strip(),
+                "filename": str(row.get("filename") or "").strip(),
+            }
+        ), 200
+
+    except Exception:
+        logger.exception("get_rejected_request_details failed")
+        return jsonify({"error": "Failed to load rejected request details."}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.route("/api/request/<int:request_id>/resubmit", methods=["POST"])
+@login_required
+def resubmit_rejected_request(request_id):
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cur, conn)
+
+        company_id = ensure_session_company_context(cur)
+        if company_id <= 0:
+            return jsonify({"error": "No company context found"}), 403
+
+        user_id = get_user_id_for_company(session.get("email"), company_id)
+        if not user_id:
+            return jsonify({"error": "User not found"}), 404
+
+        # verify request exists and is rejected and belongs to user
+        cur.execute(
+            "SELECT r.request_id, rs.status_name FROM requests r JOIN request_status rs ON r.status_id = rs.status_id WHERE r.request_id=%s AND r.company_id=%s LIMIT 1",
+            (request_id, company_id),
+        )
+        row = cur.fetchone() or {}
+        if not row:
+            return jsonify({"error": "Request not found"}), 404
+
+        if str(row.get("status_name") or "").strip().upper() != "REJECTED":
+            return jsonify({"error": "Request is not in rejected state"}), 400
+
+        # ensure requester is owner
+        cur.execute("SELECT user_id FROM requests WHERE request_id=%s LIMIT 1", (request_id,))
+        rrow = cur.fetchone() or {}
+        if int(rrow.get("user_id") or 0) != int(user_id):
+            return jsonify({"error": "Forbidden"}), 403
+
+        # get DRAFT status id
+        cur.execute("SELECT status_id FROM request_status WHERE UPPER(status_name)='DRAFT' LIMIT 1")
+        srow = cur.fetchone() or {}
+        draft_status_id = srow.get("status_id")
+        if draft_status_id is None:
+            return jsonify({"error": "Draft status not configured"}), 500
+
+        # convert to draft: clear rejection_message, set status_id to draft, clear stage
+        cur.execute(
+            "UPDATE requests SET status_id=%s, rejection_message=NULL, stage_position_id=NULL WHERE request_id=%s",
+            (draft_status_id, request_id),
+        )
+
+        # log action
+        cur.execute(
+            "INSERT INTO request_actions (request_id, actor_user_id, actor_email, action, message) VALUES (%s, %s, %s, 'RESUBMIT_TO_DRAFT', %s)",
+            (
+                request_id,
+                int(user_id),
+                (session.get("email") or "").strip().lower(),
+                "Resubmitted by requester (converted to draft)",
+            ),
+        )
+
+        conn.commit()
+        return jsonify({"success": True, "message": "Request converted to draft."}), 200
+    except Exception:
+        conn.rollback()
+        logger.exception("resubmit_rejected_request failed")
+        return jsonify({"error": "Failed to convert request to draft."}), 500
     finally:
         cur.close()
         conn.close()
@@ -11955,6 +12750,12 @@ def get_my_saved_signature():
     if "email" not in session:
         return jsonify({"error": "Unauthorized"}), 401
 
+    # Allow admins, approvers, and reviewers to view saved signatures
+    role = (session.get("role") or "").strip()
+    allowed_roles = {"admin", "assistantadmin", "superadmin", "dean", "head", "approver", "reviewer", "coo", "sbo"}
+    if role.lower() not in allowed_roles:
+        return jsonify({"error": "Forbidden - signature feature not available for your role"}), 403
+
     actor_user_id = session.get("user_id")
     actor_company_id = session.get("company_id")
 
@@ -11998,6 +12799,82 @@ def get_my_saved_signature():
                 "signature_png_base64": f"data:image/png;base64,{encoded}",
             }
         )
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.post("/api/annotations/my-signature")
+@login_required
+def save_my_saved_signature():
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # Allow admins, approvers, and reviewers to save signatures
+    role = (session.get("role") or "").strip()
+    allowed_roles = {"admin", "assistantadmin", "superadmin", "dean", "head", "approver", "reviewer", "coo", "sbo"}
+    if role.lower() not in allowed_roles:
+        return jsonify({"success": False, "error": "Forbidden - signature feature not available for your role"}), 403
+
+    actor_user_id = session.get("user_id")
+    actor_company_id = session.get("company_id")
+
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    try:
+        actor_company_id = int(actor_company_id) if actor_company_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_company_id = None
+
+    if actor_user_id is None:
+        return jsonify({"success": False, "error": "Invalid user."}), 400
+
+    # Accept multipart file upload 'signature' or JSON base64 in 'signature_png_base64'
+    signature_bytes = None
+    if "signature" in request.files:
+        f = request.files.get("signature")
+        try:
+            signature_bytes = f.read()
+        except Exception:
+            signature_bytes = None
+    else:
+        data = request.get_json(silent=True) or {}
+        b64 = data.get("signature_png_base64") or data.get("signature_base64")
+        if b64 and isinstance(b64, str):
+            # allow data url prefix
+            if b64.startswith("data:"):
+                try:
+                    b64 = b64.split(",", 1)[1]
+                except Exception:
+                    pass
+            try:
+                signature_bytes = base64.b64decode(b64)
+            except Exception:
+                signature_bytes = None
+
+    if not signature_bytes:
+        return jsonify({"success": False, "error": "No signature provided."}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        ensure_user_saved_signature_schema(cursor, conn)
+        cursor.execute(
+            """
+            INSERT INTO user_saved_signatures (user_id, company_id, signature_png)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE signature_png = VALUES(signature_png), company_id = VALUES(company_id)
+            """,
+            (int(actor_user_id), actor_company_id, signature_bytes),
+        )
+        conn.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
     finally:
         cursor.close()
         conn.close()
@@ -12493,6 +13370,38 @@ def it_dashboard():
                 )
         finance_amount_editor_candidates = cursor.fetchall() or []
 
+        # IT Approval Team positions
+        try:
+            ensure_it_approval_team_schema(cursor, conn)
+        except Exception:
+            pass
+
+        cursor.execute(
+            """
+            SELECT
+                p.position_id,
+                COALESCE(p.position_name, '') AS position_name
+            FROM it_approval_positions ap
+            JOIN positions p ON p.position_id = ap.position_id
+            WHERE ap.company_id = %s
+            ORDER BY p.position_name ASC
+            """,
+            (company_id,),
+        )
+        approval_team_positions = cursor.fetchall() or []
+
+        cursor.execute(
+            """
+            SELECT position_id, position_name
+            FROM positions
+            WHERE company_id = %s
+              AND position_id NOT IN (SELECT position_id FROM it_approval_positions WHERE company_id = %s)
+            ORDER BY position_name ASC
+            """,
+            (company_id, company_id),
+        )
+        approval_team_candidates = cursor.fetchall() or []
+
         default_dev_email = (DEFAULT_DEV_EMAIL or "").strip().lower()
         company_user_emails = {
             str((row.get("email") or "")).strip().lower()
@@ -12798,6 +13707,8 @@ def it_dashboard():
             role_permission_map=role_permission_map,
             finance_amount_editor_members=finance_amount_editor_members,
             finance_amount_editor_candidates=finance_amount_editor_candidates,
+            approval_team_positions=approval_team_positions,
+            approval_team_candidates=approval_team_candidates,
         )
     finally:
         cursor.close()
@@ -13207,6 +14118,11 @@ def update_request_status(request_id):
             except Exception as _log_err:
                 print("request_actions log error:", _log_err)
 
+            try:
+                render_mapped_signature_blocks_for_request(cursor, conn, request_id)
+            except Exception:
+                logger.exception("Failed to render mapped signatures for rejected request")
+
             conn.commit()
             return jsonify({"message": "Request marked as IN PROGRESS"})
         # If REJECTED mark rejected immediately
@@ -13251,6 +14167,11 @@ def update_request_status(request_id):
                 )
             except Exception as _log_err:
                 print("request_actions log error:", _log_err)
+
+            try:
+                render_mapped_signature_blocks_for_request(cursor, conn, request_id)
+            except Exception:
+                logger.exception("Failed to render mapped signatures for approved request")
 
             # Notify everyone who already approved this request.
             try:
@@ -14580,6 +15501,112 @@ def it_remove_finance_amount_editor_member():
     return redirect(url_for("it_dashboard"))
 
 
+
+@app.route("/it/approval-team/position/add", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
+def it_add_approval_team_position():
+    pos_id_raw = str(request.form.get("position_id") or "").strip()
+    try:
+        pos_id = int(pos_id_raw)
+    except (TypeError, ValueError):
+        flash("Invalid position selection.", "danger")
+        return redirect(url_for("it_dashboard"))
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_user_account_control_schema(cursor, conn)
+        ensure_it_approval_team_schema(cursor, conn)
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "SELECT position_id FROM positions WHERE position_id = %s AND company_id = %s LIMIT 1",
+            (pos_id, company_id),
+        )
+        if not cursor.fetchone():
+            flash("Position not found.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "INSERT INTO it_approval_positions (company_id, position_id, added_by_email) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE added_by_email = VALUES(added_by_email)",
+            (company_id, pos_id, (session.get("email") or "").strip().lower() or None),
+        )
+        cursor.execute(
+            "INSERT INTO activity_logs (title, description, company_id, actor_email) VALUES (%s, %s, %s, %s)",
+            (
+                "IT Approval Team Position Added",
+                f"{session.get('email')} added position id {pos_id} to IT approval recipient list.",
+                company_id,
+                (session.get("email") or "").strip().lower() or None,
+            ),
+        )
+        conn.commit()
+        flash("Position added to approval recipient list.", "success")
+    except Exception:
+        conn.rollback()
+        logger.exception("it_add_approval_team_position failed")
+        flash("Failed to add position.", "danger")
+    finally:
+        cursor.close()
+        conn.close()
+
+    return redirect(url_for("it_dashboard"))
+
+
+@app.route("/it/approval-team/position/remove", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
+def it_remove_approval_team_position():
+    pos_id_raw = str(request.form.get("position_id") or "").strip()
+    try:
+        pos_id = int(pos_id_raw)
+    except (TypeError, ValueError):
+        flash("Invalid position selection.", "danger")
+        return redirect(url_for("it_dashboard"))
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_it_approval_team_schema(cursor, conn)
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "DELETE FROM it_approval_positions WHERE company_id = %s AND position_id = %s",
+            (company_id, pos_id),
+        )
+        cursor.execute(
+            "INSERT INTO activity_logs (title, description, company_id, actor_email) VALUES (%s, %s, %s, %s)",
+            (
+                "IT Approval Team Position Removed",
+                f"{session.get('email')} removed position id {pos_id} from IT approval recipient list.",
+                company_id,
+                (session.get("email") or "").strip().lower() or None,
+            ),
+        )
+        conn.commit()
+        flash("Position removed from approval recipient list.", "success")
+    except Exception:
+        conn.rollback()
+        logger.exception("it_remove_approval_team_position failed")
+        flash("Failed to remove position.", "danger")
+    finally:
+        cursor.close()
+        conn.close()
+
+    return redirect(url_for("it_dashboard"))
+
+
 @app.route("/it/department/<int:dept_id>/delete", methods=["POST"])
 @login_required
 @role_required("IT", "SuperAdmin")
@@ -14928,6 +15955,11 @@ def api_request_type_form_schema(request_type_id):
                 template_page_count = max(1, len(_PdfReader(BytesIO(template_blob)).pages))
             except Exception:
                 template_page_count = 1
+        # Fetch company positions for mapper UI
+        cursor.execute("SELECT position_id, position_name FROM positions WHERE company_id = %s ORDER BY position_name ASC", (company_id,))
+        pos_rows = cursor.fetchall() or []
+        positions = [{"position_id": r.get("position_id"), "position_name": r.get("position_name")} for r in pos_rows]
+
         return jsonify(
             {
                 "success": True,
@@ -14937,6 +15969,7 @@ def api_request_type_form_schema(request_type_id):
                 "schema": schema,
                 "template_fields": template_fields,
                 "template_page_count": template_page_count,
+                "positions": positions,
             }
         )
     except Exception:
@@ -16664,7 +17697,7 @@ def company_register():
 @app.route("/login", methods=["GET", "POST"])
 @limiter.limit("20 per minute", methods=["POST"])
 def login():
-    template_ctx = {"dev_exception_email": DEV_EXCEPTION_EMAIL}
+    template_ctx = {"dev_exception_email": DEV_EXCEPTION_EMAIL, "saas_exception_email": DEFAULT_SAAS_EMAIL}
     if request.method == "POST":
         e = request.form["email"].strip().lower()
         password = request.form["pass"]
@@ -16738,6 +17771,23 @@ def login():
                 return redirect("/")
             
             else:
+                # Allow SAAS owner login via env credential when no DB user is present
+                # If SAAS_PASSWORD is not set, allow the SAAS_EMAIL to sign in as SaaSOwner
+                saas_password_set = bool(str(DEFAULT_SAAS_PASSWORD or "").strip())
+                if DEFAULT_SAAS_EMAIL and e == DEFAULT_SAAS_EMAIL and (not saas_password_set or password == DEFAULT_SAAS_PASSWORD):
+                    session["email"] = e
+                    session["user_id"] = 0
+                    session["role"] = "SaaSOwner"
+                    session["role_id"] = None
+                    session["position"] = ""
+                    session["position_id"] = None
+                    session["dept"] = ""
+                    session["company_id"] = 0
+                    session["company_name"] = ""
+                    log_auth_activity("Login", e)
+                    flash("Login Successful", "success")
+                    return redirect("/saas-admin")
+
                 jsonify({"message": "Login attempt failed"})
                 return render_template("login.html", message="Invalid credentials", **template_ctx)
                 

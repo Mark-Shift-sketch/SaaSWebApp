@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SaaS Owner Dashboard</title>
+    <script src="{{ url_for('static', filename='alltoast/logout-confirm.js') }}"></script>
     <style>
         :root {
             --bg: #f4f7fb;
@@ -182,9 +183,12 @@
                 <p class="subtitle">Signed in as {{ email or "N/A" }}. Manage tenants, plans, and system analytics.</p>
             </div>
             <div class="toolbar">
-                <a class="btn btn-soft" href="{{ url_for('dev_dashboard') }}">Developer Home</a>
                 <a class="btn btn-soft" href="{{ url_for('bug_reports_dashboard') }}">Bug Reports</a>
                 <button class="btn btn-primary" id="refreshAll">Refresh</button>
+                <a class="btn btn-soft" href="/logout">Logout</a>
+                {% if (role or '').strip().lower() == 'dev' %}
+                    <a class="btn btn-secondary" href="{{ url_for('dev_dashboard') }}">Back to Dev dashboard</a>
+                {% endif %}
             </div>
         </div>
 
@@ -215,11 +219,54 @@
             </div>
             <p id="errorText" class="error" style="display:none;"></p>
         </section>
+
+        <section class="card" style="margin-top: 14px;">
+            <h2 class="section-title">Contact Messages from Landing Page</h2>
+            <div class="muted" style="margin-bottom: 8px;">Inquiries from organizations and businesses interested in the system.</div>
+            <div style="margin-bottom: 12px;">
+                <button class="btn btn-soft" id="filterNewBtn" style="margin-right: 6px;">New Only</button>
+                <button class="btn btn-soft" id="filterAllBtn">All Messages</button>
+            </div>
+            <div style="overflow:auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Organization</th>
+                            <th>Email</th>
+                            <th>Phone</th>
+                            <th>Type</th>
+                            <th>Status</th>
+                            <th>Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="contactRows"></tbody>
+                </table>
+            </div>
+            <p id="contactErrorText" class="error" style="display:none;"></p>
+            <div id="messageDetail" style="display:none; margin-top: 16px; padding: 16px; background: #f0f4f8; border-radius: 10px;">
+                <button class="btn btn-soft" id="closeDetailBtn" style="float: right;">Close</button>
+                <h3 id="detailOrg"></h3>
+                <p><strong>Email:</strong> <span id="detailEmail"></span></p>
+                <p><strong>Phone:</strong> <span id="detailPhone"></span></p>
+                <p><strong>Inquiry Type:</strong> <span id="detailType"></span></p>
+                <p><strong>Date:</strong> <span id="detailDate"></span></p>
+                <hr style="border: none; border-top: 1px solid #cbd5e1; margin: 12px 0;">
+                <p><strong>Message:</strong></p>
+                <p id="detailMessage" style="white-space: pre-wrap; line-height: 1.5;"></p>
+                <div style="margin-top: 12px;">
+                    <button class="btn btn-soft" id="markReadBtn" style="margin-right: 6px;">Mark as Read</button>
+                    <button class="btn btn-primary" id="markRepliedBtn">Mark as Replied</button>
+                </div>
+            </div>
+        </section>
     </div>
 
     <script>
         const plans = ["FREE", "PRO", "ENTERPRISE"];
         const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
+        let currentContactId = null;
+        let filterStatus = "new";
 
         async function fetchJson(url, options) {
             const requestOptions = options ? {...options} : {};
@@ -302,6 +349,102 @@
             }).join("");
         }
 
+        function formatDate(dateStr) {
+            const date = new Date(dateStr);
+            return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" });
+        }
+
+        function getStatusBadge(status) {
+            if (status === "new") return `<span style="background: #fef08a; color: #854d0e; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem;">NEW</span>`;
+            if (status === "read") return `<span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem;">READ</span>`;
+            if (status === "replied") return `<span style="background: #dcfce7; color: #166534; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem;">REPLIED</span>`;
+            return status;
+        }
+
+        function renderContacts(rows) {
+            const tbody = document.getElementById("contactRows");
+            if (!rows.length) {
+                tbody.innerHTML = `<tr><td colspan="7" class="muted">No messages found.</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = rows.map((row) => {
+                return `
+                    <tr data-contact-id="${row.contact_id}" style="cursor: pointer;" onclick="viewContactDetail(${row.contact_id})">
+                        <td><strong>${row.organization_name || "-"}</strong></td>
+                        <td>${row.email || "-"}</td>
+                        <td>${row.phone || "-"}</td>
+                        <td>${row.inquiry_type || "-"}</td>
+                        <td>${getStatusBadge(row.status)}</td>
+                        <td>${formatDate(row.created_at)}</td>
+                        <td>
+                            <button class="btn btn-soft" style="font-size: 0.8rem;">View</button>
+                        </td>
+                    </tr>
+                `;
+            }).join("");
+        }
+
+        async function loadContacts() {
+            try {
+                const endpoint = filterStatus === "new" 
+                    ? "/api/saas/contact-messages?status=new" 
+                    : "/api/saas/contact-messages";
+                const data = await fetchJson(endpoint);
+                renderContacts(data.messages || []);
+                document.getElementById("contactErrorText").style.display = "none";
+            } catch (error) {
+                document.getElementById("contactErrorText").style.display = "block";
+                document.getElementById("contactErrorText").textContent = error.message || "Failed to load messages";
+            }
+        }
+
+        function viewContactDetail(contactId) {
+            currentContactId = contactId;
+            const tbody = document.getElementById("contactRows");
+            const row = tbody.querySelector(`tr[data-contact-id="${contactId}"]`);
+            
+            if (!row) return;
+
+            const cells = row.querySelectorAll("td");
+            const org = cells[0].textContent;
+            const email = cells[1].textContent;
+            const phone = cells[2].textContent;
+            const type = cells[3].textContent;
+            const date = cells[5].textContent;
+
+            document.getElementById("detailOrg").textContent = org;
+            document.getElementById("detailEmail").textContent = email;
+            document.getElementById("detailPhone").textContent = phone;
+            document.getElementById("detailType").textContent = type;
+            document.getElementById("detailDate").textContent = date;
+            
+            // Get the message from the API
+            fetchJson(`/api/saas/contact-messages/${contactId}`)
+                .then(data => {
+                    document.getElementById("detailMessage").textContent = data.message.message || "";
+                    document.getElementById("messageDetail").style.display = "block";
+                })
+                .catch(error => {
+                    alert("Failed to load message details: " + error.message);
+                });
+        }
+
+        async function updateContactStatus(contactId, newStatus) {
+            try {
+                await fetchJson(`/api/saas/contact-messages/${contactId}/status`, {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({status: newStatus}),
+                });
+                document.getElementById("messageDetail").style.display = "none";
+                currentContactId = null;
+                await loadContacts();
+            } catch (error) {
+                alert("Failed to update status: " + error.message);
+            }
+        }
+
         async function loadDashboard() {
             document.getElementById("errorText").style.display = "none";
             const [analytics, plansData, companies] = await Promise.all([
@@ -312,6 +455,7 @@
             renderMetrics(analytics.summary || {});
             renderPlans(plansData.plans || []);
             renderCompanies(companies.companies || []);
+            await loadContacts();
         }
 
         document.getElementById("companyRows").addEventListener("click", async (event) => {
@@ -350,6 +494,41 @@
         });
 
         document.getElementById("refreshAll").addEventListener("click", loadDashboard);
+
+        document.getElementById("filterNewBtn").addEventListener("click", () => {
+            filterStatus = "new";
+            document.getElementById("filterNewBtn").style.background = "#0b63f3";
+            document.getElementById("filterNewBtn").style.color = "white";
+            document.getElementById("filterAllBtn").style.background = "#e9f0ff";
+            document.getElementById("filterAllBtn").style.color = "#1e3a8a";
+            loadContacts();
+        });
+
+        document.getElementById("filterAllBtn").addEventListener("click", () => {
+            filterStatus = "all";
+            document.getElementById("filterAllBtn").style.background = "#0b63f3";
+            document.getElementById("filterAllBtn").style.color = "white";
+            document.getElementById("filterNewBtn").style.background = "#e9f0ff";
+            document.getElementById("filterNewBtn").style.color = "#1e3a8a";
+            loadContacts();
+        });
+
+        document.getElementById("closeDetailBtn").addEventListener("click", () => {
+            document.getElementById("messageDetail").style.display = "none";
+            currentContactId = null;
+        });
+
+        document.getElementById("markReadBtn").addEventListener("click", () => {
+            if (currentContactId) {
+                updateContactStatus(currentContactId, "read");
+            }
+        });
+
+        document.getElementById("markRepliedBtn").addEventListener("click", () => {
+            if (currentContactId) {
+                updateContactStatus(currentContactId, "replied");
+            }
+        });
 
         loadDashboard().catch((error) => {
             const errorText = document.getElementById("errorText");

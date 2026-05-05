@@ -924,8 +924,33 @@ async function sendCC() {
 
 // CC Modal Controls
 
-function openCCModal(requestId) {
+async function openCCModal(requestId) {
   document.getElementById("cc_request_id").value = requestId;
+  
+  // Load CC recipients for this specific request
+  try {
+    const res = await fetch(`/api/request/${requestId}/cc-recipients`);
+    const data = await res.json();
+    
+    if (res.ok && data.recipients && Array.isArray(data.recipients)) {
+      const selectEl = document.getElementById("cc_to_emails");
+      if (selectEl) {
+        // Clear existing options
+        selectEl.innerHTML = "";
+        
+        // Add options for each recipient
+        data.recipients.forEach((email) => {
+          const option = document.createElement("option");
+          option.value = email;
+          option.textContent = email;
+          selectEl.appendChild(option);
+        });
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load CC recipients:", e);
+  }
+  
   document.getElementById("ccModal").style.display = "flex";
 }
 
@@ -3102,10 +3127,37 @@ async function markInProgress(requestId, btnEl) {
       throw new Error(data.error || "Failed to mark as in progress");
     }
 
-    openSysPopup("Updated", data.message || "Request marked as in progress.", false, { hideButtons: true, autoCloseMs: 3000 });
+    // Show success toast notification
+    if (window.Swal && typeof window.Swal.fire === 'function') {
+      Swal.fire({
+        toast: true,
+        position: 'top-end',
+        icon: 'success',
+        title: data.message || 'Request marked as in progress',
+        showConfirmButton: false,
+        timer: 3000,
+        timerProgressBar: true
+      });
+    } else {
+      showQuickStatus(data.message || "Request marked as in progress", "success");
+    }
 
   } catch (err) {
-    openSysPopup("Error", err.message || "Error", false);
+    // Show error toast notification
+    if (window.Swal && typeof window.Swal.fire === 'function') {
+      Swal.fire({
+        toast: true,
+        position: 'top-end',
+        icon: 'error',
+        title: 'Error',
+        text: err.message || "Error",
+        showConfirmButton: false,
+        timer: 3000,
+        timerProgressBar: true
+      });
+    } else {
+      openSysPopup("Error", err.message || "Error", false);
+    }
     if (btnEl) btnEl.disabled = false;
   }
 }

@@ -3756,7 +3756,57 @@ def coo_action_attachment_by_token(token):
         if requested_to_email and requested_to_email != actor_email:
             return Response("Access denied for this COO token.", status=403, mimetype="text/plain")
 
-        file_bytes, filename = _load_template_pdf_bytes_for_request(cursor, request_id)
+        cursor.execute(
+            """
+            SELECT
+                r.request_id,
+                r.request_type_id,
+                r.filename,
+                r.attachment,
+                rt.template_filename,
+                rt.template_file,
+                rfs.form_data_json,
+                a.signed_pdf
+            FROM requests r
+            LEFT JOIN request_types rt ON rt.request_type_id = r.request_type_id
+            LEFT JOIN request_form_submissions rfs ON rfs.request_id = r.request_id
+            LEFT JOIN request_annotations a ON a.request_id = r.request_id
+            WHERE r.request_id = %s
+            LIMIT 1
+            """,
+            (request_id,),
+        )
+        row = cursor.fetchone() or {}
+        if not row:
+            return Response("No attachment found", status=404, mimetype="text/plain")
+
+        filename = (row.get("filename") or "").strip() or f"request_{request_id}_attachment.pdf"
+        if not filename.lower().endswith(".pdf"):
+            filename = f"{filename}.pdf"
+
+        file_bytes = row.get("signed_pdf") or row.get("attachment")
+
+        if not file_bytes and row.get("template_file") and str(row.get("form_data_json") or "").strip():
+            try:
+                template_blob = row.get("template_file")
+                schema = get_request_type_fillable_schema(cursor, int(row.get("request_type_id") or 0))
+                payload = json.loads(str(row.get("form_data_json") or "").strip())
+                if isinstance(payload, dict):
+                    file_bytes = build_filled_pdf_from_submission(
+                        template_blob,
+                        schema,
+                        payload,
+                        total_amount=None,
+                    )
+            except Exception:
+                logger.exception("coo_action_attachment_by_token regeneration failed")
+
+        if not file_bytes and row.get("template_file"):
+            file_bytes = row.get("template_file")
+            filename = (row.get("template_filename") or "").strip() or filename
+            if not filename.lower().endswith(".pdf"):
+                filename = f"{filename}.pdf"
+
         if not file_bytes:
             return Response("No attachment found", status=404, mimetype="text/plain")
 
@@ -8978,15 +9028,6 @@ def admin_dashboard():
         """, (company_id,))
         existing_types = cursor.fetchall()
 
-        # CC recipients dropdown (all known user emails)
-        cursor.execute("""
-            SELECT u.email
-            FROM users u
-            WHERE u.company_id = %s
-            ORDER BY u.email ASC
-        """, (company_id,))
-        cc_recipients = [row["email"] for row in cursor.fetchall()]
-
         return render_template(
             "admin.html",
             approvals_today=approvals_today,
@@ -8999,7 +9040,6 @@ def admin_dashboard():
             recent_requests=recent_requests,
             positions=positions,
             existing_types=existing_types,
-            cc_recipients=cc_recipients,
             can_manage_request_types=can_manage_request_types_access,
             can_view_reports=can_view_reports_access,
             can_manage_budget=can_manage_budget_access,
@@ -13145,6 +13185,8 @@ def it_dashboard():
         departments = cursor.fetchall()
         cursor.execute("SELECT * FROM roles WHERE company_id = %s", (company_id,))
         roles = cursor.fetchall()
+        
+        # Get all positions
         cursor.execute("SELECT * FROM positions WHERE company_id = %s", (company_id,))
         positions = cursor.fetchall()
 
@@ -13921,6 +13963,81 @@ def create_position():
         conn.rollback()
         flash(f"Database Error: {err}", "danger")
 
+    finally:
+        cursor.close()
+        conn.close()
+
+    return redirect(url_for("it_dashboard"))
+
+
+@app.route("/it/position/<int:position_id>/delete", methods=["POST"])
+@login_required
+@role_required("IT", "SuperAdmin")
+def it_delete_position(position_id):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_tenant_schema(cursor, conn)
+        ensure_it_approval_team_schema(cursor, conn)
+        ensure_finance_amount_editor_schema(cursor, conn)
+
+        company_id = ensure_session_company_context(cursor)
+        if company_id <= 0:
+            flash("Company context is missing.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "SELECT position_id, position_name FROM positions WHERE position_id = %s AND company_id = %s LIMIT 1",
+            (position_id, company_id),
+        )
+        target = cursor.fetchone() or {}
+        if not target:
+            flash("Position not found.", "danger")
+            return redirect(url_for("it_dashboard"))
+
+        reference_checks = [
+            ("users", "SELECT COUNT(*) AS count FROM users WHERE position_id = %s AND company_id = %s"),
+            ("request_stage", "SELECT COUNT(*) AS count FROM requests WHERE stage_position_id = %s AND company_id = %s"),
+            ("request_type_reviewers", "SELECT COUNT(*) AS count FROM request_type_reviewers rtr JOIN request_types rt ON rt.request_type_id = rtr.request_type_id WHERE rtr.position_id = %s AND rt.company_id = %s"),
+            ("request_type_approvers", "SELECT COUNT(*) AS count FROM request_type_approvers rta JOIN request_types rt ON rt.request_type_id = rta.request_type_id WHERE rta.position_id = %s AND rt.company_id = %s"),
+            ("it_approval_positions", "SELECT COUNT(*) AS count FROM it_approval_positions WHERE position_id = %s AND company_id = %s"),
+            ("finance_amount_editors", "SELECT COUNT(*) AS count FROM finance_amount_editors WHERE user_id IN (SELECT user_id FROM users WHERE position_id = %s AND company_id = %s) AND company_id = %s"),
+        ]
+
+        used_by = []
+        for label, query in reference_checks:
+            if label == "finance_amount_editors":
+                cursor.execute(query, (position_id, company_id, company_id))
+            else:
+                cursor.execute(query, (position_id, company_id))
+            count_row = cursor.fetchone() or {}
+            if int(count_row.get("count") or 0) > 0:
+                used_by.append(label)
+
+        if used_by:
+            flash(
+                "Cannot delete this position because it is still used by users, workflows, or teams.",
+                "danger",
+            )
+            return redirect(url_for("it_dashboard"))
+
+        cursor.execute(
+            "DELETE FROM positions WHERE position_id = %s AND company_id = %s",
+            (position_id, company_id),
+        )
+        cursor.execute(
+            "INSERT INTO activity_logs (title, description) VALUES (%s, %s)",
+            (
+                "Position Deleted",
+                f"{session.get('email')} deleted position {target.get('position_name')} (position_id={position_id}).",
+            ),
+        )
+        conn.commit()
+        flash("Position deleted successfully.", "success")
+    except Exception:
+        conn.rollback()
+        logger.exception("it_delete_position failed")
+        flash("Failed to delete position.", "danger")
     finally:
         cursor.close()
         conn.close()
@@ -15696,6 +15813,21 @@ def create_user():
             flash("Invalid position for your organization.", "danger")
             return redirect(url_for("it_dashboard"))
 
+        # Check if position is already assigned to an active user
+        cursor.execute(
+            """
+            SELECT user_id FROM users
+            WHERE position_id=%s AND company_id=%s
+              AND COALESCE(is_deleted, 0) = 0
+              AND COALESCE(is_banned, 0) = 0
+            LIMIT 1
+            """,
+            (position_id, company_id)
+        )
+        if cursor.fetchone():
+            flash("This position is already assigned to another user. One position can only be held by one user.", "danger")
+            return redirect(url_for("it_dashboard"))
+
         #  Insert the New User
         query_user = """
             INSERT INTO users (email, password, dept_id, role_id, position_id, company_id)
@@ -17085,6 +17217,91 @@ def get_draft_request_data(request_id):
         return jsonify({"error": "Failed to load draft request details."}), 500
     finally:
         cur.close()
+        conn.close()
+
+@app.route("/api/request/<int:request_id>/cc-recipients", methods=["GET"])
+@login_required
+def get_cc_recipients(request_id):
+    """Fetch approvers and reviewers for a specific request, excluding deleted users."""
+    role = session.get("role")
+    company_id = session.get("company_id")
+    
+    if role not in ["Admin", "AssistantAdmin", "SuperAdmin"]:
+        return jsonify({"error": "Forbidden"}), 403
+    
+    if not company_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # First, get the request and its request_type
+        cursor.execute(
+            """
+            SELECT r.request_id, r.request_type_id
+            FROM requests r
+            WHERE r.request_id = %s AND r.user_id IN (
+                SELECT user_id FROM users WHERE company_id = %s
+            )
+            LIMIT 1
+            """,
+            (request_id, company_id),
+        )
+        req = cursor.fetchone()
+        if not req:
+            return jsonify({"error": "Request not found"}), 404
+
+        request_type_id = req.get("request_type_id")
+        if not request_type_id:
+            return jsonify({"recipients": []}), 200
+
+        # Get all unique approvers for this request type
+        cursor.execute(
+            """
+            SELECT DISTINCT u.email, u.user_id
+            FROM request_type_approvers rta
+            JOIN positions p ON rta.position_id = p.position_id
+            JOIN users u ON p.position_id = u.position_id
+            WHERE rta.request_type_id = %s
+              AND p.company_id = %s
+              AND u.company_id = %s
+              AND COALESCE(u.is_deleted, 0) = 0
+              AND COALESCE(u.is_banned, 0) = 0
+            ORDER BY u.email ASC
+            """,
+            (request_type_id, company_id, company_id),
+        )
+        approver_emails = [row["email"] for row in cursor.fetchall()]
+
+        # Get all unique reviewers for this request type
+        cursor.execute(
+            """
+            SELECT DISTINCT u.email, u.user_id
+            FROM request_type_reviewers rtr
+            JOIN positions p ON rtr.position_id = p.position_id
+            JOIN users u ON p.position_id = u.position_id
+            WHERE rtr.request_type_id = %s
+              AND p.company_id = %s
+              AND u.company_id = %s
+              AND COALESCE(u.is_deleted, 0) = 0
+              AND COALESCE(u.is_banned, 0) = 0
+            ORDER BY u.email ASC
+            """,
+            (request_type_id, company_id, company_id),
+        )
+        reviewer_emails = [row["email"] for row in cursor.fetchall()]
+
+        # Merge and deduplicate
+        all_emails = list(set(approver_emails + reviewer_emails))
+        all_emails.sort()
+
+        return jsonify({"recipients": all_emails}), 200
+
+    except Exception as e:
+        logger.exception("get_cc_recipients failed")
+        return jsonify({"error": "Failed to fetch recipients"}), 500
+    finally:
+        cursor.close()
         conn.close()
 
 @app.route("/api/request/<int:request_id>/cc", methods=["POST"])

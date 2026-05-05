@@ -6,7 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>IT Administration Dashboard</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='IT.css') }}" />
+    <script src="{{ url_for('static', filename='user/sweetalert.js') }}"></script>
     <script src="{{ url_for('static', filename='alltoast/logout-confirm.js') }}"></script>
+    <script src="{{ url_for('static', filename='alltoast/toast.js') }}"></script>
   </head>
   <body>
     <nav class="sidebar">
@@ -71,25 +73,23 @@
     </nav>
 
     <main class="main-content">
-      {% with messages = get_flashed_messages(with_categories=true) %} {% if
-      messages %}
-      <div class="flash-messages">
+      <!-- Flash messages converted to toast notifications -->
+      <div id="flash-messages" style="display:none;">
+        {% with messages = get_flashed_messages(with_categories=true) %}
         {% for category, message in messages %}
-        <div
-          class="alert alert-{{ category }}"
-          style="
-            padding: 10px;
-            margin-bottom: 15px;
-            border-radius: 4px;
-            background-color: #f0f0f0;
-            border-left: 5px solid #333;
-          "
-        >
-          {{ message }}
-        </div>
+        <div data-message="{{ message }}" data-category="{{ category }}"></div>
         {% endfor %}
+        {% endwith %}
       </div>
-      {% endif %} {% endwith %}
+
+      <!-- Toast notification container -->
+      <div id="toast" class="toast">
+        <div id="toast-icon"></div>
+        <div>
+          <p id="toast-title" class="toast-title"></p>
+          <p id="toast-message" class="toast-message"></p>
+        </div>
+      </div>
 
       <div id="dashboard" class="tab-content active-content">
         <header>
@@ -453,6 +453,41 @@
                     {% else %}
                     <tr>
                       <td colspan="2" style="text-align:center;">No positions assigned yet.</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="form-card" style="grid-column: 1 / -1; margin-top:12px;">
+              <h3>Existing Positions</h3>
+              <p class="subtitle" style="margin-top:4px;">Remove positions that are no longer needed. The system blocks deletion when a position is still in use.</p>
+
+              <div class="table-container" style="margin-top:14px; padding:0; box-shadow:none;">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Position</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for pos in positions %}
+                    <tr>
+                      <td>{{ pos.position_name }}</td>
+                      <td>
+                        <form action="{{ url_for('it_delete_position', position_id=pos.position_id) }}" method="POST" class="inline-action-form" onsubmit="return confirm('Delete position {{ pos.position_name }}? This cannot be undone.')">
+                          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                          <button type="submit" class="icon-action-btn btn-delete" title="Delete position" aria-label="Delete position">
+                            Delete
+                          </button>
+                        </form>
+                      </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                      <td colspan="2" style="text-align:center;">No positions available.</td>
                     </tr>
                     {% endfor %}
                   </tbody>
@@ -841,6 +876,7 @@
 
     <script>
       function showTab(tabId) {
+        const normalizedTabId = String(tabId || 'dashboard').trim() || 'dashboard';
         const contents = document.querySelectorAll(".tab-content");
         contents.forEach((content) => {
           content.classList.remove("active-content");
@@ -849,21 +885,26 @@
         links.forEach((link) => {
           link.classList.remove("active");
         });
-        document.getElementById(tabId).classList.add("active-content");
-        document.getElementById("link-" + tabId).classList.add("active");
+        const target = document.getElementById(normalizedTabId);
+        const targetLink = document.getElementById("link-" + normalizedTabId);
+        if (target) target.classList.add("active-content");
+        if (targetLink) targetLink.classList.add("active");
         try {
-          // Persist the active tab in the URL hash so page reloads keep the same tab
+          // Persist the active tab for the current browser session so POST redirects keep the same tab.
+          window.sessionStorage.setItem('it_active_tab', normalizedTabId);
+
+          // Keep the hash too so copied links/opened reloads preserve the tab.
           if (window.history && window.history.replaceState) {
-            window.history.replaceState(null, '', '#' + tabId);
+            window.history.replaceState(null, '', '#' + normalizedTabId);
           } else {
-            window.location.hash = tabId;
+            window.location.hash = normalizedTabId;
           }
         } catch (e) {
           // ignore
         }
       }
 
-      // On initial load, read hash to restore selected tab (helps after form POST redirects)
+      // On initial load, restore from hash first, then session state, then default to dashboard.
       (function restoreTabFromHash() {
         try {
           const h = (window.location.hash || '').replace('#', '').trim();
@@ -871,6 +912,14 @@
             const el = document.getElementById(h);
             if (el && el.classList.contains('tab-content')) {
               showTab(h);
+              return;
+            }
+          }
+          const storedTab = (window.sessionStorage.getItem('it_active_tab') || '').trim();
+          if (storedTab) {
+            const storedEl = document.getElementById(storedTab);
+            if (storedEl && storedEl.classList.contains('tab-content')) {
+              showTab(storedTab);
               return;
             }
           }
@@ -943,6 +992,25 @@
         if (noMatchRow) {
           noMatchRow.style.display = visibleCount === 0 && requestCells.length > 0 ? "" : "none";
         }
+      }
+
+      // Toast notification helpers for IT dashboard
+      function showToast(title, message, type) {
+        const toast = document.getElementById('toast');
+        if (!toast) return;
+        document.getElementById('toast-title').textContent = title;
+        document.getElementById('toast-message').textContent = message;
+        toast.className = `toast toast-${type} show`;
+        setTimeout(() => toast.classList.remove('show'), 3000);
+      }
+
+      function showSystemStatus(message) {
+        const toast = document.getElementById('toast');
+        if (!toast) return;
+        document.getElementById('toast-title').textContent = 'System Status';
+        document.getElementById('toast-message').textContent = message;
+        toast.className = 'toast show';
+        setTimeout(() => { toast.classList.remove('show'); }, 3000);
       }
     </script>
   </body>

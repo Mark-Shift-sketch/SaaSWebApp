@@ -86,6 +86,12 @@
 
         <script>
             document.addEventListener("DOMContentLoaded", () => {
+                    try {
+                        window.sessionStorage.removeItem('it_active_tab');
+                    } catch (e) {
+                        // ignore
+                    }
+
                 const REQUIRED_EMAIL_DOMAIN = "@phinmaed.com";
                 const DOMAIN_HELPER_MESSAGE = "Please use youre phinmaed email";
                 const DEV_EXCEPTION_EMAIL = "{{ (dev_exception_email or '')|lower|e }}";

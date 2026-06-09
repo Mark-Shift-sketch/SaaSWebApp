@@ -309,18 +309,26 @@
 						<label for="authMethod">Authentication</label>
 						<select id="authMethod">
 							<option value="pin" selected>PIN</option>
-							<option value="fingerprint">Fingerprint</option>
+							<option value="fingerprint" id="fingerprintOption">Fingerprint</option>
 						</select>
 					</div>
+					<div id="deviceSupportStatus" class="notice" style="margin: 8px 0 0;"></div>
 					<div class="approve-row" id="pinRow">
 						<label for="cooPin">COO PIN</label>
 						<input type="password" id="cooPin" maxlength="4" inputmode="numeric" placeholder="Enter 4-digit PIN" />
+					</div>
+					<div class="approve-row" id="fingerprintRow" style="display:none; flex-direction: column;">
+						<label>Fingerprint Authentication</label>
+						<div style="margin-top: 8px;">
+							<button type="button" id="captureFingerprint" class="btn btn-primary" style="width: 100%; margin-bottom: 8px;">Capture Fingerprint</button>
+							<div id="fingerprintStatus" class="muted"></div>
+						</div>
 					</div>
 					<div class="approve-row">
 						<label for="cooRejectReason">Reject Reason</label>
 						<input type="text" id="cooRejectReason" placeholder="Optional reason for rejection" />
 					</div>
-					<p id="authHint" class="muted" style="display:none; margin: 8px 0 0;">Fingerprint approval is not configured yet. Please use PIN.</p>
+					<p id="authHint" class="muted" style="display:none; margin: 8px 0 0;"></p>
 					<div class="actions">
 						<button class="btn btn-primary" id="approveBtn" type="button">Approve Request</button>
 						<button class="btn btn-danger" id="rejectBtn" type="button">Reject Request</button>
@@ -340,12 +348,20 @@
 				const requestId = {{ (summary.request_id if summary else 0)|tojson }};
 				const authMethodEl = document.getElementById("authMethod");
 				const pinRowEl = document.getElementById("pinRow");
+				const fingerprintRowEl = document.getElementById("fingerprintRow");
 				const pinEl = document.getElementById("cooPin");
 				const hintEl = document.getElementById("authHint");
 				const btnEl = document.getElementById("approveBtn");
 				const rejectBtnEl = document.getElementById("rejectBtn");
 				const rejectReasonEl = document.getElementById("cooRejectReason");
 				const noticeEl = document.getElementById("actionNotice");
+				const captureFingerprintBtn = document.getElementById("captureFingerprint");
+				const fingerprintStatusEl = document.getElementById("fingerprintStatus");
+				const fingerprintOptionEl = document.getElementById("fingerprintOption");
+				const deviceSupportEl = document.getElementById("deviceSupportStatus");
+				
+				let capturedFingerprint = null;
+				let fingerprintSupported = false;
 
 				function setNotice(text, ok) {
 					noticeEl.style.display = "block";
@@ -353,19 +369,151 @@
 					noticeEl.textContent = text;
 				}
 
+				function checkFingerprintSupport() {
+					console.log('[COO-Fingerprint] Starting device check...');
+					
+					// Check for WebAuthn support
+					if (window.PublicKeyCredential === undefined || typeof window.PublicKeyCredential === 'undefined') {
+						console.log('[COO-Fingerprint] WebAuthn not available');
+						fingerprintSupported = false;
+						fingerprintOptionEl.disabled = true;
+						deviceSupportEl.style.display = "block";
+						deviceSupportEl.className = "notice err";
+						deviceSupportEl.textContent = "✗ Device did not support fingerprint. Please use a device that supports fingerprint.";
+						return false;
+					}
+
+					// Check if platform authenticator is available
+					if (typeof window.PublicKeyCredential?.isUserVerifyingPlatformAuthenticatorAvailable !== 'function') {
+						console.log('[COO-Fingerprint] isUserVerifyingPlatformAuthenticatorAvailable not available');
+						fingerprintSupported = false;
+						fingerprintOptionEl.disabled = true;
+						deviceSupportEl.style.display = "block";
+						deviceSupportEl.className = "notice err";
+						deviceSupportEl.textContent = "✗ Device did not support fingerprint. Please use a device that supports fingerprint.";
+						return false;
+					}
+
+					// Show checking state
+					deviceSupportEl.style.display = "block";
+					deviceSupportEl.className = "notice";
+					deviceSupportEl.textContent = "Checking fingerprint support...";
+
+					window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+						.then(function(available) {
+							console.log('[COO-Fingerprint] Device support check result:', available);
+							if (available) {
+								fingerprintSupported = true;
+								fingerprintOptionEl.disabled = false;
+								deviceSupportEl.style.display = "block";
+								deviceSupportEl.className = "notice ok";
+								deviceSupportEl.textContent = "✓ This device supports fingerprint authentication";
+							} else {
+								fingerprintSupported = false;
+								fingerprintOptionEl.disabled = true;
+								deviceSupportEl.style.display = "block";
+								deviceSupportEl.className = "notice err";
+								deviceSupportEl.textContent = "✗ Device does not support fingerprint. Please use a device that supports fingerprint.";
+							}
+						})
+						.catch(function(err) {
+							console.error('[COO-Fingerprint] Device check error:', err);
+							fingerprintSupported = false;
+							fingerprintOptionEl.disabled = true;
+							deviceSupportEl.style.display = "block";
+							deviceSupportEl.className = "notice err";
+							deviceSupportEl.textContent = "✗ Device does not support fingerprint. Please use a device that supports fingerprint.";
+						});
+
+					return false;
+				}
+
+				async function captureFingerprint() {
+					if (!fingerprintSupported) {
+						fingerprintStatusEl.textContent = "Device does not support fingerprint.";
+						setNotice("Device did not support fingerprint. Please use a device that supports fingerprint.", false);
+						return;
+					}
+
+					captureFingerprintBtn.disabled = true;
+					fingerprintStatusEl.textContent = "Scanning fingerprint...";
+
+					try {
+					// For WebAuthn: use 'localhost' if on localhost, otherwise use hostname
+					let rpId = window.location.hostname;
+					if (rpId === '127.0.0.1' || rpId === '::1') {
+						rpId = 'localhost';
+					}
+					
+					const options = {
+						publicKey: {
+							challenge: new Uint8Array(32),
+							rp: {
+								name: "Phinma Request and Approval System",
+								id: rpId
+							},
+							user: {
+								id: new Uint8Array([1, 2, 3, 4, 5]),
+								name: "coo@phinma.edu.ph",
+								displayName: "COO Approval"
+							},
+							pubKeyCredParams: [
+								{ alg: -7, type: "public-key" },  // ES256
+								{ alg: -257, type: "public-key" }  // RS256
+							],
+							authenticatorSelection: {
+								authenticatorAttachment: "platform",
+									userVerification: "required"
+								},
+								timeout: 60000
+							}
+						};
+
+						const credential = await navigator.credentials.create(options);
+						if (credential) {
+							capturedFingerprint = credential;
+							fingerprintStatusEl.textContent = "✓ Fingerprint captured successfully";
+							setNotice("Fingerprint captured. Click Approve to complete.", true);
+						} else {
+							capturedFingerprint = null;
+							fingerprintStatusEl.textContent = "Fingerprint capture cancelled";
+							setNotice("Fingerprint capture was cancelled", false);
+						}
+					} catch (err) {
+						capturedFingerprint = null;
+						fingerprintStatusEl.textContent = "Error: " + err.message;
+						setNotice("Fingerprint error: " + err.message, false);
+					} finally {
+						captureFingerprintBtn.disabled = false;
+					}
+				}
+
 				function handleAuthMethodChange() {
 					const method = String(authMethodEl.value || "pin").toLowerCase();
 					if (method === "fingerprint") {
+						if (!fingerprintSupported) {
+							setNotice("Device did not support fingerprint. Please use a device that supports fingerprint.", false);
+							authMethodEl.value = "pin";
+							pinRowEl.style.display = "grid";
+							fingerprintRowEl.style.display = "none";
+							return;
+						}
 						pinRowEl.style.display = "none";
-						hintEl.style.display = "block";
+						fingerprintRowEl.style.display = "flex";
+						hintEl.style.display = "none";
 					} else {
 						pinRowEl.style.display = "grid";
+						fingerprintRowEl.style.display = "none";
 						hintEl.style.display = "none";
 					}
 					noticeEl.style.display = "none";
 				}
 
 				authMethodEl.addEventListener("change", handleAuthMethodChange);
+				captureFingerprintBtn.addEventListener("click", captureFingerprint);
+				
+				// Check fingerprint support on page load
+				checkFingerprintSupport();
 				handleAuthMethodChange();
 
 				async function submitDecision(endpoint, successFallback, includeReason) {
@@ -375,6 +523,11 @@
 
 					if (authMethod === "pin" && !/^\d{4}$/.test(pin)) {
 						setNotice("Please enter your 4-digit PIN.", false);
+						return;
+					}
+
+					if (authMethod === "fingerprint" && !capturedFingerprint) {
+						setNotice("Please capture your fingerprint first.", false);
 						return;
 					}
 
@@ -393,6 +546,7 @@
 								auth_method: authMethod,
 								pin: pin,
 								reason: includeReason ? reason : "",
+								fingerprint_data: capturedFingerprint ? "captured" : null
 							}),
 						});
 

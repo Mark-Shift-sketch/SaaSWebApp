@@ -44,6 +44,8 @@ from reportlab.lib.utils import ImageReader as _ImageReader
 from pypdf import PdfReader as _PdfReader, PdfWriter as _PdfWriter
 from flask import Response, stream_with_context
 
+import os
+
 import mysql.connector
 import requests
 import datetime
@@ -153,6 +155,7 @@ def needs_password_rehash(stored_hash):
         return False
 
 app = Flask(__name__)
+
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 
@@ -1352,6 +1355,7 @@ _saas_owner_schema_checked = False
 _bug_reports_schema_checked = False
 _activity_log_schema_checked = False
 _user_saved_signature_schema_checked = False
+_user_saved_fingerprint_schema_checked = False
 _coo_special_approval_schema_checked = False
 _request_type_form_schema_checked = False
 _request_form_submission_schema_checked = False
@@ -2255,6 +2259,57 @@ def is_coo_position_id(cursor, position_id):
         return False
 
 
+def is_user_in_it_approval_team(cursor, conn, user_id, company_id, user_role=None):
+    """Check if a user's position is in the IT approval notification team."""
+    try:
+        user_id = int(user_id or 0)
+        company_id = int(company_id or 0)
+    except (TypeError, ValueError):
+        print(f"[DEBUG] Invalid user_id or company_id: user_id={user_id}, company_id={company_id}")
+        return False
+
+    if user_id <= 0 or company_id <= 0:
+        print(f"[DEBUG] Invalid user_id or company_id: user_id={user_id}, company_id={company_id}")
+        return False
+
+    try:
+        ensure_it_approval_team_schema(cursor, conn)
+        
+        # Check if user's position is in IT approval team
+        cursor.execute("SELECT position_id FROM users WHERE user_id = %s", (user_id,))
+        user_result = cursor.fetchone()
+        if not user_result:
+            print(f"[DEBUG] User not found: user_id={user_id}")
+            return False
+        
+        user_position_id = user_result.get("position_id") if isinstance(user_result, dict) else (user_result[0] if user_result else None)
+        if not user_position_id:
+            print(f"[DEBUG] User has no position_id: user_id={user_id}")
+            return False
+        
+        print(f"[DEBUG] User position_id: {user_position_id} for user_id={user_id}")
+        
+        # Check if this position is in IT approval team for this company
+        cursor.execute(
+            """
+            SELECT COUNT(*) as count
+            FROM it_approval_positions iap
+            WHERE iap.position_id = %s AND iap.company_id = %s
+            LIMIT 1
+            """,
+            (user_position_id, company_id),
+        )
+        result = cursor.fetchone() or {}
+        count = int(result.get("count", 0)) if isinstance(result, dict) else (result[0] if result else 0)
+        print(f"[DEBUG] IT approval position check: user_position_id={user_position_id}, company_id={company_id}, count={count}")
+        return count > 0
+    except Exception as e:
+        print(f"[DEBUG] Exception in is_user_in_it_approval_team: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def queue_coo_if_stage_is_coo(cursor, conn, request_id, stage_position_id, requested_by_email=""):
     """Queue/send COO special approval when a request is currently at a COO stage."""
     if not is_coo_position_id(cursor, stage_position_id):
@@ -2345,6 +2400,87 @@ def ensure_user_saved_signature_schema(cursor, conn):
 
     conn.commit()
     _user_saved_signature_schema_checked = True
+
+
+# FINGERPRINT BIOMETRIC FUNCTIONS (WebAuthn Real Fingerprint Sensor)
+
+def validate_fingerprint_attestation(attestation_object_bytes):
+    """
+    Validate WebAuthn attestation object to ensure real fingerprint sensor was used.
+    Returns True if attestation is valid, False otherwise.
+    """
+    try:
+        import cbor2
+        
+        # Decode the attestation object
+        attestation_obj = cbor2.loads(attestation_object_bytes)
+        
+        # Verify attestation format
+        fmt = attestation_obj.get("fmt")
+        if fmt not in ["none", "packed", "u2f", "android-safetynet", "android-key", "tpm"]:
+            print(f"[Fingerprint] Unknown attestation format: {fmt}")
+            return False
+        
+        # Verify auth data exists
+        auth_data = attestation_obj.get("authData")
+        if not auth_data:
+            print("[Fingerprint] Missing authData in attestation")
+            return False
+        
+        # Check flags (bit 0 = user present, bit 2 = user verified)
+        flags = auth_data[32] if len(auth_data) > 32 else 0
+        user_present = bool(flags & 0x01)
+        user_verified = bool(flags & 0x04)  # This is set when biometric (fingerprint) is used
+        
+        print(f"[Fingerprint] Attestation flags - User Present: {user_present}, User Verified (Biometric): {user_verified}")
+        
+        return user_verified  # Must have biometric verification
+    except Exception as e:
+        print(f"[Fingerprint] Attestation validation error: {str(e)}")
+        return False
+
+
+def store_fingerprint_credential(credential_data_base64):
+    """
+    Store WebAuthn credential data (which proves real fingerprint sensor was used).
+    Returns the raw credential bytes for storage.
+    """
+    try:
+        import base64
+        
+        # Decode the base64 credential
+        credential_json = base64.b64decode(credential_data_base64)
+        return credential_json
+    except Exception as e:
+        print(f"[Fingerprint] Credential storage error: {str(e)}")
+        return None
+
+
+def ensure_user_saved_fingerprint_schema(cursor, conn):
+    global _user_saved_fingerprint_schema_checked
+
+    if _user_saved_fingerprint_schema_checked:
+        return
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_saved_fingerprints (
+            fingerprint_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            company_id INT NULL,
+            fingerprint_data LONGBLOB NOT NULL,
+            finger_position VARCHAR(50) NOT NULL COMMENT 'thumb, index, middle, ring, pinky, etc.',
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_user_fingerprint_position (user_id, finger_position),
+            INDEX idx_user_saved_fingerprints_user (user_id),
+            INDEX idx_user_saved_fingerprints_company (company_id)
+        )
+        """
+    )
+
+    conn.commit()
+    _user_saved_fingerprint_schema_checked = True
 
 
 def ensure_finance_amount_editor_schema(cursor, conn):
@@ -3339,20 +3475,15 @@ def process_coo_special_decision_by_email(cursor, conn, request_id, actor_email,
     pin = str(pin or "").strip()
     decision = str(decision or "").strip().upper()
 
-    if auth_method == "fingerprint":
-        return {
-            "success": False,
-            "error": "Fingerprint approval is not configured yet. Please use PIN.",
-        }, 400
-
-    if auth_method != "pin":
+    if auth_method not in ("fingerprint", "pin"):
         return {"success": False, "error": "Invalid authentication method."}, 400
 
-    if not is_valid_admin_pin(pin):
+    if auth_method == "pin" and not is_valid_admin_pin(pin):
         return {"success": False, "error": "PIN must be exactly 4 digits."}, 400
 
     ensure_admin_pin_schema(cursor, conn)
     ensure_coo_special_approval_schema(cursor, conn)
+    ensure_user_saved_fingerprint_schema(cursor, conn)
 
     cursor.execute(
         """
@@ -3403,65 +3534,84 @@ def process_coo_special_decision_by_email(cursor, conn, request_id, actor_email,
     if not is_coo_user(role_name, position_name):
         return {"success": False, "error": "Forbidden"}, 403
 
-    pin_hash = actor_row.get("admin_pin_hash")
-    failed_attempts = int(actor_row.get("admin_pin_failed_attempts") or 0)
-    is_disabled = bool(int(actor_row.get("admin_pin_disabled") or 0))
+    actor_user_id = actor_row.get("user_id")
+    method_value = "PIN"
 
-    if not pin_hash:
-        return {"success": False, "error": "PIN is not set. Please set your PIN first."}, 400
-
-    if is_disabled:
-        return {
-            "success": False,
-            "error": "PIN is disabled. Reset your PIN in Settings.",
-            "failed_attempts": failed_attempts,
-            "remaining_attempts": 0,
-        }, 423
-
-    if not check_password_hash(pin_hash, pin):
-        new_failed_attempts = min(ADMIN_PIN_MAX_FAILED_ATTEMPTS, failed_attempts + 1)
-        disabled_now = 1 if new_failed_attempts >= ADMIN_PIN_MAX_FAILED_ATTEMPTS else 0
+    # Handle fingerprint authentication
+    if auth_method == "fingerprint":
         cursor.execute(
-            """
-            UPDATE users
-            SET admin_pin_failed_attempts=%s,
-                admin_pin_disabled=%s
-            WHERE user_id=%s
-            """,
-            (new_failed_attempts, disabled_now, actor_row.get("user_id")),
+            "SELECT COUNT(*) as count FROM user_saved_fingerprints WHERE user_id = %s",
+            (actor_user_id,)
         )
-        conn.commit()
-
-        remaining = max(0, ADMIN_PIN_MAX_FAILED_ATTEMPTS - new_failed_attempts)
-        if new_failed_attempts >= ADMIN_PIN_MAX_FAILED_ATTEMPTS:
+        fingerprint_count_result = cursor.fetchone() or {}
+        fingerprint_count = fingerprint_count_result.get("count", 0)
+        
+        if fingerprint_count < 2:
             return {
                 "success": False,
-                "error": "PIN has been disabled after 5 failed attempts. Reset your PIN in Settings.",
-                "failed_attempts": new_failed_attempts,
+                "error": f"Fingerprint authentication requires at least 2 registered fingerprints. You have {fingerprint_count}. Please register more fingerprints in Settings."
+            }, 400
+        
+        method_value = "FINGERPRINT"
+    # Handle PIN authentication
+    else:
+        pin_hash = actor_row.get("admin_pin_hash")
+        failed_attempts = int(actor_row.get("admin_pin_failed_attempts") or 0)
+        is_disabled = bool(int(actor_row.get("admin_pin_disabled") or 0))
+
+        if not pin_hash:
+            return {"success": False, "error": "PIN is not set. Please set your PIN first."}, 400
+
+        if is_disabled:
+            return {
+                "success": False,
+                "error": "PIN is disabled. Reset your PIN in Settings.",
+                "failed_attempts": failed_attempts,
                 "remaining_attempts": 0,
             }, 423
 
-        return {
-            "success": False,
-            "error": f"Incorrect PIN. You have {remaining} attempt(s) remaining.",
-            "failed_attempts": new_failed_attempts,
-            "remaining_attempts": remaining,
-        }, 403
+        if not check_password_hash(pin_hash, pin):
+            new_failed_attempts = min(ADMIN_PIN_MAX_FAILED_ATTEMPTS, failed_attempts + 1)
+            disabled_now = 1 if new_failed_attempts >= ADMIN_PIN_MAX_FAILED_ATTEMPTS else 0
+            cursor.execute(
+                """
+                UPDATE users
+                SET admin_pin_failed_attempts=%s,
+                    admin_pin_disabled=%s
+                WHERE user_id=%s
+                """,
+                (new_failed_attempts, disabled_now, actor_user_id),
+            )
+            conn.commit()
 
-    cursor.execute(
-        """
-        UPDATE users
-        SET admin_pin_failed_attempts=0,
-            admin_pin_disabled=0
-        WHERE user_id=%s
-        """,
-        (actor_row.get("user_id"),),
-    )
+            remaining = max(0, ADMIN_PIN_MAX_FAILED_ATTEMPTS - new_failed_attempts)
+            if new_failed_attempts >= ADMIN_PIN_MAX_FAILED_ATTEMPTS:
+                return {
+                    "success": False,
+                    "error": "PIN has been disabled after 5 failed attempts. Reset your PIN in Settings.",
+                    "failed_attempts": new_failed_attempts,
+                    "remaining_attempts": 0,
+                }, 423
 
-    actor_user_id = actor_row.get("user_id")
+            return {
+                "success": False,
+                "error": f"Incorrect PIN. You have {remaining} attempt(s) remaining.",
+                "failed_attempts": new_failed_attempts,
+                "remaining_attempts": remaining,
+            }, 403
+
+        cursor.execute(
+            """
+            UPDATE users
+            SET admin_pin_failed_attempts=0,
+                admin_pin_disabled=0
+            WHERE user_id=%s
+            """,
+            (actor_user_id,),
+        )
+
     actor_position_id = actor_row.get("position_id")
     actor_email_norm = str(actor_row.get("email") or "").strip().lower()
-    method_value = "PIN"
     advance_result = {"advanced": False, "reason": "not_applicable"}
 
     if decision == "APPROVED":
@@ -7067,7 +7217,112 @@ app.add_url_rule("/verify", "verify_otp", verify_view, methods=["POST"])
 
 
 # Main routes
+
+@app.route('/subscribe', methods=['GET'])
+def subscribe_redirect():
+    flash('Subscription is now accessed via the dashboard.', 'info')
+    return redirect('/dashboard')
+
+@app.route('/api/xendit/checkout', methods=['POST'])
+def xendit_checkout():
+    plan = request.form.get('plan')
+    company_id = session.get('company_id')
+    if not company_id:
+        return 'Not logged in or no company selected', 401
+    
+    amount = 20 if plan == 'monthly' else 200
+    
+    secret_key = (os.environ.get('XENDIT_SECRET_KEY') or '').strip()
+    base_url = (os.environ.get('XENDIT_API_BASE_URL') or 'https://api.xendit.co').strip().rstrip('/')
+    
+    if not secret_key:
+        return 'Xendit not configured', 500
+
+    if secret_key.startswith('xnd_public_') or secret_key.startswith('xnd_pub_'):
+        return 'Xendit public key cannot create invoices. Use a secret API key in XENDIT_SECRET_KEY.', 500
+        
+    import datetime
+    payload = {
+        'external_id': f'sub-{company_id}-{plan}-{int(datetime.datetime.now().timestamp())}',
+        'amount': amount,
+        'description': f'Subscription: {plan} plan',
+        'invoice_duration': 86400,
+        'currency': 'PHP',
+        'success_redirect_url': url_for('dashboard', _external=True)
+    }
+    
+    try:
+        import requests
+        response = requests.post(
+            f"{base_url}/v2/invoices",
+            json=payload,
+            auth=(secret_key, ""),
+            headers={"Content-Type": "application/json"}
+        )
+        data = response.json()
+        if response.ok and 'invoice_url' in data:
+            return redirect(data['invoice_url'])
+        else:
+            return f"Failed to create invoice: {data}", 500
+    except Exception as e:
+        return f"Error: {e}", 500
+
+@app.route('/api/xendit/webhook', methods=['POST'])
+def xendit_webhook():
+    callback_token = request.headers.get('x-callback-token')
+    data = request.json
+    
+    if not data:
+        return 'No payload', 400
+        
+    status = data.get('status')
+    external_id = data.get('external_id', '')
+    
+    if status == 'PAID' and external_id.startswith('sub-'):
+        parts = external_id.split('-')
+        if len(parts) >= 3:
+            company_id = parts[1]
+            plan = parts[2]
+            
+            import pymysql
+            from config import Config
+            conn = pymysql.connect(
+                host=Config.MYSQL_HOST,
+                user=Config.MYSQL_USER,
+                password=Config.MYSQL_PASSWORD,
+                db=Config.MYSQL_DB
+            )
+            cur = conn.cursor()
+            
+            monthly_price = 20.00 if plan == 'monthly' else 200.00
+            seats_limit = 100 
+            requests_limit = 1000
+            interval_str = "1 MONTH" if plan == 'monthly' else "1 YEAR"
+            
+            cur.execute(
+                f"""
+                INSERT INTO tenant_subscriptions 
+                (company_id, plan_name, subscription_status, monthly_price, seats_limit, requests_limit, ends_at)
+                VALUES (%s, %s, %s, %s, %s, %s, DATE_ADD(NOW(), INTERVAL {interval_str}))
+                ON DUPLICATE KEY UPDATE
+                plan_name=VALUES(plan_name),
+                subscription_status=VALUES(subscription_status),
+                monthly_price=VALUES(monthly_price),
+                seats_limit=VALUES(seats_limit),
+                requests_limit=VALUES(requests_limit),
+                ends_at=DATE_ADD(NOW(), INTERVAL {interval_str})
+                """,
+                (company_id, plan.upper(), 'ACTIVE', monthly_price, seats_limit, requests_limit)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+    return jsonify({'status': 'ok'}), 200
+
 @app.route("/")
+
+
 def home():
     if "email" not in session:
         return render_template("landing.html")
@@ -12912,6 +13167,319 @@ def save_my_saved_signature():
         )
         conn.commit()
         return jsonify({"success": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+#FINGERPRINT ENDPOINTS 
+
+@app.get("/api/annotations/my-fingerprints")
+@login_required
+def get_my_saved_fingerprints():
+    """Get all saved fingerprints for current user"""
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    actor_user_id = session.get("user_id")
+    actor_company_id = session.get("company_id")
+
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    try:
+        actor_company_id = int(actor_company_id) if actor_company_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_company_id = None
+
+    print(f"[DEBUG] GET /api/annotations/my-fingerprints: user_id={actor_user_id}, company_id={actor_company_id}")
+
+    if actor_user_id is None:
+        print(f"[DEBUG] user_id is None, returning empty list")
+        return jsonify({"fingerprints": []})
+
+    # Get user role from session
+    actor_role = session.get("role", "").strip()
+    print(f"[DEBUG] User role from session: {actor_role}")
+
+    # First get user's details for debugging
+    conn_debug = get_connection()
+    cursor_debug = conn_debug.cursor(dictionary=True)
+    try:
+        cursor_debug.execute("SELECT user_id, position_id FROM users WHERE user_id = %s", (actor_user_id,))
+        user_row = cursor_debug.fetchone()
+        if user_row:
+            print(f"[DEBUG] User details: position_id={user_row.get('position_id')}")
+        else:
+            print(f"[DEBUG] User not found in database: {actor_user_id}")
+    finally:
+        cursor_debug.close()
+        conn_debug.close()
+
+    # Check if user is in IT approval team
+    conn_check = get_connection()
+    cursor_check = conn_check.cursor()
+    try:
+        is_in_team = is_user_in_it_approval_team(cursor_check, conn_check, actor_user_id, actor_company_id, actor_role)
+        print(f"[DEBUG] is_user_in_it_approval_team returned: {is_in_team}")
+        if not is_in_team:
+            print(f"[DEBUG] User not in IT approval team, returning 403")
+            return jsonify({"error": "Forbidden - fingerprint feature only available for IT approval team members"}), 403
+    finally:
+        cursor_check.close()
+        conn_check.close()
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_user_saved_fingerprint_schema(cursor, conn)
+        cursor.execute(
+            """
+            SELECT fingerprint_id, finger_position, created_at
+            FROM user_saved_fingerprints
+            WHERE user_id = %s
+              AND (%s IS NULL OR company_id = %s OR company_id IS NULL)
+            ORDER BY finger_position
+            """,
+            (actor_user_id, actor_company_id, actor_company_id),
+        )
+        rows = cursor.fetchall() or []
+        return jsonify({
+            "fingerprints": rows,
+            "count": len(rows)
+        })
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.post("/api/annotations/my-fingerprints")
+@login_required
+def save_my_fingerprint():
+    """Save a new fingerprint for the current user"""
+    if "email" not in session:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    actor_user_id = session.get("user_id")
+    actor_company_id = session.get("company_id")
+    actor_role = session.get("role", "").strip()
+
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    try:
+        actor_company_id = int(actor_company_id) if actor_company_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_company_id = None
+
+    if actor_user_id is None:
+        return jsonify({"success": False, "error": "Invalid user."}), 400
+
+    # Check if user is in IT approval team
+    conn_check = get_connection()
+    cursor_check = conn_check.cursor()
+    try:
+        if not is_user_in_it_approval_team(cursor_check, conn_check, actor_user_id, actor_company_id, actor_role):
+            return jsonify({"success": False, "error": "Forbidden - fingerprint feature only available for IT approval team members"}), 403
+    finally:
+        cursor_check.close()
+        conn_check.close()
+
+    data = request.get_json(silent=True) or {}
+    fingerprint_data = data.get("fingerprint_data")
+    finger_position = str(data.get("finger_position") or "").strip()
+
+    if not fingerprint_data or not finger_position:
+        return jsonify({"success": False, "error": "Missing fingerprint_data or finger_position"}), 400
+
+    # Validate finger position
+    valid_positions = {"thumb", "index", "middle", "ring", "pinky"}
+    if finger_position.lower() not in valid_positions:
+        return jsonify({"success": False, "error": f"Invalid finger_position. Must be one of: {', '.join(valid_positions)}"}), 400
+
+    # Process and validate WebAuthn attestation (proves real fingerprint sensor was used)
+    fingerprint_bytes = None
+    if isinstance(fingerprint_data, str):
+        if fingerprint_data.startswith("data:"):
+            try:
+                fingerprint_data = fingerprint_data.split(",", 1)[1]
+            except Exception:
+                pass
+        
+        # Decode and validate WebAuthn credential
+        try:
+            import base64
+            credential_json = base64.b64decode(fingerprint_data)
+            credential_obj = json.loads(credential_json)
+            
+            # Extract and validate attestation object
+            attestation_object_array = credential_obj.get('response', {}).get('attestationObject', [])
+            if not attestation_object_array:
+                return jsonify({"success": False, "error": "Missing attestation object - fingerprint sensor may not be supported"}), 400
+            
+            attestation_bytes = bytes(attestation_object_array)
+            
+            # Validate that real fingerprint sensor was used
+            if not validate_fingerprint_attestation(attestation_bytes):
+                return jsonify({"success": False, "error": "Fingerprint sensor validation failed - please ensure you used your fingerprint to unlock the sensor"}), 400
+            
+            # Store the full credential data as proof of fingerprint capture
+            fingerprint_bytes = credential_json
+            
+        except json.JSONDecodeError:
+            return jsonify({"success": False, "error": "Invalid credential data format"}), 400
+        except Exception as e:
+            print(f"[Fingerprint] Credential processing error: {str(e)}")
+            return jsonify({"success": False, "error": f"Failed to process fingerprint credential: {str(e)}"}), 400
+    else:
+        return jsonify({"success": False, "error": "Invalid fingerprint data format"}), 400
+
+    if not fingerprint_bytes:
+        return jsonify({"success": False, "error": "Failed to process fingerprint sensor data"}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_user_saved_fingerprint_schema(cursor, conn)
+        
+        # Check how many fingerprints are already registered
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM user_saved_fingerprints WHERE user_id = %s",
+            (actor_user_id,)
+        )
+        count_result = cursor.fetchone() or {}
+        existing_count = count_result.get("count", 0)
+        
+        if existing_count >= 10:  # Allow up to 10 fingerprints per user
+            return jsonify({"success": False, "error": "Maximum 10 fingerprints allowed per user"}), 400
+        
+        cursor.execute(
+            """
+            INSERT INTO user_saved_fingerprints (user_id, company_id, fingerprint_data, finger_position)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE fingerprint_data = VALUES(fingerprint_data), updated_at = CURRENT_TIMESTAMP
+            """,
+            (int(actor_user_id), actor_company_id, fingerprint_bytes, finger_position.lower()),
+        )
+        conn.commit()
+        return jsonify({"success": True, "message": "Real fingerprint sensor data captured and saved successfully"})
+    except Exception as e:
+        conn.rollback()
+        print(f"[Fingerprint] Save error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.delete("/api/annotations/my-fingerprints/<int:fingerprint_id>")
+@login_required
+def delete_my_fingerprint(fingerprint_id):
+    """Delete a specific fingerprint"""
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    actor_user_id = session.get("user_id")
+    actor_company_id = session.get("company_id")
+    actor_role = session.get("role", "").strip()
+
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    try:
+        actor_company_id = int(actor_company_id) if actor_company_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_company_id = None
+
+    if actor_user_id is None:
+        return jsonify({"success": False, "error": "Invalid user."}), 400
+
+    # Check if user is in IT approval team
+    conn_check = get_connection()
+    cursor_check = conn_check.cursor()
+    try:
+        if not is_user_in_it_approval_team(cursor_check, conn_check, actor_user_id, actor_company_id, actor_role):
+            return jsonify({"success": False, "error": "Forbidden - fingerprint feature only available for IT approval team members"}), 403
+    finally:
+        cursor_check.close()
+        conn_check.close()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        ensure_user_saved_fingerprint_schema(cursor, conn)
+        cursor.execute(
+            "DELETE FROM user_saved_fingerprints WHERE fingerprint_id = %s AND user_id = %s",
+            (int(fingerprint_id), int(actor_user_id))
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return jsonify({"success": False, "error": "Fingerprint not found"}), 404
+        return jsonify({"success": True, "message": "Fingerprint deleted successfully"})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.delete("/api/annotations/my-fingerprints")
+@login_required
+def delete_all_my_fingerprints():
+    """Delete all fingerprints for the current user"""
+    if "email" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    actor_user_id = session.get("user_id")
+    actor_company_id = session.get("company_id")
+    actor_role = session.get("role", "").strip()
+
+    try:
+        actor_user_id = int(actor_user_id) if actor_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_user_id = None
+
+    try:
+        actor_company_id = int(actor_company_id) if actor_company_id not in (None, "") else None
+    except (TypeError, ValueError):
+        actor_company_id = None
+
+    if actor_user_id is None:
+        return jsonify({"success": False, "error": "Invalid user."}), 400
+
+    # Check if user is in IT approval team
+    conn_check = get_connection()
+    cursor_check = conn_check.cursor()
+    try:
+        if not is_user_in_it_approval_team(cursor_check, conn_check, actor_user_id, actor_company_id, actor_role):
+            return jsonify({"success": False, "error": "Forbidden - fingerprint feature only available for IT approval team members"}), 403
+    finally:
+        cursor_check.close()
+        conn_check.close()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        ensure_user_saved_fingerprint_schema(cursor, conn)
+        cursor.execute(
+            "DELETE FROM user_saved_fingerprints WHERE user_id = %s",
+            (int(actor_user_id),)
+        )
+        conn.commit()
+        deleted_count = cursor.rowcount
+        return jsonify({"success": True, "message": f"{deleted_count} fingerprint(s) deleted"})
     except Exception as e:
         conn.rollback()
         return jsonify({"success": False, "error": str(e)}), 500
@@ -19175,9 +19743,6 @@ def make_grid_overlay_for_pdf(pdf_path: str, out_path: str, step: int = 40) -> N
     with open(out_path, "wb") as f:
         writer.write(f)
 
-
-
-
     
 apply_global_rate_limits()
 
@@ -19185,8 +19750,10 @@ apply_global_rate_limits()
 if __name__ == "__main__":
     debug_mode = (os.environ.get("FLASK_DEBUG", "false").strip().lower() == "false")
     app.run(
-        host=os.environ.get("HOST", "127.0.0.1").strip() or "127.0.0.1",
+        host=os.environ.get("HOST", "localhost").strip() or "localhost",
         port=int(os.environ.get("PORT", "5000")),
         debug=debug_mode,
         use_reloader=debug_mode,
     ) 
+
+

@@ -3,16 +3,16 @@ from config import Email, password, get_connection
 import smtplib
 from email.message import EmailMessage
 import hmac
-import random
+import secrets
 import os
 
 
-ALLOWED_EMAIL_DOMAIN = str(os.environ.get("ALLOWED_EMAIL_DOMAIN", "phinmaed.com")).strip().lower()
+ALLOWED_EMAIL_DOMAIN = str(os.environ.get("ALLOWED_EMAIL_DOMAIN")).strip().lower()
 EMAIL_DOMAIN_HELPER_MESSAGE = str(
-    os.environ.get("EMAIL_DOMAIN_HELPER_MESSAGE", "Please use youre phinmaed email")
+    os.environ.get("EMAIL_DOMAIN_HELPER_MESSAGE")
 ).strip()
-SMTP_HOST = str(os.environ.get("SMTP_HOST", "smtp.gmail.com")).strip()
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_HOST = str(os.environ.get("SMTP_HOST")).strip()
+SMTP_PORT = int(os.environ.get("SMTP_PORT"))
 
 
 def _is_allowed_system_email(email):
@@ -85,7 +85,7 @@ def request_signup_otp(email):
         if rs and rs[0] < 120:
             return f"Please wait {120 - rs[0]} seconds before resending", False
 
-        otp = random.randint(100000, 999999)
+        otp = secrets.randbelow(900000) + 100000
 
         cursor.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
         cursor.execute(

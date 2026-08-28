@@ -56,7 +56,7 @@ import re
 import textwrap
 import base64
 import time
-import random
+import secrets
 import hashlib
 from threading import Thread
 from io import BytesIO, StringIO
@@ -279,24 +279,20 @@ def apply_global_rate_limits():
 FRONTEND_ORIGINS = [o.strip() for o in (os.environ.get("FRONTEND_ORIGINS", "")).split(",") if o.strip()]
 if not FRONTEND_ORIGINS:
     FRONTEND_ORIGINS = [
-        "http://localhost",
-        "http://127.0.0.1",
+        r"^http://localhost(:\d+)?$",
+        r"^http://127\.0\.0\.1(:\d+)?$",
     ]
 CORS(
     app,
-    resources={r"/api/*": {"origins": [
-        r"^http://localhost(:\d+)?$",
-        r"^http://127\.0\.0\.1(:\d+)?$",
-        r"^http://192\.168\.0\.102(:\d+)?$",
-    ]}},
+    resources={r"/api/*": {"origins": FRONTEND_ORIGINS}},
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization"],
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
 )
 
 # Upload Size Limit
-MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB"))
-MAX_BUG_IMAGE_MB = int(os.environ.get("MAX_BUG_IMAGE_MB"))
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "20"))
+MAX_BUG_IMAGE_MB = int(os.environ.get("MAX_BUG_IMAGE_MB", "5"))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 # Allowed Upload Types 
 ALLOWED_EXTENSIONS = {"pdf"}
@@ -2248,6 +2244,16 @@ def is_coo_position_id(cursor, position_id):
         return False
 
     try:
+        # Check if this position is in the special action positions (IT approval positions table)
+        cursor.execute(
+            "SELECT COUNT(*) AS count FROM it_approval_positions WHERE position_id = %s",
+            (normalized_position_id,)
+        )
+        row = cursor.fetchone() or {}
+        count = int(row.get("count", 0)) if isinstance(row, dict) else (row[0] if row else 0)
+        if count > 0:
+            return True
+
         cursor.execute(
             "SELECT COALESCE(position_name, '') AS position_name FROM positions WHERE position_id = %s LIMIT 1",
             (normalized_position_id,),
@@ -2321,6 +2327,7 @@ def queue_coo_if_stage_is_coo(cursor, conn, request_id, stage_position_id, reque
             conn,
             request_id,
             requested_by_email=requested_by_email,
+            stage_position_id=stage_position_id
         )
     except Exception:
         logger.exception("queue_coo_if_stage_is_coo failed")
@@ -2868,7 +2875,7 @@ def ensure_coo_special_approval_schema(cursor, conn):
     _coo_special_approval_schema_checked = True
 
 
-def get_coo_notification_emails(cursor):
+def get_coo_notification_emails(cursor, stage_position_id=None):
     recipients = set()
 
     env_recipients = str(os.environ.get("COO_NOTIFICATION_EMAILS") or "").strip()
@@ -2879,8 +2886,7 @@ def get_coo_notification_emails(cursor):
                 recipients.add(email)
 
     try:
-        cursor.execute(
-            """
+        query = """
             SELECT DISTINCT LOWER(TRIM(u.email)) AS email
             FROM users u
             LEFT JOIN positions p ON p.position_id = u.position_id
@@ -2892,10 +2898,17 @@ def get_coo_notification_emails(cursor):
                  OR LOWER(COALESCE(p.position_name, '')) LIKE '%chief operating officer%'
                  OR LOWER(COALESCE(r.role_name, '')) LIKE '%coo%'
                  OR LOWER(COALESCE(r.role_name, '')) LIKE '%chief operating officer%'
+        """
+        params = []
+        if stage_position_id:
+            query += " OR u.position_id = %s "
+            params.append(stage_position_id)
+            
+        query += """
               )
             ORDER BY email ASC
-            """
-        )
+        """
+        cursor.execute(query, tuple(params) if params else None)
         for row in (cursor.fetchall() or []):
             email = str((row or {}).get("email") or "").strip().lower()
             if email:
@@ -2958,7 +2971,7 @@ def send_coo_special_access_notifications(request_id, recipients, primary_target
     return notified
 
 
-def queue_coo_special_approval(cursor, conn, request_id, requested_by_email=""):
+def queue_coo_special_approval(cursor, conn, request_id, requested_by_email="", stage_position_id=None):
     ensure_coo_special_approval_schema(cursor, conn)
 
     cursor.execute(
@@ -2974,7 +2987,7 @@ def queue_coo_special_approval(cursor, conn, request_id, requested_by_email=""):
             "reason": "already_approved",
         }
 
-    recipients = get_coo_notification_emails(cursor)
+    recipients = get_coo_notification_emails(cursor, stage_position_id=stage_position_id)
     existing_requested_to = str(existing.get("requested_to_email") or "").strip().lower()
     if existing_requested_to and existing_requested_to not in recipients:
         recipients.append(existing_requested_to)
@@ -3266,6 +3279,7 @@ def special_access_resend_email(request_id):
                 conn,
                 request_id,
                 requested_by_email=(session.get("email") or ""),
+                stage_position_id=stage_position_id
             )
             if not queue_result.get("queued"):
                 return jsonify(
@@ -3297,7 +3311,11 @@ def special_access_resend_email(request_id):
                 }
             ), 400
 
-        recipients = get_coo_notification_emails(cursor)
+        cursor.execute("SELECT stage_position_id FROM requests WHERE request_id = %s LIMIT 1", (request_id,))
+        req_row = cursor.fetchone() or {}
+        req_stage_position_id = req_row.get("stage_position_id")
+
+        recipients = get_coo_notification_emails(cursor, stage_position_id=req_stage_position_id)
         requested_to_email = str(row.get("requested_to_email") or "").strip().lower()
         if requested_to_email and requested_to_email not in recipients:
             recipients.append(requested_to_email)
@@ -4719,7 +4737,7 @@ def process_budget_request_xendit(cursor, conn, request_id):
 
     target_department = (row.get("target_department") or "").strip() or "Unknown Department"
 
-    external_id = f"budget_req_{request_id}_{int(time.time())}_{random.randint(1000,9999)}"
+    external_id = f"budget_req_{request_id}_{int(time.time())}_{secrets.token_hex(4)}"
     payload = {
         "external_id": external_id,
         "amount": float(amount_value),
@@ -7170,7 +7188,7 @@ def send_admin_pin_otp(cursor, conn, email):
         wait_for = ADMIN_PIN_OTP_COOLDOWN_SECONDS - age_seconds
         return False, f"Please wait {wait_for} seconds before requesting a new OTP."
 
-    otp = random.randint(100000, 999999)
+    otp = secrets.randbelow(900000) + 100000
     cursor.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
     cursor.execute("INSERT INTO otp_codes (email, otp) VALUES (%s, %s)", (email, otp))
     conn.commit()
@@ -7230,7 +7248,27 @@ def xendit_checkout():
     if not company_id:
         return 'Not logged in or no company selected', 401
     
-    amount = 20 if plan == 'monthly' else 200
+    # Auto-detect country via IP-API to set currency and amount
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    if client_ip and ',' in client_ip:
+        client_ip = client_ip.split(',')[0].strip()
+
+    country_code = 'PH'
+    if client_ip and not client_ip.startswith('127.') and not client_ip.startswith('192.168.') and not client_ip.startswith('10.'):
+        try:
+            import requests
+            ip_resp = requests.get(f"http://ip-api.com/json/{client_ip}?fields=countryCode", timeout=3)
+            if ip_resp.ok:
+                country_code = ip_resp.json().get("countryCode", "PH")
+        except Exception as e:
+            logger.warning(f"Failed to detect country: {e}")
+
+    if country_code == 'PH':
+        currency = 'PHP'
+        amount = 1000 if plan == 'monthly' else 10000
+    else:
+        currency = 'USD'
+        amount = 20 if plan == 'monthly' else 200
     
     secret_key = (os.environ.get('XENDIT_SECRET_KEY') or '').strip()
     base_url = (os.environ.get('XENDIT_API_BASE_URL') or 'https://api.xendit.co').strip().rstrip('/')
@@ -7243,11 +7281,11 @@ def xendit_checkout():
         
     import datetime
     payload = {
-        'external_id': f'sub-{company_id}-{plan}-{int(datetime.datetime.now().timestamp())}',
+        'external_id': f'sub-{company_id}-{plan}-{currency}-{int(datetime.datetime.now().timestamp())}',
         'amount': amount,
-        'description': f'Subscription: {plan} plan',
+        'description': f'Subscription: {plan} plan ({currency})',
         'invoice_duration': 86400,
-        'currency': 'PHP',
+        'currency': currency,
         'success_redirect_url': url_for('dashboard', _external=True)
     }
     
@@ -7280,21 +7318,21 @@ def xendit_webhook():
     
     if status == 'PAID' and external_id.startswith('sub-'):
         parts = external_id.split('-')
-        if len(parts) >= 3:
+        # Format is sub-{company_id}-{plan}-{currency}-{timestamp}
+        if len(parts) >= 4:
             company_id = parts[1]
             plan = parts[2]
+            currency = parts[3]
             
-            import pymysql
-            from config import Config
-            conn = pymysql.connect(
-                host=Config.MYSQL_HOST,
-                user=Config.MYSQL_USER,
-                password=Config.MYSQL_PASSWORD,
-                db=Config.MYSQL_DB
-            )
+            from config import get_connection
+            conn = get_connection()
             cur = conn.cursor()
             
-            monthly_price = 20.00 if plan == 'monthly' else 200.00
+            if currency == 'PHP':
+                monthly_price = 1000.00 if plan == 'monthly' else 10000.00
+            else:
+                monthly_price = 20.00 if plan == 'monthly' else 200.00
+
             seats_limit = 100 
             requests_limit = 1000
             interval_str = "1 MONTH" if plan == 'monthly' else "1 YEAR"
@@ -15039,6 +15077,7 @@ def update_request_status(request_id):
                         conn,
                         request_id,
                         requested_by_email=(actor_email or ""),
+                        stage_position_id=stage_position_id
                     )
                 except Exception as _coo_stage_queue_err:
                     print("coo queue error (stage transition):", _coo_stage_queue_err)
@@ -18002,6 +18041,10 @@ def change_password():
 
     current_pass = request.form.get("current_password")
     new_pass = request.form.get("new_password")
+    ok, message = validate_password_strength(new_pass)
+    if not ok:
+        flash(message, "danger")
+        return redirect(url_for("udashboard"))
     email = session["email"]
 
     conn = get_connection()
@@ -18017,6 +18060,9 @@ def change_password():
                 "UPDATE users SET password=%s WHERE email=%s", (new_hash, email)
             )
             conn.commit()
+            flash("Password changed successfully.", "success")
+        else:
+            flash("Current password is incorrect.", "danger")
     finally:
         cursor.close()
         conn.close()
@@ -19748,7 +19794,7 @@ apply_global_rate_limits()
 
 
 if __name__ == "__main__":
-    debug_mode = (os.environ.get("FLASK_DEBUG", "false").strip().lower() == "false")
+    debug_mode = os.environ.get("FLASK_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
     app.run(
         host=os.environ.get("HOST", "localhost").strip() or "localhost",
         port=int(os.environ.get("PORT", "5000")),

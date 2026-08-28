@@ -409,8 +409,8 @@
           </div>
 
             <div class="form-card" style="grid-column: 1 / -1; margin-top:12px;">
-              <h3>Approval Notification Team (IT)</h3>
-              <p class="subtitle" style="margin-top:4px;">Select which positions should receive approval links/notifications from IT routing.</p>
+              <h3>Special Approval Actions</h3>
+              <p class="subtitle" style="margin-top:4px;">Select which positions should receive a special approval link (like COO) when it is their turn to approve.</p>
 
               <form action="{{ url_for('it_add_approval_team_position') }}" method="POST" style="margin: 12px 0 18px 0;">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

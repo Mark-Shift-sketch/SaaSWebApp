@@ -1,40 +1,118 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="csrf-token" content="{{ csrf_token() }}">
-    <meta charset="UTF-8">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sign Up</title>
-    <link rel="stylesheet" href="/static/login.css">
+  <title>Sign Up</title>
+  <link rel="stylesheet" href="/static/login.css">
   <link rel="stylesheet" href="/static/signup.css">
-    <script src="/static/login.js"></script>
+  <script src="/static/login.js" defer></script>
 </head>
 
-<body class="signup-page
-            <button type="button" id="verifyOtpBtn">Verify OTP</button>
+<body class="signup-page">
+  <div class="page-shell">
+    <div class="container">
+      <section class="logo-side" aria-label="PHINMA COC">
+        <img class="panel-art" src="/static/replace.jpeg" alt="">
+      </section>
+
+      <section class="form-side signup-form-side" aria-labelledby="signup-title">
+        <h1 class="title" id="signup-title">Create Account</h1>
+        <p class="subtitle">Use your PHINMA Education email to get started.</p>
+        <div class="heading-line"></div>
+
+        {% if message %}
+          <p class="em">{{ message }}</p>
+        {% endif %}
+
+        <form action="{{ url_for('signup') }}" method="POST" novalidate>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+          <label class="field-label" for="company_slug">Company</label>
+          <div class="input-wrap select-wrap">
+            <span class="input-icon">&#127970;</span>
+            <select class="dept" id="company_slug" name="company_slug" required>
+              <option value="">Select Company</option>
+              {% for company in companies or [] %}
+                {% set slug = company.company_slug or company['company_slug'] %}
+                {% set name = company.company_name or company['company_name'] %}
+                <option value="{{ slug }}" {% if slug == selected_company_slug %}selected{% endif %}>{{ name }}</option>
+              {% endfor %}
+            </select>
           </div>
-        </div>
 
-        <p class="terms">By signing up, you agree to the Terms and Conditions of PHINMA COC</p>
+           <label class="field-label" for="dept">Department</label>
+          <div class="input-wrap select-wrap">
+            <span class="input-icon">&#128188;</span>
+            <select class="dept" id="dept" name="dept" required>
+              <option value="">Select Department</option>
+              {% for department in departments or [] %}
+                {% set dept_name = department.dept_name or department['dept_name'] %}
+                <option value="{{ dept_name }}" {% if dept_name == selected_dept_name %}selected{% endif %}>{{ dept_name }}</option>
+              {% endfor %}
+            </select>
+          </div>
 
-        <button class="signup" id="signupBtn" type="submit" disabled>
-          Create Account
-        </button>
+          <label class="field-label" for="email">Email</label>
+          <div class="input-wrap">
+            <span class="input-icon">@</span>
+            <input id="email" name="email" type="text" autocomplete="email" placeholder="name@phinmaed.com" value="{{ request.form.get('email', '') }}" required>
+          </div>
 
-        <div class="sign">
-          <p>
-            Already have an account?
-            <a href="{{ url_for('login') }}" class="a">Sign In</a>
-          </p>
-        </div>
+          <div class="otp-action-row">
+            <button class="go" id="getOtpBtn" type="button">Get OTP</button>
+            <span class="otp-countdown" id="otpCountdown" aria-live="polite"></span>
+          </div>
 
-        <p class="security-note">Secure · Protected · PHINMA Network</p>
-      </form>
-    </section>
+          <label class="field-label" for="password">Password</label>
+          <div class="input-wrap">
+            <span class="input-icon">&#128274;</span>
+            <input id="password" name="pass" type="password" autocomplete="new-password" placeholder="Password" required>
+            <span class="TP"><img src="/static/eye.png" alt="Show password"></span>
+          </div>
+
+          <label class="field-label" for="confirm-password">Confirm Password</label>
+          <div class="input-wrap">
+            <span class="input-icon">&#128274;</span>
+            <input id="confirm-password" name="cpass" type="password" autocomplete="new-password" placeholder="Confirm password" required>
+            <span class="TP"><img src="/static/eye.png" alt="Show password"></span>
+          </div>
+
+          <p class="terms">By signing up, you agree to the Terms and Conditions of PHINMA COC.</p>
+
+          <button class="signup" id="signupBtn" type="submit" disabled>Create Account</button>
+
+          <div class="sign">
+            <p>
+              Already have an account?
+              <a href="{{ url_for('login') }}" class="a">Sign In</a>
+            </p>
+          </div>
+
+          <p class="security-note">Secure &middot; Protected &middot; PHINMA Network</p>
+        </form>
+      </section>
+    </div>
   </div>
-</div>
 
-<script>
+  <div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-labelledby="otp-title">
+    <div class="confirmation-modal">
+      <h2 id="otp-title">Verify OTP</h2>
+      <p>Enter the 6-digit code sent to your email.</p>
+      <div class="otpE">
+        <input class="Eotp" type="text" inputmode="numeric" maxlength="1" aria-label="OTP digit 1">
+        <input class="Eotp" type="text" inputmode="numeric" maxlength="1" aria-label="OTP digit 2">
+        <input class="Eotp" type="text" inputmode="numeric" maxlength="1" aria-label="OTP digit 3">
+        <input class="Eotp" type="text" inputmode="numeric" maxlength="1" aria-label="OTP digit 4">
+        <input class="Eotp" type="text" inputmode="numeric" maxlength="1" aria-label="OTP digit 5">
+        <input class="Eotp" type="text" inputmode="numeric" maxlength="1" aria-label="OTP digit 6">
+      </div>
+      <button type="button" id="verifyOtpBtn">Verify OTP</button>
+    </div>
+  </div>
+
+  <script>
 function getCsrfToken() {
   const el = document.querySelector('meta[name="csrf-token"]');
   return el ? el.getAttribute("content") : "";
@@ -78,7 +156,7 @@ function setupOtpInputs() {
       if (e.key === "Backspace" && !inp.value && inputs[idx - 1]) {
         inputs[idx - 1].focus();
       }
-      if (e.key === "ArrowLeft" && inputs[idx - 1]) inputs[idx - 1].focus();
+       if (e.key === "ArrowLeft" && inputs[idx - 1]) inputs[idx - 1].focus();
       if (e.key === "ArrowRight" && inputs[idx + 1]) inputs[idx + 1].focus();
       if (e.key === "Enter") document.getElementById("verifyOtpBtn")?.click();
     });
@@ -109,7 +187,6 @@ document.addEventListener("DOMContentLoaded", () => {
   const companyEl = document.getElementById("company_slug");
   const deptEl = document.getElementById("dept");
   const otpCountdownEl = document.getElementById("otpCountdown");
-  const loginLink = document.querySelector('a[href*="login"]');
   let otpCountdownTimer = null;
   let otpSecondsRemaining = 0;
 
@@ -142,15 +219,15 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-
   function showOverlay() {
+    if (!overlay) return;
     overlay.style.display = "flex";
     const first = document.querySelector(".Eotp");
     if (first) first.focus();
   }
 
   function hideOverlay() {
-    overlay.style.display = "none";
+    if (overlay) overlay.style.display = "none";
   }
 
   if (overlay) {
@@ -246,8 +323,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (getOtpBtn) getOtpBtn.disabled = false;
       return;
     }
-
-    if (getOtpBtn) getOtpBtn.disabled = true;
+  if (getOtpBtn) getOtpBtn.disabled = true;
     otpCountdownTimer = setInterval(() => {
       otpSecondsRemaining = Math.max(0, otpSecondsRemaining - 1);
       renderOtpCountdown();
@@ -298,7 +374,8 @@ document.addEventListener("DOMContentLoaded", () => {
         if (msg.toLowerCase().includes("otp sent") || msg.toLowerCase().includes("success")) {
           showOverlay();
         }
-      } catch (err) {
+
+         } catch (err) {
         showSignupStatus("Network error: " + err, "error");
       } finally {
         if (otpSecondsRemaining <= 0) getOtpBtn.disabled = false;
@@ -334,8 +411,7 @@ document.addEventListener("DOMContentLoaded", () => {
           showSignupStatus(msg || `Verify failed (${res.status})`, "error");
           return;
         }
-
-        showSignupStatus(msg || "OTP verified.", "success");
+  showSignupStatus(msg || "OTP verified.", "success");
 
         if (msg.toLowerCase().includes("verified")) {
           hideOverlay();

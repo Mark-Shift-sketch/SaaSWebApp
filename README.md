@@ -1,32 +1,32 @@
-# SaaS Web App - Request Submission & Approval Platform
+# SaaS Web App (FinalWebAPP) - Multi-Tier Request Submission & Approval Platform
 
-[![Python](https://img.shields.io/badge/Backend-Flask%203.x-blue)](https://flask.palletsprojects.com/)
-[![Mobile](https://img.shields.io/badge/Mobile-Flutter%20%2F%20Dart-02569B)](https://flutter.dev/)
-[![Database](https://img.shields.io/badge/Database-MySQL-4479A1)](https://www.mysql.com/)
-[![Security](https://img.shields.io/badge/Auth-Argon2id%20%2B%20OTP%20%2B%20PIN-green)](#security--authentication-model)
+[![Python Backend](https://img.shields.io/badge/Backend-Flask%203.x-blue.svg)](https://flask.palletsprojects.com/)
+[![Mobile App](https://img.shields.io/badge/Mobile-Flutter%20%2F%20Dart-02569B.svg)](https://flutter.dev/)
+[![Database](https://img.shields.io/badge/Database-MySQL%208.0-4479A1.svg)](https://www.mysql.com/)
+[![Security](https://img.shields.io/badge/Security-Argon2id%20%2B%20OTP%20%2B%20PIN-green.svg)](#-security--authentication-model)
+[![Payments](https://img.shields.io/badge/Payments-Xendit%20Gateway-FF6B00.svg)](https://www.xendit.co/)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen.svg)](LICENSE)
 
-**SaaS Web App (FinalWebAPP)** is an enterprise-grade multi-tier request submission, workflow routing, approval management, and PDF digital signature platform. It features a robust Python/Flask backend, responsive web dashboards tailored for multiple organizational roles (User, Reviewer/Dean, Admin, SuperAdmin, GSD, IT), an interactive web-based PDF annotation system, and a cross-platform Flutter mobile client.
+**SaaS Web App (FinalWebAPP)** is an enterprise-grade multi-tier request submission, workflow routing, approval management, and PDF digital signature platform. It combines a robust Python Flask backend, multi-role web dashboards (User, Reviewer/Dean, Admin, SuperAdmin, GSD, IT, SaaS Admin), an interactive browser-based PDF annotation system, a multi-tenant SaaS management suite with subscription payments (Xendit integration), and a cross-platform Flutter mobile client.
 
 ---
 
 ## 📋 Table of Contents
-1. [System Architecture & Component Relationships](#-system-architecture--component-relationships)
-2. [Component Breakdown](#-component-breakdown)
-3. [Request Workflow & State Machine](#-request-workflow--state-machine)
-4. [Security & Authentication Model](#-security--authentication-model)
-5. [Repository Directory Structure](#-repository-directory-structure)
-6. [Prerequisites & Environment Setup](#-prerequisites--environment-setup)
-7. [Running the Application](#-running-the-application)
-8. [Backend API Reference](#-backend-api-reference)
-9. [Automated Testing & Load Testing](#-automated-testing--load-testing)
-10. [License](#-license)
+1. [🏗️ System Architecture](#️-system-architecture)
+2. [🔄 Request Approval Workflow & State Machine](#-request-approval-workflow--state-machine)
+3. [🛠️ Prerequisites & Environment Setup](#️-prerequisites--environment-setup)
+4. [🚀 Running the Application](#-running-the-application)
+5. [📡 API Endpoints & Reference](#-api-endpoints--reference)
+6. [🔒 Security & Authentication Model](#-security--authentication-model)
+7. [📂 Directory Structure & Component Matrix](#-directory-structure--component-matrix)
+8. [🧪 Automated Testing & Performance Load Testing](#-automated-testing--performance-load-testing)
+9. [📄 License](#-license)
 
 ---
 
-## 🏗️ System Architecture & Component Relationships
+## 🏗️ System Architecture
 
-The platform is designed around a centralized, asynchronous Flask REST & Web Application core that serves web clients via session-authenticated Jinja2 views, mobile clients via bearer token JSON APIs, and communicates with a relational MySQL database, an SMTP server, and a PDF annotation engine.
+The platform follows a decoupled, multi-tier architecture powered by a centralized Python/Flask application server (`main.py`) communicating with a MySQL relational database, an SMTP email server, an in-browser PDF annotation engine, and a Flutter mobile app.
 
 ### High-Level Architecture Diagram
 
@@ -34,182 +34,92 @@ The platform is designed around a centralized, asynchronous Flask REST & Web App
 graph TD
     %% User Interfaces
     subgraph Frontend Tier
-        WEB["🌐 Jinja2 Web Dashboards\n(User, Dean, Admin, GSD, IT)"]
+        WEB["🌐 Jinja2 Web Dashboards\n(User, Reviewer, Admin, GSD, IT, SaaS Admin)"]
         MOB["📱 Flutter Mobile App\n(moble/app - Android/iOS/Web)"]
-        ANNOTATOR["✍️ Interactive PDF Annotator\n(annotate.html + pdf.min.js)"]
+        ANNOTATOR["✍️ Interactive PDF Annotator\n(annotate.html + PDF.js + Canvas)"]
     end
 
     %% Application Server
-    subgraph Application Tier (Flask Engine)
-        MAIN["⚡ main.py\n(Flask Core, Middleware, Routers, Security)"]
-        CFG["⚙️ config.py\n(Env Loader & DB Pool)"]
-        OTP["✉️ sendotp.py\n(OTP Service & SMTP Mailer)"]
+    subgraph Application Tier (Flask Core)
+        MAIN["⚡ main.py\n(Flask App Core, Middleware, Routers, Security)"]
+        CFG["⚙️ config.py\n(Env Config & DB Connection Pool)"]
+        OTP["✉️ sendotp.py\n(OTP Service, Transactional Mailer & CC)"]
     end
 
-    %% Persistence & Services
-    subgraph Data & External Services
-        DB[("🛢️ MySQL Database\n(users, requests, workflows, logs)")]
-        SMTP["📧 SMTP Server\n(Email Notifications & OTP)"]
+    %% Data & External Services
+    subgraph Data & External Services Tier
+        DB[("🛢️ MySQL Database\n(users, requests, workflows, logs, saas)")]
+        SMTP["📧 SMTP Server\n(OTP Issue, Notifications, Attachment Mailing)"]
         FS["📁 File Storage\n(Uploaded Attachments & Signed PDFs)"]
+        XENDIT["💳 Xendit Payment Gateway\n(Subscriptions & Webhook Events)"]
     end
 
-    %% Relationships
-    WEB -->|Session Cookies & CSRF| MAIN
-    MOB -->|Bearer Token & REST API| MAIN
-    ANNOTATOR -->|Annotation JSON / Canvas| MAIN
+    %% Component Interconnections
+    WEB -->|HTTP/HTTPS Session + CSRF| MAIN
+    MOB -->|Bearer Token & REST JSON API| MAIN
+    ANNOTATOR -->|Annotation JSON Payload| MAIN
     MAIN --> CFG
     CFG --> DB
     MAIN --> OTP
-    OTP -->|Sends Emails / OTPs| SMTP
-    MAIN -->|Reads / Writes Data| DB
-    MAIN -->|Store & Stamp PDFs| FS
+    OTP -->|Sends Emails & OTPs| SMTP
+    MAIN -->|Reads / Writes SQL| DB
+    MAIN -->|Reads / Writes Uploads & Signed PDFs| FS
+    MAIN -->|Checkout & Webhooks| XENDIT
 ```
 
-### Component Relationship Matrix
+### Core Architecture Components
 
-| Component | Connected To | Communication Protocol / Interface | Responsibility / Interaction |
+| Component | Architecture Role | Tech Stack / Protocol | Primary Responsibilities |
 | :--- | :--- | :--- | :--- |
-| **Flask Backend (`main.py`)** | MySQL DB, Web Client, Mobile Client, SMTP, PDF Engine | HTTP/HTTPS REST, Jinja2, SQL, SMTP | Central controller: handles authentication, role routing, request lifecycle, PIN checks, PDF signature stamping, and activity logging. |
-| **Web Frontend (`templates/` & `static/`)** | Flask Backend (`main.py`) | HTML5, JavaScript (Fetch API), Jinja2 templates, CSS3 | Role-specific dashboards for Users, Deans/Reviewers, Admins, GSD, and IT personnel with live filter tables, status toasts, and modal forms. |
-| **Flutter Mobile App (`moble/app/`)** | Flask Backend (`/api/mobile/*`) | JSON over HTTP/HTTPS, Bearer Token Auth | Mobile client for standard users to register with OTP, submit requests, view real-time status updates, check notifications, and track activity logs. |
-| **MySQL Database (`config.py`)** | Flask Backend (`main.py`) | `mysql-connector-python` DB Driver | Relational storage for users, request records, multi-level reviewer/approver routing tables, audit trails (`activity_logs`), notifications, and OTP codes. |
-| **OTP & Email Engine (`sendotp.py`)** | Flask Backend, SMTP Server | SMTP Protocol (TLS/SSL) | Sends 6-digit verification codes for signup and sensitive Admin PIN operations, and dispatches automated status updates and CC email notifications with signed PDF attachments. |
-| **PDF Annotation Engine (`annotate.html`)** | Flask Backend (`/api/request/<id>/annotate`) | HTML5 Canvas, PDF.js, PyMuPDF / ReportLab | Enables reviewers/admins to visually annotate, highlight, draw signatures on PDF attachments, and generate tamper-sealed signed PDFs. |
+| **Flask Server (`main.py`)** | Application & API Gateway | Python 3.10+, Flask, Flask-Limiter, Argon2id | Main controller handling routes, session management, RBAC, PIN security, workflow routing, and PDF stamping. |
+| **Database Pool (`config.py`)** | Data Persistence Layer | MySQL 8.0+, `mysql-connector-python` | Database connection management for request states, user credentials, workflow steps, audit logs, and SaaS billing. |
+| **OTP & Mailer (`sendotp.py`)** | Communication Subsystem | Python `smtplib`, MIME Email, OTP logic | Generates 6-digit OTP codes, enforces cooldown timer, dispatches notification emails with signed PDF attachments. |
+| **PDF Canvas Annotator** | Client Subsystem | HTML5 Canvas, PDF.js, PyMuPDF, ReportLab | Interactive document reviewer page where approvers highlight text, draw signatures, and burn stamps onto PDFs. |
+| **Flutter Mobile App (`moble/`)** | Mobile Client Tier | Flutter 3.x / Dart, REST API | Mobile client for standard users to submit requests, view status updates, and manage profile notifications. |
+| **Payment Gateway** | SaaS Billing Integrator | Xendit REST API & Webhooks | Handles recurring plan subscriptions, billing checkouts, and automatic tenant account status updates via webhooks. |
 
 ---
 
-## 🧩 Component Breakdown
+## 🔄 Request Approval Workflow & State Machine
 
-### 1. Flask Backend Engine (`main.py`, `config.py`, `sendotp.py`)
-- **`main.py`**: Monolithic Flask server housing security headers, rate limiting (Flask-Limiter), authentication blueprints, role permission guards, request submission routes, multi-stage approval logic, admin PIN verification, signed PDF processing, and mobile API endpoints.
-- **`config.py`**: Manages environment variables and creates MySQL database connections via `get_connection()`.
-- **`sendotp.py`**: Handles OTP generation, cooldown enforcement, expiration checking, and transactional email dispatches.
-
-### 2. Multi-Role Web Dashboards (`templates/` & `static/`)
-- **User Dashboard (`templates/user.html`, `static/user/user.js`)**: Enables end-users to submit new requests with attachments, view request progress, receive notifications, and verify completion.
-- **Dean / Reviewer Dashboard (`templates/dean.html`, `static/dean/dean.js`)**: Allows deans and department reviewers to review incoming request queues, approve, reject, or send back requests with comments.
-- **Admin & Executive Dashboard (`templates/admin.html`, `static/admin/admin.js`)**: SuperAdmin/Admin command center for high-value request approvals, PIN-protected amount modifications, CC dispatches, workflow management, and report generation with Chart.js.
-- **GSD Dashboard (`templates/gsddashboard.html`, `static/gsd/gsd.js`)**: General Services Division view for tracking item copies, shipping logistics, and material distribution.
-- **IT Administration (`templates/IT.html`, `static/IT.css`)**: System administration portal for user account creation, department/position management, and system-wide metric tracking.
-
-### 3. PDF Annotation & Signature Subsystem (`templates/annotate.html`)
-- Allows reviewers to open uploaded PDF attachments in a web-based canvas viewer powered by PDF.js.
-- Supports digital drawing signatures, text annotations, and approval stamps.
-- Merges annotation vectors into original PDFs on the server to produce signed, audit-ready PDF documents.
-
-### 4. Cross-Platform Flutter Mobile Client (`moble/app/`)
-- **`lib/main.dart`**: Entry point with session gating and token verification.
-- **`lib/login_page.dart`**: Mobile login, signup, and mobile OTP verification UI.
-- **`lib/api_service.dart`**: Platform-aware HTTP client interfacing with backend `/api/mobile/*` endpoints.
-- **`lib/homepage.dart`**: Navigation shell featuring Dashboard, Notifications, and Settings tabs.
-
----
-
-## 🔄 Request Workflow & State Machine
-
-Requests undergo a strict multi-tier review and approval lifecycle before final completion:
+Requests undergo a multi-tier review and approval lifecycle:
 
 ```mermaid
 stateDiagram-v2
     [*] --> Draft: User Prepares Request
-    Draft --> Submitted: User Submits Request + PDF
+    Draft --> Submitted: User Submits Form + PDF Attachment
     
-    Submitted --> ReviewerStage: Route to Stage 1 Reviewer(s)
+    Submitted --> ReviewerStage: Route to Tier-1 Reviewer (Dean / Supervisor)
     
     state ReviewerStage {
         [*] --> ReviewPending
         ReviewPending --> ReviewApproved: Reviewer Approves
         ReviewPending --> SentBack: Reviewer Sends Back with Notes
-        ReviewPending --> Rejected: Reviewer Rejects
+        ReviewPending --> Rejected: Reviewer Rejects Request
     }
 
-    SentBack --> Submitted: User Updates & Resubmits
+    SentBack --> Submitted: User Edits & Resubmits Request
 
-    ReviewApproved --> ApproverStage: Route to Stage 2 Approver(s) / Admin
+    ReviewApproved --> ApproverStage: Route to Tier-2 Approver / Admin / Executive
     
     state ApproverStage {
         [*] --> ApprovalPending
-        ApprovalPending --> AdminPINVerification: Amount Edit Requested (Requires Admin PIN)
+        ApprovalPending --> AdminPINVerification: Amount Edit Requested (Requires 2FA Admin PIN)
         AdminPINVerification --> ApprovalPending: PIN Verified & Amount Updated
-        ApprovalPending --> FinalApproved: Admin / Exec Approves
+        ApprovalPending --> OneClickTokenAction: Executive Email Token Sent (COO Approval)
+        OneClickTokenAction --> FinalApproved: Approved via Web / Email Link
+        ApprovalPending --> FinalApproved: Approved by Admin
         ApprovalPending --> Rejected: Admin Rejects
     }
 
-    FinalApproved --> AnnotatedPDF: (Optional) Admin Annotates & Signs PDF
-    AnnotatedPDF --> Completed: User / Admin Confirms Completion
+    FinalApproved --> PDFStamping: (Optional) Reviewer / Admin Annotates & Digitally Signs PDF
+    PDFStamping --> Completed: User / Admin Marks Complete
     FinalApproved --> Completed: Direct Completion
     
-    Completed --> EmailDispatched: Trigger CC Email + Signed PDF Attachment
-    Rejected --> EmailDispatched: Trigger Rejection Notification
+    Completed --> EmailNotification: Dispatch CC Email + Signed PDF Attachment
+    Rejected --> EmailNotification: Dispatch Rejection Email
     
-    EmailDispatched --> [*]
-```
-
----
-
-## 🔒 Security & Authentication Model
-
-1. **Authentication Schemes**:
-   - **Web**: HTTP-Only, SameSite, Secure session cookies with CSRF tokens on all POST requests.
-   - **Mobile**: Bearer Token-based authentication saved in encrypted device storage (`shared_preferences`).
-2. **Password Security**: Argon2id password hashing with custom salt, parameter tuning, and automatic re-hashing on login.
-3. **Admin PIN Security**: High-value request amount edits require 2-Factor verification via an Admin PIN and email OTP fallback.
-4. **Rate Limiting**: Configured via Flask-Limiter to protect `/login`, `/send-otp`, `/verify`, and sensitive API endpoints against brute-force attacks.
-5. **File Upload Security**: Strict MIME type validation, file size caps (e.g. 20MB limit), and PDF header signature checks.
-6. **HTTP Security Headers**: Enforced global response headers including `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, and Strict Content Security Policy (CSP).
-
----
-
-## 📂 Repository Directory Structure
-
-```
-SaasWebApp/
-├── README.md                          # Root Project Documentation
-├── LICENSE                            # MIT License File
-├── requirements.txt                   # Backend Python Dependencies
-└── SaaSWebApp/                        # Main Application Package Directory
-    ├── main.py                        # Monolithic Flask Server Core & API Routes
-    ├── config.py                      # Database Connection Factory & Env Loader
-    ├── sendotp.py                     # OTP Generation & SMTP Email Utility
-    ├── Dockerfile                     # Container Deployment Configuration
-    ├── .env.example                   # Template Environment Variables File
-    ├── locustfile.py                  # Locust Load Testing Script
-    │
-    ├── docs/                          # Architectural & Technical Documentation
-    │   ├── SYSTEM_DOCUMENTATION.md    # Complete System Specification
-    │   └── FILE_INDEX.md              # File-level Responsibility Mapping
-    │
-    ├── templates/                     # Jinja2 HTML Templates
-    │   ├── login.html                 # Login Page
-    │   ├── signup.html                # Signup with OTP Verification
-    │   ├── user.html                  # User Dashboard & Request Creation Modal
-    │   ├── dean.html                  # Dean/Reviewer Dashboard
-    │   ├── admin.html                 # Admin Dashboard & Workflow Manager
-    │   ├── gsddashboard.html          # GSD Department Dashboard
-    │   ├── IT.html                    # IT Administration Portal
-    │   └── annotate.html              # PDF Annotation & Digital Signature UI
-    │
-    ├── static/                        # Web Static Assets (CSS, JS, Fonts)
-    │   ├── admin/                     # Admin Dashboard Scripts & Styles
-    │   ├── dean/                      # Dean Dashboard Scripts & Styles
-    │   ├── gsd/                       # GSD Dashboard Scripts & Styles
-    │   ├── user/                      # User Dashboard Scripts & Styles
-    │   ├── alltoast/                  # Global Toast Notification Utility
-    │   ├── vendor/                    # Vendor JS Libraries (Lucide icons, etc.)
-    │   └── pdf.min.js                 # Client-side PDF Renderer
-    │
-    ├── moble/                         # Mobile Client Workspace
-    │   └── app/                       # Flutter Mobile Application
-    │       ├── pubspec.yaml           # Flutter Dependencies & Assets Config
-    │       └── lib/                   # Dart Source Code
-    │           ├── main.dart          # Entrypoint & Session Gate
-    │           ├── login_page.dart    # Mobile Auth & OTP Screen
-    │           ├── homepage.dart      # Mobile Navigation Shell
-    │           └── api_service.dart   # Backend REST API Client
-    │
-    └── tests/                         # Pytest Automated Test Suite
-        ├── conftest.py                # Test Fixtures & App Setup
-        └── test_app.py                # Route & Authentication Tests
+    EmailNotification --> [*]
 ```
 
 ---
@@ -217,115 +127,360 @@ SaasWebApp/
 ## 🛠️ Prerequisites & Environment Setup
 
 ### Prerequisites
-- **Python**: Version 3.10 or higher
-- **MySQL Server**: Version 8.0 or higher
-- **Flutter SDK**: Version 3.x (for mobile application)
-- **Git**: For version control
+Before starting, ensure you have the following software installed:
+- **Python**: Version 3.10+
+- **MySQL Server**: Version 8.0+
+- **Flutter SDK**: Version 3.x (Required only for building/running the mobile app)
+- **Git**: For cloning the repository
 
-### 1. Clone & Environment Configuration
+---
+
+### Step 1: Clone Repository & Create Environment File
+
 ```bash
 # Clone the repository
 git clone https://github.com/your-username/SaasWebApp.git
 cd SaasWebApp/SaaSWebApp
 
-# Copy environment template
+# Create environment configuration file from template
 cp .env.example .env
 ```
 
-Edit `.env` and fill in your environment settings:
+---
+
+### Step 2: Configure Environment Variables (`.env`)
+
+Open `.env` in a text editor and update the fields:
+
 ```ini
+# Application Runtime Configuration
 FLASK_DEBUG=true
 PORT=5000
-SECRET_KEY=your-super-secret-key
+SECRET_KEY=your-super-secret-production-key-here
+
+# Database Configuration
 DB_HOST=localhost
+DB_PORT=3306
 DB_USER=root
-DB_PASSWORD=your-db-password
+DB_PASSWORD=your_mysql_password
 DB_NAME=sysdb
 
+# Email / SMTP Credentials (Gmail, SendGrid, etc.)
+email=your-system-email@gmail.com
+pass=your-app-specific-password
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
-SMTP_EMAIL=your-email@example.com
-SMTP_PASSWORD=your-app-password
+
+# Security & Session Controls
+SESSION_COOKIE_SAMESITE=Lax
+SESSION_COOKIE_SECURE=false
+PERMANENT_SESSION_LIFETIME=86400
+
+# Rate Limiting Settings
+RATE_LIMIT_DEFAULT_DAY=1000 per day
+RATE_LIMIT_DEFAULT_HOUR=200 per hour
+RATE_LIMIT_STORAGE_URI=memory://
+
+# CORS Frontend Origins
+FRONTEND_ORIGINS=http://localhost:3000,http://127.0.0.1:5000
+
+# Payment Integration (Xendit)
+XENDIT_SECRET_KEY=xnd_development_...
+XENDIT_WEBHOOK_VERIFICATION_TOKEN=whsec_...
 ```
 
-### 2. Backend Virtual Environment Setup
+---
+
+### Step 3: MySQL Database Initialization
+
+1. Start your MySQL Server service.
+2. Create the database schema:
+   ```sql
+   CREATE DATABASE IF NOT EXISTS sysdb CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   ```
+3. Runtime database tables and schema migrations (e.g. `users`, `requests`, `roles`, `departments`, `request_workflow_reviewers`, `contact_messages`, `system_runtime_settings`) are checked and initialized automatically by `main.py` on application startup.
+
+---
+
+### Step 4: Setup Python Backend Virtual Environment
+
 ```bash
-# Create virtual environment
+# Navigate to the application root directory
+cd SaaSWebApp
+
+# Create a virtual environment
 python -m venv .venv
 
-# Activate virtual environment
-# On Windows:
+# Activate the virtual environment
+# On Windows (PowerShell / Command Prompt):
 .venv\Scripts\activate
-# On Linux/macOS:
+
+# On Linux / macOS:
 source .venv/bin/activate
 
-# Install dependencies
+# Upgrade pip and install dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+---
+
+### Step 5: Setup Flutter Mobile Client (Optional)
+
+```bash
+cd SaaSWebApp/moble/app
+
+# Download Flutter dependencies
+flutter pub get
+
+# Check attached devices / emulators
+flutter devices
+
+# Run Flutter mobile app
+flutter run
+```
+
+---
+
+### Step 6: Docker Deployment (Optional)
+
+You can containerize and launch the Flask application using Docker:
+
+```bash
+cd SaaSWebApp
+
+# Build the Docker image
+docker build -t saas-webapp:latest .
+
+# Run the container mapping port 5000
+docker run -d --name saas_app -p 5000:5000 --env-file .env saas-webapp:latest
 ```
 
 ---
 
 ## 🚀 Running the Application
 
-### 1. Launching the Flask Backend
+### 1. Launching the Backend Server
+
+With your virtual environment activated:
+
 ```bash
 cd SaaSWebApp
 python main.py
 ```
-The server will start on `http://127.0.0.1:5000`.
 
-### 2. Launching the Flutter Mobile Client
-```bash
-cd SaaSWebApp/moble/app
+The application server will boot up at `http://127.0.0.1:5000`.
 
-# Fetch dependencies
-flutter pub get
+### 2. Initial Administrative Logins
 
-# Run on connected device or emulator
-flutter run
+Upon first launch, you can access the web application by navigating to `http://127.0.0.1:5000/login`.
+- **System Web Portal**: `/login`
+- **IT Management Portal**: `/IT`
+- **SaaS SuperAdmin Management**: `/saas-admin`
+
+---
+
+## 📡 API Endpoints & Reference
+
+### 1. Web Page Routes & Dashboards
+
+| Route | Method | Access Level | Description |
+| :--- | :--- | :--- | :--- |
+| `/` | `GET` | Public | Root landing page / redirect handler |
+| `/login` | `GET`, `POST` | Public | User authentication page & login form |
+| `/signup` | `GET`, `POST` | Public | User self-registration with OTP verification |
+| `/forgot-password` | `GET`, `POST` | Public | Password reset request form |
+| `/reset-password/<token>`| `GET`, `POST` | Public | Token-validated password reset form |
+| `/udashboard` | `GET` | User | End-user dashboard for submitting & tracking requests |
+| `/dean` | `GET` | Reviewer/Dean | Tier-1 reviewer approval queue dashboard |
+| `/admin` | `GET` | Admin / Exec | Tier-2 approver dashboard & request manager |
+| `/gsd_dashboard` | `GET` | GSD | General Services Division shipment & copy tracking |
+| `/IT` | `GET` | IT Admin | User management, department & position setup |
+| `/saas-admin` | `GET` | SuperAdmin | SaaS multi-tenant tenant management & billing analytics |
+| `/annotate/<request_id>`| `GET` | Reviewer/Admin | Browser-based interactive PDF annotation canvas |
+| `/logout` | `GET` | Authenticated | Clears user session and logs out |
+
+---
+
+### 2. Authentication & Security APIs
+
+| Endpoint | Method | Payload | Description |
+| :--- | :--- | :--- | :--- |
+| `/send-otp` | `POST` | `{ "email": "user@example.com" }` | Issues 6-digit OTP code with cooldown check |
+| `/verify` | `POST` | `{ "email": "...", "otp": "123456" }` | Validates submitted OTP code |
+| `/change_password` | `POST` | `{ "old_password": "...", "new_password": "..." }` | Change password for logged-in user |
+| `/api/admin/pin/status` | `GET` | None | Returns Admin 2FA PIN setup status |
+| `/api/admin/pin/setup` | `POST` | `{ "pin": "1234" }` | Configures initial Admin security PIN |
+| `/api/admin/pin/request-otp`| `POST` | None | Sends verification OTP to admin email for PIN actions |
+| `/api/admin/pin/verify-otp` | `POST` | `{ "otp": "..." }` | Verifies OTP for PIN management |
+| `/api/admin/pin/change` | `POST` | `{ "old_pin": "...", "new_pin": "..." }` | Changes existing Admin PIN |
+
+---
+
+### 3. Request Submission & Workflow Approval APIs
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/create_request` | `POST` | Submits new request with PDF attachment & monetary amount |
+| `/api/user_dashboard` | `GET` | Fetches dashboard stats & submitted requests for logged-in user |
+| `/api/requests` | `GET`, `POST` | Queries or creates requests |
+| `/api/request/<id>/status` | `POST` | Updates request status (`Approved`, `Rejected`, `SentBack`) |
+| `/api/request/<id>/amount` | `POST` | Updates request amount (**Requires Admin PIN verification**) |
+| `/api/request/<id>/workflow` | `GET`, `POST` | Fetches or updates multi-stage reviewer routing |
+| `/api/request/<id>/send-back` | `POST` | Sends request back to applicant with correction notes |
+| `/api/request/<id>/complete` | `POST` | Marks request as completed and triggers notification dispatches |
+| `/api/request/<id>/cc` | `POST` | Dispatches CC email with signed attachment to extra recipients |
+
+---
+
+### 4. Executive One-Click Token Approval APIs
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/coo-action/<token>` | `GET` | Renders token-secured executive approval action page |
+| `/coo-action/<token>/attachment` | `GET` | Securely views attachment associated with executive token |
+| `/api/coo-action/<token>/approve` | `POST` | Executes one-click approval via email token |
+| `/api/coo-action/<token>/reject` | `POST` | Executes one-click rejection via email token |
+
+---
+
+### 5. PDF Digital Signature & Annotation APIs
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/request/<id>/annotations` | `GET`, `POST` | Retrieves or saves raw JSON annotation vectors |
+| `/api/request/<id>/annotate` | `POST` | Merges annotations & signatures into PDF to generate signed copy |
+| `/download_attachment/<id>` | `GET` | Downloads uploaded request attachment PDF |
+
+---
+
+### 6. SaaS Multi-Tenancy & Subscriptions (Xendit Integration)
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/subscribe` | `GET` | Subscription checkout landing page |
+| `/api/xendit/checkout` | `POST` | Initializes Xendit payment checkout session |
+| `/api/xendit/webhook` | `POST` | Xendit webhook listener for payment verification |
+| `/api/saas/companies` | `GET` | Returns list of registered SaaS tenant companies |
+| `/api/saas/companies/<id>/status` | `POST` | Updates tenant company status (`Active`/`Suspended`) |
+| `/api/saas/subscription/plans` | `GET` | Returns available subscription plans |
+| `/api/saas/subscription/assign` | `POST` | Assigns subscription plan to tenant company |
+| `/api/saas/analytics` | `GET` | Retrieves SaaS revenue, subscription counts & tenant analytics |
+
+---
+
+### 7. Flutter Mobile Client APIs (`/api/mobile/*`)
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/mobile/departments` | `GET` | Returns active departments list |
+| `/api/mobile/send-otp` | `POST` | Dispatches signup OTP code for mobile client |
+| `/api/mobile/verify-otp` | `POST` | Validates mobile signup OTP code |
+| `/api/mobile/signup` | `POST` | Registers new user from Flutter mobile app |
+| `/api/mobile/login` | `POST` | Authenticates mobile user and returns Bearer token |
+| `/api/mobile/user-profile` | `GET` | Fetches mobile user profile data |
+| `/api/mobile/requests` | `GET` | Fetches mobile user requests list & live statuses |
+| `/api/mobile/notifications` | `GET` | Fetches user notifications for mobile client |
+
+---
+
+## 🔒 Security & Authentication Model
+
+1. **Dual Authentication Scheme**:
+   - **Web Application**: HTTP-Only, SameSite (`Lax`), Secure session cookies paired with `Flask-WTF` CSRF token protection on all state-modifying POST routes.
+   - **Mobile Client**: Bearer token authentication stored securely on device via `shared_preferences`.
+2. **Password Cryptography**: Password storage powered by **Argon2id** hashing (via Werkzeug/Argon2) with dynamic salt generation and automatic hash upgrade on login.
+3. **Admin PIN & 2-Factor Action Authorization**:
+   - Sensitive operations (such as modifying monetary values on active requests) require an Admin PIN.
+   - PIN setup and modifications require email-based OTP 2FA.
+4. **File Upload Security**:
+   - Enforces strict file size limits (20MB maximum).
+   - Validates MIME type, file extension, and inspects PDF binary headers (`%PDF-`) to prevent shell upload attacks.
+5. **Rate Limiting**: Integrated `Flask-Limiter` with storage backend to prevent brute-force attacks on auth endpoints (`/login`, `/send-otp`, `/verify`).
+6. **HTTP Security Headers**: Global response middleware injects:
+   - `X-Content-Type-Options: nosniff`
+   - `X-Frame-Options: DENY`
+   - `Referrer-Policy: strict-origin-when-cross-origin`
+   - `Content-Security-Policy (CSP)`
+
+---
+
+## 📂 Directory Structure & Component Matrix
+
+```
+SaasWebApp/
+├── LICENSE                            # MIT License File
+├── requirements.txt                   # Backend Python Dependencies
+├── README.md                          # Root Project Documentation
+└── SaaSWebApp/                        # Main Application Root
+    ├── main.py                        # Monolithic Flask Server Core & API Handlers
+    ├── config.py                      # Database Connection Factory & Env Loader
+    ├── sendotp.py                     # OTP Service, Mailer & Attachment Dispatcher
+    ├── Dockerfile                     # Docker Deployment Configuration
+    ├── .env.example                   # Environment Variables Template
+    ├── locustfile.py                  # Locust Load Testing Suite
+    ├── requirements.txt               # Backend Python Dependencies
+    │
+    ├── docs/                          # Architecture & Developer Documentation
+    │   ├── SYSTEM_DOCUMENTATION.md    # Detailed Specification Document
+    │   └── FILE_INDEX.md              # Codebase Mapping & Component Roles
+    │
+    ├── templates/                     # Jinja2 HTML Frontends
+    │   ├── login.html                 # Login Page Template
+    │   ├── signup.html                # Signup Page with OTP Modal
+    │   ├── user.html                  # User Request Dashboard Template
+    │   ├── dean.html                  # Reviewer / Dean Approval Queue Template
+    │   ├── admin.html                 # Admin Dashboard & Workflow Manager
+    │   ├── gsddashboard.html          # GSD Shipment & Material Tracking
+    │   ├── IT.html                    # IT Administration Portal
+    │   ├── annotate.html              # PDF Annotation & Digital Signature Page
+    │   └── saas_admin.html            # SaaS SuperAdmin Management Dashboard
+    │
+    ├── static/                        # Web Static Assets (JS, CSS, Fonts)
+    │   ├── admin/                     # Admin Dashboard Scripts & Styles
+    │   ├── dean/                      # Dean Dashboard Scripts & Styles
+    │   ├── gsd/                       # GSD Dashboard Scripts & Styles
+    │   ├── user/                      # User Dashboard Scripts & Styles
+    │   ├── alltoast/                  # Global Toast Notification Utility
+    │   └── pdf.min.js                 # Browser-side PDF Renderer Engine
+    │
+    ├── moble/                         # Mobile Client Workspace
+    │   └── app/                       # Flutter Cross-Platform Client
+    │       ├── pubspec.yaml           # Flutter Dependencies
+    │       └── lib/                   # Dart Client Source Code
+    │           ├── main.dart          # Mobile Entrypoint & Session Router
+    │           ├── login_page.dart    # Mobile Auth & OTP Screen
+    │           ├── homepage.dart      # Navigation Shell & Tab Views
+    │           └── api_service.dart   # REST API Client for Flask Backend
+    │
+    └── tests/                         # Automated Testing Workspace
+        ├── conftest.py                # Pytest App Setup & Fixtures
+        └── test_app.py                # Unit & Integration Tests
 ```
 
 ---
 
-## 📡 Backend API Reference Overview
+## 🧪 Automated Testing & Performance Load Testing
 
-| Endpoint | Method | Access | Description |
-| :--- | :--- | :--- | :--- |
-| `/login` | `GET`, `POST` | Public | Web user authentication |
-| `/signup` | `GET`, `POST` | Public | Web signup with OTP verification |
-| `/send-otp` | `POST` | Public | Issue 6-digit OTP to user email |
-| `/verify` | `POST` | Public | Validate OTP code |
-| `/udashboard` | `GET` | User | Web user request submission dashboard |
-| `/dean` | `GET` | Reviewer/Dean | Reviewer approval queue |
-| `/admin` | `GET` | Admin | SuperAdmin / Admin command center |
-| `/IT` | `GET` | IT | User, role, department, & position management |
-| `/annotate/<request_id>` | `GET` | Reviewer/Admin | Interactive PDF canvas annotation page |
-| `/api/requests` | `GET`, `POST` | Authenticated | List or create requests |
-| `/api/request/<id>/status` | `POST` | Reviewer/Admin | Update request approval status |
-| `/api/request/<id>/amount` | `POST` | Admin | Update request monetary amount (PIN Protected) |
-| `/api/request/<id>/annotate` | `POST` | Reviewer/Admin | Save annotations & generate signed PDF |
-| `/api/reports` | `GET` | Admin | Fetch request metrics & chart data |
-| `/api/mobile/login` | `POST` | Mobile | Mobile token authentication |
-| `/api/mobile/requests` | `GET` | Mobile | Fetch mobile user requests |
-| `/api/mobile/notifications`| `GET` | Mobile | Fetch user notifications |
+### Running Automated Unit Tests
+To run the `pytest` test suite:
 
----
-
-## 🧪 Automated Testing & Load Testing
-
-### Running Unit & Integration Tests
-Execute the pytest suite from the project root:
 ```bash
+cd SaaSWebApp
 pytest
 ```
 
-### Running Performance Load Tests
-Run Locust to simulate concurrent user interactions:
+---
+
+### Running Performance Load Testing
+To run performance load tests with `Locust`:
+
 ```bash
 cd SaaSWebApp
 locust -f locustfile.py --host=http://localhost:5000
 ```
-Open `http://localhost:8089` in your web browser to configure virtual user load.
+
+Open `http://localhost:8089` in your web browser to start sending simulated traffic to the server.
 
 ---
 
